@@ -1,7 +1,7 @@
 <!-- 左栏双卡片：上 = 品牌 + 四大模块切换；下 = 当前模块的总览概况
      概况数据全部来自真实统计：skills 走轻量 IPC（skills_side_stats）、sync 走 usage store、
      proxy 走号池/Keys/网关状态、memory 走记忆中枢统计 IPC；模块顺序自定义在「设置 · 通用」
-     版本 / 署名 / 亮暗 / 设置入口统一收在最左下角 -->
+     版本 / 署名 / GitHub / 亮暗 / 设置入口统一收在最左下角 -->
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { ElMessageBox } from "element-plus";
@@ -12,6 +12,7 @@ import { useUsageStore } from "../stores/usage";
 import * as syncApi from "../api/sync";
 import { formatToken, formatCost, formatInteger, timeAgo } from "../composables/useFormat";
 import { fmtBalance, balanceUnit } from "../views/proxy/format";
+import { isUnusableChannel } from "../views/proxy/channelHealth";
 import type { DeviceMeta } from "../types/sync";
 import type { ModuleKey } from "../types";
 import * as api from "../api/ipc";
@@ -43,6 +44,10 @@ function refreshStatsForEnabled(only?: string) {
   if (want("skills") && modOn("skills")) refreshSkillsStats();
   if (want("memory") && modOn("memory")) refreshMemoryStats();
   if (want("usage") && modOn("usage")) ensureUsageSummary();
+}
+/** 侧栏 GitHub 入口：交由主进程 shell.openExternal 用默认浏览器打开仓库 */
+function openRepo() {
+  api.openRepoPage().catch(() => {});
 }
 onMounted(async () => {
   refreshStatsForEnabled();
@@ -232,6 +237,12 @@ const channels = ref<ProxyChannelRow[]>([]);
 async function refreshChannels() {
   channels.value = (await api.proxyPool().catch(() => channels.value)) || [];
 }
+// 死渠道（有号已过期 且 在线余额合计 0）不占侧栏那一行：它们不可用却和可用渠道长得一样，
+// 渠道一多就把真正要看的挤下去。判据落在 channelHealth.ts 里，理由是那条规则错了会静默藏号。
+const visibleChannels = computed(() => {
+  const now = Date.now();
+  return channels.value.filter((c) => !isUnusableChannel(c.summary, now));
+});
 const fmtDay = (ts: number) => {
   if (!ts) return "-";
   const d = new Date(ts);
@@ -258,7 +269,7 @@ const OVERVIEW = computed<Record<ModuleKey, { title: string; hint: string }>>(()
     hint: skillsStats.value ? `${skillsStats.value.mountOk}/${skillsStats.value.mountTotal} 挂载` : "挂载",
   },
   sync: { title: "设备用量", hint: `${devices.value.length} 台设备` },
-  proxy: { title: "渠道额度", hint: channels.value.length ? `${channels.value.length} 个渠道` : "渠道" },
+  proxy: { title: "渠道额度", hint: visibleChannels.value.length ? `${visibleChannels.value.length} 个渠道` : "渠道" },
   memory: {
     title: "记忆概况",
     hint: memoryOverview.value ? `${memoryOverview.value.total} 条记忆` : "记忆中枢",
@@ -552,7 +563,7 @@ const TOOLS = computed<{ name: string; meta: string; label: string; ok: boolean 
 
         <!-- 反代网关：渠道额度（号池实时数据，渠道增减自动跟进） -->
         <template v-else>
-          <div v-for="c in channels" :key="c.id" class="ov-row">
+          <div v-for="c in visibleChannels" :key="c.id" class="ov-row">
             <div class="grow">
               <div class="ov-name">
                 {{ c.display }}<span v-if="c.summary.expiringSoon" class="ov-tag warn">即将到期</span>
@@ -563,13 +574,13 @@ const TOOLS = computed<{ name: string; meta: string; label: string; ok: boolean 
             </div>
             <b class="ov-num">{{ fmtBalance(c.summary.totalCredits, c.id) }}<span class="ov-unit">{{ balanceUnit(c.id) }}</span></b>
           </div>
-          <div v-if="!channels.length" class="ov-row">
-            <div class="grow"><div class="ov-meta">号池尚未接入或加载中</div></div>
+          <div v-if="!visibleChannels.length" class="ov-row">
+            <div class="grow"><div class="ov-meta">{{ channels.length ? "无可用余额渠道（已过期或额度耗尽）" : "号池尚未接入或加载中" }}</div></div>
           </div>
         </template>
       </div>
 
-      <!-- 左下角全局操作：版本 / 署名 / 亮暗 / 设置 -->
+      <!-- 左下角全局操作：版本 / 署名 / GitHub / 亮暗 / 设置 -->
       <div class="side-foot">
         <div class="foot-meta">
           <div class="foot-ver">{{ version }}</div>
@@ -577,6 +588,11 @@ const TOOLS = computed<{ name: string; meta: string; label: string; ok: boolean 
             <div class="foot-author"><i class="ph ph-user"></i><b>沐辉</b></div>
           </el-tooltip>
         </div>
+        <el-tooltip content="Star 支持" placement="top">
+          <button class="btn btn-ghost" @click="openRepo()">
+            <i class="ph ph-github-logo"></i>
+          </button>
+        </el-tooltip>
         <el-tooltip content="切换亮暗主题" placement="top">
           <button class="btn btn-ghost" @click="app.toggleTheme()">
             <i class="ph" :class="app.isDark ? 'ph-moon' : 'ph-sun'"></i>

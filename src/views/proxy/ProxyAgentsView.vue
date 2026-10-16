@@ -7,7 +7,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import * as api from "../../api/ipc";
 import type { ProxyChannelView, ProxyAccount, ProxyChannelId, ProxyPoolStrategy, ProxyCostTier, ProxyScanCandidate, ProxyCheckinRow, ZcodeDeviceRow } from "../../types";
 import { useAppStore } from "../../stores/app";
-import { fmtInt, fmtK, fmtDate, fmtAgo, fmtCredits, ACCOUNT_STATUS, SOURCE_NAMES, channelName, fmtBalance, balanceUnit, isQoderChannel, isClineChannel, costTierName, checkinLabels, todayStr } from "./format";
+import { fmtInt, fmtK, fmtDate, fmtAgo, fmtCredits, ACCOUNT_STATUS, SOURCE_NAMES, channelName, fmtBalance, fmtPkgTotal, fmtPkgUsed, pkgFallbackName, balanceUnit, isQoderChannel, isClineChannel, costTierName, checkinLabels, todayStr } from "./format";
 import { coalesceAsync } from "../../utils/timing";
 import { solveCaptcha, cancelCaptcha, CaptchaCancelledError } from "../../utils/aliyunCaptcha";
 
@@ -15,6 +15,39 @@ const app = useAppStore();
 const pool = ref<ProxyChannelView[]>([]);
 const refreshingChannel = ref(false);
 const refreshingId = ref("");
+
+// ===== 积分包明细展开 =====
+const expandedIds = ref<Set<string>>(new Set());
+function togglePkg(id: string) {
+  const next = new Set(expandedIds.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  expandedIds.value = next;
+}
+/** 已用占比（进度条宽度 %）：total<=0 或「不限」时不画条（模板那端已用 v-if 拦住） */
+function pkgUsedPct(pkg: { used: number; total: number }): number {
+  if (!pkg.total || pkg.total <= 0) return 0;
+  const used = pkg.used === -1 ? 0 : Math.max(0, pkg.used);
+  return Math.min(100, Math.round((used / pkg.total) * 100));
+}
+/** 剩余天数文案：expiresAt=0→长期；已过期→已过期；否则「剩 N 天」（不足一天按 1 天） */
+function pkgDaysText(pkg: { expiresAt: number; expired?: boolean }): string {
+  if (!pkg.expiresAt) return "长期";
+  if (pkg.expired) return "已过期";
+  return `剩 ${Math.max(1, Math.ceil((pkg.expiresAt - Date.now()) / 86400000))} 天`;
+}
+/** 状态徽标：已过期(红) / 即将到期(琥珀) / 生效中(灰)。两态由主进程按 expiringSoonDays 现算附在包上，
+ *  这里只读不回算——阈值只有一个来源，两处各算就会「卡片说没到期、明细一排红」。 */
+function pkgStatusCls(pkg: { expired?: boolean; expiringSoon?: boolean }): string {
+  if (pkg.expired) return "tag-err";
+  if (pkg.expiringSoon) return "tag-warn";
+  return "tag-dim";
+}
+function pkgStatusText(pkg: { expired?: boolean; expiringSoon?: boolean }): string {
+  if (pkg.expired) return "已过期";
+  if (pkg.expiringSoon) return "即将到期";
+  return "生效中";
+}
 
 // ===== Toast 悬浮提示（右上角、自动消失）：替代常驻页面的提示卡片 =====
 const toasts = ref<{ id: number; text: string; kind: "info" | "err" }[]>([]);
@@ -1556,11 +1589,21 @@ onUnmounted(() => {
                 </td>
               </tr>
               <template v-else>
-                <tr v-for="(acc, i) in ch.accounts" :key="acc.id" :style="{ '--i': i }">
+                <template v-for="(acc, i) in ch.accounts" :key="acc.id">
+                <tr :style="{ '--i': i }">
                   <td class="sel-col">
                     <input type="checkbox" :checked="selectedIds.has(acc.id)" @change="toggleSelect(acc.id)" />
                   </td>
                   <td class="acc-cell">
+                    <el-tooltip
+                      v-if="acc.packages && acc.packages.length"
+                      :content="(expandedIds.has(acc.id) ? '收起' : '展开') + pkgFallbackName(acc.channel) + '明细'"
+                      placement="top"
+                    >
+                      <button class="pkg-caret" :class="{ open: expandedIds.has(acc.id) }" @click="togglePkg(acc.id)">
+                        <i class="ph ph-caret-right" />
+                      </button>
+                    </el-tooltip>
                     <el-tooltip v-if="renamingId !== acc.id" :content="acc.name + '（点击重命名）'" placement="top">
                       <span class="acc-name" @click="startRename(acc)">{{ acc.name || "（未命名账号）" }}</span>
                     </el-tooltip>
@@ -1709,6 +1752,40 @@ onUnmounted(() => {
                     <button class="btn-link btn-sm danger" @click="delRow = acc; delOpen = true">删除</button>
                   </td>
                 </tr>
+                <!-- 展开态：该账号逐包明细。两个 -1 的念法走 fmtPkgTotal/fmtPkgUsed，
+                     与积分日历那张表同口径——同一批钱在两个页面不能一个念「不限」一个念「—」 -->
+                <tr v-if="expandedIds.has(acc.id) && acc.packages && acc.packages.length" class="pkg-row">
+                  <td colspan="7" class="pkg-cell">
+                    <table class="pkg-tbl">
+                      <tbody>
+                        <tr>
+                          <th>{{ pkgFallbackName(acc.channel) }}</th><th class="num">已用</th><th class="num">总额</th><th class="num">剩余</th><th>到期</th><th class="num">剩余天数</th><th>状态</th>
+                        </tr>
+                        <tr v-for="(pkg, pi) in acc.packages" :key="pkg.code || pi">
+                          <td class="pkg-name">
+                            <!-- 名称与进度条各挂一个浮层，且都**不**挂在 td 上：td 是二者的共同祖先，
+                                 包上去会一次 hover 叠出两个浮层 -->
+                            <el-tooltip :content="pkg.name" :disabled="!pkg.name" placement="top">
+                              <span>{{ pkg.name || pkgFallbackName(acc.channel) }}</span>
+                            </el-tooltip>
+                            <el-tooltip v-if="pkg.total > 0" :content="`已用 ${fmtPkgUsed(pkg.used, pkg.total, acc.channel)} / 总额 ${fmtPkgTotal(pkg.total, pkg.remaining, acc.channel)}`" placement="top">
+                              <div class="pkg-bar">
+                                <span class="pkg-bar-used" :style="{ width: pkgUsedPct(pkg) + '%' }" />
+                              </div>
+                            </el-tooltip>
+                          </td>
+                          <td class="mono num">{{ fmtPkgUsed(pkg.used, pkg.total, acc.channel) }}</td>
+                          <td class="mono num">{{ fmtPkgTotal(pkg.total, pkg.remaining, acc.channel) }}</td>
+                          <td class="mono num">{{ fmtBalance(pkg.remaining, acc.channel) }}</td>
+                          <td class="mono">{{ pkg.expiresAt ? fmtDate(pkg.expiresAt) : "长期" }}</td>
+                          <td class="mono num">{{ pkgDaysText(pkg) }}</td>
+                          <td><span class="tag" :class="pkgStatusCls(pkg)">{{ pkgStatusText(pkg) }}</span></td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </td>
+                </tr>
+                </template>
               </template>
             </tbody>
           </table>
@@ -3070,6 +3147,57 @@ onUnmounted(() => {
 /* ===== 列表布局：账号两行式 + 数字列右对齐 ===== */
 .pool-tbl td.num {
   text-align: right;
+}
+/* 积分包展开：账号行下的只读明细表（数据来自 poolView 附的 packages） */
+.pkg-caret {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--text-3);
+  padding: 0 4px 0 0;
+  font-size: 12px;
+  transition: transform 0.15s;
+  display: inline-block;
+}
+.pkg-caret.open {
+  transform: rotate(90deg);
+  color: var(--text-1);
+}
+.pkg-row > .pkg-cell {
+  padding: 0 0 8px 26px;
+  background: var(--bg-2, rgba(127, 127, 127, 0.05));
+}
+.pkg-tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.pkg-tbl th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-3);
+  padding: 4px 8px;
+}
+.pkg-tbl td {
+  padding: 4px 8px;
+  border-top: 1px solid var(--border, rgba(127, 127, 127, 0.15));
+}
+.pkg-name {
+  min-width: 140px;
+  max-width: 240px;
+}
+.pkg-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border, rgba(127, 127, 127, 0.25));
+  margin-top: 3px;
+  overflow: hidden;
+}
+.pkg-bar-used {
+  display: block;
+  height: 100%;
+  background: var(--accent, #4c8bf5);
+  border-radius: 2px;
 }
 /* 选择列：全选与行选 checkbox 居中 */
 .sel-col {

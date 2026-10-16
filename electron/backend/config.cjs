@@ -22,21 +22,54 @@ function isPortable() {
   return !!process.env.PORTABLE_EXECUTABLE_DIR;
 }
 
-// WebDAV 密码用系统级密钥加密落盘（safeStorage 不可用就降级明文）。
-// 渲染层永远只拿掩码，真值留在主进程
+// 凭据信封按前缀分派，加密后端二选一（桌面 safeStorage / headless AES）：
+//   enc:v1: — Electron safeStorage（Windows 下即 DPAPI），OS 用户绑定、原理上不可跨机
+//   enc:v2: — AES-256-GCM，密钥取自 AGENTHUB_SECRET_KEY，桌面与 headless 形态通用
+// 两种前缀并存是刻意的：统一成"可移植信封"只会退化成把密钥一起搬走（等于没有加密）。
+// 无 safeStorage 且无 key 时保持明文降级（自测环境依赖此行为）；生产形态由网关入口强制 key
 let safeStorage = null;
 try { safeStorage = require("electron").safeStorage; } catch { /* 自测环境无 electron */ }
 const ENC_PREFIX = "enc:v1:";
+const AES_PREFIX = "enc:v2:";
+
+function aesKey() {
+  const secret = String(process.env.AGENTHUB_SECRET_KEY || "");
+  return secret ? crypto.createHash("sha256").update(secret).digest() : null;
+}
+
+/** 是否本模块产出的密文信封（敏感 meta 判定用：enc:v2: 同样算密文，不能当明文剥掉） */
+function isEncrypted(v) {
+  return typeof v === "string" && (v.startsWith(ENC_PREFIX) || v.startsWith(AES_PREFIX));
+}
 
 function encryptSecret(plain) {
   const s = String(plain || "");
-  if (!s || s.startsWith(ENC_PREFIX)) return s; // 空值或已是密文不重复加密
-  if (!safeStorage || !safeStorage.isEncryptionAvailable()) return s;
-  return ENC_PREFIX + safeStorage.encryptString(s).toString("base64");
+  if (!s || isEncrypted(s)) return s; // 空值或已是密文不重复加密
+  if (safeStorage && safeStorage.isEncryptionAvailable()) {
+    return ENC_PREFIX + safeStorage.encryptString(s).toString("base64");
+  }
+  const key = aesKey();
+  if (!key) return s; // 明文降级（历史行为；生产形态的 key 由网关入口把关）
+  const nonce = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, nonce);
+  const ct = Buffer.concat([cipher.update(s, "utf8"), cipher.final()]);
+  return AES_PREFIX + [nonce, cipher.getAuthTag(), ct].map((b) => b.toString("base64url")).join(".");
 }
 
 function decryptSecret(stored) {
   const s = String(stored || "");
+  if (s.startsWith(AES_PREFIX)) {
+    const key = aesKey();
+    if (!key) return ""; // 密钥缺失/不符：与 enc:v1: 跨环境解不开同语义，交由上层"保留磁盘密文"的保护兜底
+    try {
+      const [n, tag, ct] = s.slice(AES_PREFIX.length).split(".");
+      const d = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(n, "base64url"));
+      d.setAuthTag(Buffer.from(tag, "base64url"));
+      return Buffer.concat([d.update(Buffer.from(ct, "base64url")), d.final()]).toString("utf8");
+    } catch {
+      return ""; // 密钥不符或密文损坏，让用户重填
+    }
+  }
   if (!s.startsWith(ENC_PREFIX)) return s; // 明文（降级环境存的）直接用
   if (!safeStorage || !safeStorage.isEncryptionAvailable()) return "";
   try {
@@ -87,6 +120,9 @@ function defaultConfig() {
     fxPools: false,
     fxCursor: true,
     // 左栏四大模块的显示顺序（用户在「设置 · 个性化」中调整）
+    /** 远程网关实例（桌面连远程 Docker 版）：tokenEnc 以 enc:v1: 加密落盘，列表接口只回 hasToken */
+    remoteTargets: [],
+    remoteActiveId: "local",
     moduleOrder: ["skills", "sync", "proxy", "memory"],
     // ===== 四大板块启用开关（issue #91 轻量模式）：关闭后左上角置灰不可点、后台完全不运行。
     // 唯一写入口是 module_toggle IPC（主进程读改写），设置页表单不拥有它；
@@ -182,8 +218,13 @@ function defaultConfig() {
       routeOrder: "score",      // 渠道成本感知排序：score=按打分（现状）/ cost-first=按成本档升序
                                 // （免费→低成本→普通，组内仍按打分）；Key 可单独覆盖
       rateLimitPerMin: 120,     // 单 Key 令牌桶限速（次/分钟，Key 可单独覆盖）
-      concurrency: 8,           // 上游并发上限
+      concurrency: 8,           // 单渠道在途并发上限（满则跳备选渠道，不做全局 429，issue #106）
       creditsRefreshMin: 30,    // 额度自动刷新周期（分钟）
+      usageRetentionDays: 90,   // 请求流水保留期（天，1~3650）：启动 GC 与用量统计页「清理」共用
+                                // （默认 90 = 该保留期此前在 proxy/store.cjs 的 gc() 里写死的那个数）
+      expiringSoonDays: 1,      // 积分包「即将到期」预警阈值（天，0~3650，0=关闭预警）：
+                                // 号池到期徽标与逐包明细的 expiringSoon 共用这一个值
+                                // （默认 1 = 该阈值此前在 pool.cjs 里硬编码的那个数）
       poolsyncSchedule: {       // 号池定时同步（issue #89/#92）：全关 = 仅手动；API Key 与
                                 // 模型映射随号池同步走，自动同步让新设备开箱即得
         hourly: false,          // 每小时档自动同步
@@ -211,6 +252,13 @@ function defaultConfig() {
       channelEnabled: {},       // 渠道启闭（「上游启闭」弹窗）：{ [渠道 id]: true|false }，缺省 = 启用。
                                 // 关闭的渠道在反代网关全部页面隐藏，路由/调用/调度也不再使用，重新打开立即恢复
       ccSwitchModel: "",        // 生态接入默认模型（注册进 CC Switch 时使用，缺省取 fallbackModel）
+      // ===== 上游超时旋钮（毫秒；对应 agent2api 四段超时的可配置化，0/缺省 = 用内置默认） =====
+      firstByteBaseMs: 30000,      // 首字节基础预算（30s，按输入规模追加、封顶 firstByteMaxMs）
+      firstByteMaxMs: 180000,      // 首字节预算封顶（超长 prompt 的 prefill 可能上百秒）
+      streamIdleMs: 300000,        // 流式相邻数据空闲超时（300s，收到新数据即重置）
+      httpJsonTimeoutMs: 60000,    // 非流式 JSON 请求（额度查询 / token 刷新）总超时（60s）
+      retrySameAccountCount: 1,    // 瞬时错误同账号原地重发次数（0~5，参考 agent2api retryCount）
+      retrySameAccountIntervalMs: 1000, // 同账号原地重发退避间隔（毫秒，200~10000）
     },
   };
 }
@@ -572,20 +620,26 @@ function saveConfig(cfg, opts = {}) {
     disk.webdavShared.password = encryptSecret(disk.webdavShared.password);
     disk.webdavShared.encryptionPassphrase = encryptSecret(disk.webdavShared.encryptionPassphrase);
   }
-  const tmp = p + ".tmp";
+  // 中转名带 pid，与本仓其余原子写同形（memory/config.cjs、memory/store.cjs、synonyms.cjs、
+  // inject.cjs 早就是 `.tmp.${process.pid}`）：固定名时两个写入者会互相把对方的 .tmp rename 走
+  const tmp = `${p}.tmp.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(disk, null, 2), "utf8");
   fs.renameSync(tmp, p);
   return { ok: true, message: "设置保存成功" };
 }
 
-/** 由「独立 IPC 直接写盘」的 proxy 字段 —— 设置页表单不拥有它们，
+/** 由「独立 IPC 直接写盘」或「只手工编辑 config.json」的 proxy 字段 —— 设置页表单不拥有它们，
  *  渲染层的 config 快照可能过期，整份保存会把它们冲掉（issue #90）。
  *  · channelEnabled   ← proxy_channel_toggle（上游启闭）
  *  · checkinAutoRules ← proxy_checkin_auto_set（按渠道自动签到）
+ *  · enableAnthropic / enableResponses ← 新增协议面的紧急止血开关。界面不提供入口，
+ *    用户按注释提示手工改 config.json；而「手工改完要重启才进内存快照」这件事不能当约束——
+ *    应用在跑的时候改盘，之后任何一次无关的整份保存（切主题、拖模块顺序）都会把这个
+ *    刚写下的 false 抹掉，等于止血开关自己会弹回来。故与上面两个字段同列，以磁盘为准。
  *  注意：只应在这两个字段**各自的写入 IPC** 里绕过本名单；它们调的是 saveConfig。
  *  restoreOnLaunch 刻意不进名单：设置页「记住网关开关」就是经整份保存写盘的，
  *  磁盘优先会架空那个开关；渲染层快照由总览页每次启停同步（ProxyHomeView），不会过期。 */
-const OUT_OF_BAND_PROXY_FIELDS = ["channelEnabled", "checkinAutoRules"];
+const OUT_OF_BAND_PROXY_FIELDS = ["channelEnabled", "checkinAutoRules", "enableAnthropic", "enableResponses"];
 
 /** 设置页保存路径专用：先把 out-of-band 字段以**磁盘值**为准，再落盘。
  *
@@ -611,6 +665,10 @@ function saveConfigFromUI(cfg) {
     // 首配会话内密码快照为空串，任何整份提交（切主题/拖模块排序/改反代设置）都会把
     // 已保存的服务器配置整段冲掉——这里以磁盘值为准，让该快照字段失效
     if (disk && disk.webdavShared) next.webdavShared = disk.webdavShared;
+    // 远程网关目标同样磁盘优先：唯一写入口是 remote_targets_save/delete/activate（主进程读改写），
+    // 设置页整份提交携带的是启动时的旧快照，不保护会像 issue #90 一样把变更冲回去
+    if (disk && Array.isArray(disk.remoteTargets)) next.remoteTargets = disk.remoteTargets;
+    if (disk && typeof disk.remoteActiveId === "string") next.remoteActiveId = disk.remoteActiveId;
     // modules（板块启用开关）同样磁盘优先（issue #91）：唯一写入口是 module_toggle IPC
     //（主进程读改写），设置页表单不拥有它——否则开关切换后任何整份保存都会把
     // 渲染层旧快照里的开关状态写回去，重启后开关「自己弹回来」
@@ -647,7 +705,7 @@ function applyAutoStart(cfg) {
 
 module.exports = {
   dataDir, configPath, hubDir, ensureHub, loadConfig, saveConfig, defaultConfig, ENC_PREFIX,
-  getUpdateNotified, setUpdateNotified, isPortable, encryptSecret, decryptSecret, applyAutoStart,
+  getUpdateNotified, setUpdateNotified, isPortable, encryptSecret, decryptSecret, isEncrypted, applyAutoStart,
   loadSharedWebdav, saveSharedWebdav, clearSharedWebdav, maskedSharedWebdav, moduleWebdav, sharedEncryptionPassphrase, PASSWORD_MASK,
   normalizeHm, normalizeJitter,
   saveConfigFromUI, OUT_OF_BAND_PROXY_FIELDS,

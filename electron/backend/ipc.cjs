@@ -16,6 +16,7 @@ const remotesync = require("./remotesync.cjs");
 const webdav = require("./webdav.cjs");
 const watch = require("./watch.cjs");
 const proxy = require("./proxy/index.cjs");
+const proxyRemote = require("./proxy/remote.cjs");
 const memory = require("./memory/index.cjs");
 
 // 渲染层拿到的密码一律是掩码；保存/测试连接收到精确掩码时回填磁盘真值
@@ -476,6 +477,16 @@ function register(ctx) {
         right: { label: "远端版", path: remoteDir, md: readMd(remoteDir) },
       };
     }
+    // diff-link：左侧是链接现在指向的那份（悬空时没有），右侧是中央真身（可能还没有）
+    if (item.kind === "diff-link") {
+      const st = syncer.linkConflictState(item);
+      return {
+        item,
+        left: { label: "链接指向", path: st.resolved || "", md: st.resolves ? readMd(st.resolved) : "" },
+        right: { label: "中央真身", path: st.centralPath, md: readMd(st.centralPath) },
+        link: st,
+      };
+    }
     const leftPath = item.kind === "content" ? path.join(item.dir, item.skill) : null;
     const rightPath = path.join(hub.skillsDir(), item.skill || "");
     return {
@@ -492,7 +503,9 @@ function register(ctx) {
       ? syncer.resolveNormConflict(item, choice, C())
       : item.kind === "remote"
         ? remotesync.resolveRemoteConflict(item, choice, C())
-        : syncer.resolveContentConflict(item, choice, C());
+        : item.kind === "diff-link"
+          ? syncer.resolveDiffLinkConflict(item, choice, C())
+          : syncer.resolveContentConflict(item, choice, C());
     if (r.ok) {
       item.resolved = { at: new Date().toISOString(), choice };
       syncer.saveConflicts(store);
@@ -528,6 +541,15 @@ function register(ctx) {
 
   // ===== 反代网关（命令实现见 backend/proxy/index.cjs） =====
   proxy.register(ipcMain);
+
+  // ===== 远程网关（桌面连远程 Docker 版：目标管理与命令转发，实现见 backend/proxy/remote.cjs） =====
+  // 转发在主进程做：管理令牌不进渲染进程；地址/协议校验（http 仅私网）内聚在 remote.cjs
+  ipcMain.handle("remote_targets_list", handle(() => proxyRemote.listTargets()));
+  ipcMain.handle("remote_targets_save", handle((p) => proxyRemote.saveTarget(p)));
+  ipcMain.handle("remote_targets_delete", handle(({ id }) => proxyRemote.deleteTarget(id)));
+  ipcMain.handle("remote_targets_activate", handle(({ id }) => proxyRemote.activateTarget(id)));
+  ipcMain.handle("remote_test", handle((p) => proxyRemote.testTarget(p)));
+  ipcMain.handle("remote_invoke", handle(({ cmd, args }) => proxyRemote.rpc(cmd, args)));
 
   // ===== 记忆中枢（命令实现见 backend/memory/index.cjs） =====
   memory.register(ipcMain);

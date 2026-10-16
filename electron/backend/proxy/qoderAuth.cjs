@@ -274,7 +274,7 @@ function writeCredentials(product, cred) {
     refreshTokenExpiresAt: iso(cred.refreshTokenExpiresAt),
     user: cred.user || {},
   };
-  const tmp = p.authFile + ".agenthub.tmp";
+  const tmp = `${p.authFile}.agenthub.tmp.${process.pid}`;
   fs.writeFileSync(tmp, encryptV10(Buffer.from(JSON.stringify(store), "utf8"), key));
   fs.renameSync(tmp, p.authFile); // 原子替换，避免桌面端读到半截文件
   return true;

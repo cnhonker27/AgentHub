@@ -27,11 +27,11 @@ const UPSTREAM_406_HINT =
   "③ 请求形态被上游风控拦截（①②都排除时）—— 请把现象发到项目 issue";
 
 /**
- * 工厂：deps = { fetchStream, pumpSse, httpJson, rules, store, util, deviceIds }
+ * 工厂：deps = { fetchStream, pumpSse, httpJson, rules, store, util, deviceIds, firstByteBudgetMs }
  * channel：autoclaw（国内版）/ autoclaw_intl（国际版）
  */
 function makeAutoClaw(channel, deps) {
-  const { fetchStream, pumpSse, httpJson, rules, util, deviceIds } = deps;
+  const { fetchStream, pumpSse, httpJson, rules, util, deviceIds, firstByteBudgetMs } = deps;
   const cfg = () => (rules.get("headers.json") || {})[channel] || {};
 
   // ===== 进程级凭证缓存（方案 §7：刷新结果不落库不落文件，只进缓存）=====
@@ -177,20 +177,27 @@ function makeAutoClaw(channel, deps) {
       const { body: out, routeModelId } = this.rewriteBody(model, body, account, meta);
       const url = `${base}${c.llmProxyPath || "/autoclaw-proxy/proxy/autoclaw"}/chat/completions`;
       const sessionHeaders = headersMod.sessionPassthroughHeaders(meta && meta.clientHeaders);
+      // 首字节预算随 prompt 规模放大（与 Trae/WorkBuddy 同口径，封顶 180s）：固定 30s 打不过超大 prompt
+      const payload = JSON.stringify({ ...out, stream: true });
+      const firstByteMs = firstByteBudgetMs(payload);
 
       let resp = null;
       let cancelTimer = () => {};
+      let budgetFired = () => false;
       const result = { status: 200, planLimit: false };
       let sentDelta = false;
+      // 首字节达标标志：见下面 pumpSse 回调第一行的解除逻辑
+      let settled = false;
       try {
         const r = await fetchStream(url, {
           method: "POST",
           headers: headersMod.llmHeaders(c, token, routeModelId, sessionHeaders),
-          body: JSON.stringify({ ...out, stream: true }),
-          firstByteMs: c.firstByteMs || undefined,
+          body: payload,
+          firstByteMs,
         });
         resp = r.resp;
         cancelTimer = r.cancelTimer;
+        budgetFired = r.budgetFired || budgetFired;
       } catch (e) {
         // 406 是上游预校验拒收的统一形态且**无错误体**：附加已实测的三个方向提示
         if (e && e.status === 406 && !String(e.body || "").trim()) {
@@ -200,6 +207,10 @@ function makeAutoClaw(channel, deps) {
       }
       try {
         await pumpSse(resp, (_event, raw) => {
+          // 首个 SSE 事件到达 = 首字节达标，必须**立刻**解除首字节预算计时器：漏这一步会让
+          // 计时器在整个流期间一直武装，到点 abort 掉 resp.body，把一条正常的长回答掐成
+          // 「HTTP 200 + 半截内容」（issue #107 的根因，其余渠道都在首事件里这么做）
+          if (!settled) { settled = true; cancelTimer(); }
           if (!raw) return;
           if (raw === "[DONE]") { emit({ type: "finish", reason: "" }); return; }
           let chunk = null;
@@ -233,10 +244,22 @@ function makeAutoClaw(channel, deps) {
           }
         });
       } catch (e) {
-        // 流中断：已出内容则如实上报，未出内容交给外层换号
+        // 流中断：已出内容则如实上报，未出内容交给外层换号。
+        // 「已出内容 + 首字节预算到点」正常情况下不会出现：预算在**首个 SSE 事件**到达时即解除，
+        // 到点必然意味着一个事件都没到（sentDelta 也为假）。唯一例外是首帧恰好在预算到点前一瞬
+        // 处理完的微任务竞态——此时按流中断上报即可，明细里的 notice:truncated 仍会留痕。
         if (sentDelta) {
           emit({ type: "error", status: 502, message: `流中断：${String((e && e.message) || e).slice(0, 120)}` });
           return result;
+        }
+        // 一个字都没出，且是我方首字节预算到点（响应头已到、body 迟迟不来也走这里）：按
+        // 「首字节超时」抛，与 fetchStream 同口径——分类器据此**不熔断、不冷却账号**，
+        // 否则一次慢请求就能把整条渠道冻结半小时（实测事故根因）
+        if (budgetFired()) {
+          throw Object.assign(new Error(`上游首字节超时（${Math.round(firstByteMs / 1000)}s）`), {
+            network: true,
+            firstByteTimeout: true,
+          });
         }
         throw e;
       } finally {

@@ -91,6 +91,30 @@ export function balanceUnit(channel?: string): string {
   return "积分";
 }
 
+/** 「剩余 / 总额」一对，含两个 -1 哨兵的分工：
+ *  total === -1 是「上游不给这一包的总额」⇒ 右格给「—」（不是「不限」，那是 remaining=-1）；
+ *  两边都是 -1（整号不限）时单位标签也省掉，否则会出现「不限 / 不限 积分」。 */
+export function fmtBalancePair(remaining: number, total: number, channel?: string): string {
+  const right = total === -1 && remaining !== -1 ? "—" : fmtBalance(total, channel);
+  const unit = remaining === -1 && total === -1 ? "" : ` ${balanceUnit(channel)}`;
+  return `${fmtBalance(remaining, channel)} / ${right}${unit}`;
+}
+
+/** 上游没给包名时的回落名。判据跟着 balanceUnit 的**实际返回值**写：
+ *  zcode 的单位是 "Tokens"（复数），照单数 "Token" 比会静默掉进最后一个分支。 */
+export function pkgFallbackName(channel?: string): string {
+  const u = balanceUnit(channel);
+  return u === "Tokens" ? "套餐额度" : u === "积分" ? "积分包" : "额度包";
+}
+
+/** 号池逐包表的「总额」「已用」两格，与上面 fmtBalancePair 同一套哨兵口径（别在模板里各写一份）：
+ *  总额格直接走 fmtBalance 会把 total=-1 念成「不限」——那是 remaining=-1 的语义，
+ *  而 total=-1 是「上游不给这一包的面值」。没有面值 ⇒ 已用同样无从推算，一并给「—」。 */
+export function fmtPkgTotal(total: number, remaining: number, channel?: string): string {
+  return total === -1 ? (remaining === -1 ? "不限" : "—") : fmtBalance(total, channel);
+}
+export const fmtPkgUsed = (used: number, total: number, channel?: string) => (total === -1 ? "—" : fmtBalance(used, channel));
+
 /** 本地时区的今天（YYYY-MM-DD）：与主进程 store.dayStr 同口径，签到记录的跨天判定用 */
 export function todayStr(): string {
   const d = new Date();

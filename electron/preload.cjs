@@ -118,6 +118,7 @@ const ALLOWED_COMMANDS = new Set([
   "proxy_key_create",
   "proxy_key_update",
   "proxy_key_delete",
+  "proxy_keys_delete",
   "proxy_pool",
   "proxy_channel_list",
   "proxy_channel_toggle",
@@ -148,6 +149,16 @@ const ALLOWED_COMMANDS = new Set([
   "proxy_account_import_file",
   "proxy_models",
   "proxy_models_sync",
+  // 自定义提供商（中转站 / 自建 OpenAI 兼容端点）：命令名必须与 backend/proxy/index.cjs 的
+  // handle() 注册面一一对应，漏登记的表现是渲染层收到「未授权的 IPC 命令」并卡在假死态
+  "proxy_provider_list",
+  "proxy_provider_create",
+  "proxy_provider_update",
+  "proxy_provider_delete",
+  "proxy_provider_add_key",
+  "proxy_provider_remove_key",
+  "proxy_provider_test",
+  "proxy_provider_fetch_models",
   "proxy_ide_switch",
   "proxy_ide_status",
   "proxy_zcode_switch_rollback",
@@ -159,6 +170,7 @@ const ALLOWED_COMMANDS = new Set([
   "proxy_stats_overview",
   "proxy_stats_top",
   "proxy_stats_detail",
+  "proxy_stats_cleanup",
   "proxy_recent",
   "proxy_oplog_list",
   "proxy_oplog_ops",
@@ -282,6 +294,8 @@ const ALLOWED_COMMANDS = new Set([
   "memory_profile_get",
   "memory_profile_generate",
   "memory_profile_save",
+  "memory_health_run",
+  "memory_health_get",
   "memory_review_list",
   "memory_review_resolve",
   // ===== 记忆中枢：WebDAV 同步 =====
@@ -315,6 +329,13 @@ const ALLOWED_COMMANDS = new Set([
   "memory_import_cursors_get",
   "memory_import_cursors_reset",
   "memory_import_map_save",
+  // ===== 远程网关（桌面连远程 Docker 版）=====
+  "remote_targets_list",
+  "remote_targets_save",
+  "remote_targets_delete",
+  "remote_targets_activate",
+  "remote_test",
+  "remote_invoke",
 ]);
 
 contextBridge.exposeInMainWorld("agenthub", {

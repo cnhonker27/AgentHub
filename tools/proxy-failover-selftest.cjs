@@ -151,6 +151,11 @@ async function main() {
     humanizeJitter: false, disabledModels: [],
     channelFailover: true, channelFailoverMax: 3,
     channelCooldownMs: 1500, channelCooldownCapMs: 6000,
+    // 瞬时错误同账号原地重发（Step 1 引入）：本套自测的 T1/T2/T4a/T4b/T5a/T5b/T6 的
+    //「渠道级打 N 次」断言钉的是 5xx 直接换号的旧节奏——原地重发会把主渠道真实命中
+    // 从 1 次抬成 2 次（首发 + 重发），让降级/半开的打点计数与断言失配。
+    // 置 0 关掉原地重发，保持这套既有契约逐值不变（原地重发由独立场景另行核验）。
+    retrySameAccountCount: 0,
   };
   const sr = await server.start(() => cfg);
   assert(sr.ok, "网关启动: " + (sr.message || ""));

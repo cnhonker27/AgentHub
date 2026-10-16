@@ -98,11 +98,11 @@ function upstreamMessage(body) {
 }
 
 /**
- * 工厂：deps = { fetchStream, pumpSse, httpJson, rules, util }
+ * 工厂：deps = { fetchStream, pumpSse, httpJson, rules, util, firstByteBudgetMs }
  * channel：cline_free（免费池）/ cline_pass（订阅池）；两池共用 headers.json 的 cline 段
  */
 function makeCline(channel, deps) {
-  const { fetchStream, pumpSse, httpJson, rules, util } = deps;
+  const { fetchStream, pumpSse, httpJson, rules, util, firstByteBudgetMs } = deps;
   const pool = channel === "cline_free" ? "free" : "pass";
   const cfg = () => (rules.get("headers.json") || {}).cline || {};
 
@@ -229,11 +229,14 @@ function makeCline(channel, deps) {
       // 「请求 X 实际发 Y」在用量明细里可见——此前只有适配器内部知道，属静默改写
       const result = { status: 200, model: out.model };
       let sentDelta = false;
+      // 首字节预算按 prompt 规模给；首事件到达即解除（见下面 pumpSse 回调第一行）
+      const payload = JSON.stringify({ ...out, stream: true });
       try {
         const r = await fetchStream(`${base}/chat/completions`, {
           method: "POST",
           headers,
-          body: JSON.stringify({ ...out, stream: true }),
+          body: payload,
+          firstByteMs: firstByteBudgetMs(payload),
         });
         resp = r.resp;
         cancelTimer = r.cancelTimer;
@@ -244,8 +247,13 @@ function makeCline(channel, deps) {
         }
         throw e;
       }
+      let settled = false;
       try {
         await pumpSse(resp, (_event, raw) => {
+          // 首个 SSE 事件到达 = 首字节达标，必须**立刻**解除首字节预算计时器：漏这一步会让
+          // 计时器在整个流期间一直武装，到点 abort 掉 resp.body，把一条正常的长回答掐成
+          // 「HTTP 200 + 半截内容」（issue #107 的根因，其余渠道都在首事件里这么做）
+          if (!settled) { settled = true; cancelTimer(); }
           if (!raw) return;
           if (raw === "[DONE]") { emit({ type: "finish", reason: "" }); return; }
           let chunk = null;

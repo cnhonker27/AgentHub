@@ -1,15 +1,6 @@
-// 反代网关 · AutoClaw 桌面端登录态读取（参照实现 providers/autoclaw/credentials.rs + crypto.rs）
-//
-// 两个来源：
-//   ① %APPDATA%/AutoClaw/auth.json —— token/refreshToken 为 Electron safeStorage 密文
-//      （`enc:<base64>`，v10 = AES-256-GCM，密钥在 Local State 的 os_crypt.encrypted_key，
-//      DPAPI 解出）。历史版本/手工改动可能是明文（兼容处理，明文自带 Bearer 前缀需剥）。
-//   ② ~/.openclaw-autoclaw/openclaw.json —— 明文 JWT（models.providers.*.models[].headers
-//      里的 X-Authorization），**无 refresh_token**，只能用不能刷。
-//
-// 两地（国内/国际构建）共用同一个 auth.json 且文件本身没有地区标记——
-// 地区判定**不在此处做**：扫描层对两个渠道各产出候选，用户自己选（猜错可见 = 401，重导即可）。
-// DPAPI/AES-GCM 设施复用 qoderAuth.cjs（同为 Electron safeStorage v10 形态）。
+// 反代网关 · AutoClaw 桌面端登录态读取
+// 新版按地区分别存于 %APPDATA%/AutoClaw-official 与 AutoClaw-oversea-official；
+// 旧版 %APPDATA%/AutoClaw/auth.json 与 ~/.openclaw-autoclaw/openclaw.json 继续兼容。
 "use strict";
 const fs = require("node:fs");
 const os = require("node:os");
@@ -18,137 +9,186 @@ const qoderAuth = require("../qoderAuth.cjs");
 const { jwtDecode } = require("../util.cjs");
 
 const MAX_AUTH_FILE_SIZE = 256 * 1024;
+const ACCOUNT_KEY_RE = /^[0-9a-f]{64}$/i;
+const PRODUCTS = {
+  autoclaw: "AutoClaw-official",
+  autoclaw_intl: "AutoClaw-oversea-official",
+};
 
 function roamingDir() {
   return process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
 }
 
-/** auth.json / Local State 路径（非 Windows 也给路径：读到加密字段时报错更可诊断） */
-function desktopPaths() {
-  const dir = path.join(roamingDir(), "AutoClaw");
+function desktopPaths(product) {
+  const officialDir = PRODUCTS[product] ? path.join(roamingDir(), PRODUCTS[product]) : "";
+  const legacyDir = path.join(roamingDir(), "AutoClaw");
   return {
-    authFile: path.join(dir, "auth.json"),
-    localState: path.join(dir, "Local State"),
+    officialDir,
+    activeAccountFile: officialDir ? path.join(officialDir, "device", "active-product-account.json") : "",
+    accountsDir: officialDir ? path.join(officialDir, "accounts") : "",
+    deviceFile: officialDir ? path.join(officialDir, "device", "device-id.json") : "",
+    localState: officialDir ? path.join(officialDir, "Local State") : "",
+    authFile: path.join(legacyDir, "auth.json"),
+    legacyLocalState: path.join(legacyDir, "Local State"),
     openclawFile: path.join(os.homedir(), ".openclaw-autoclaw", "openclaw.json"),
   };
 }
 
-function readJsonFile(file, label) {
-  let st;
-  try { st = fs.statSync(file); } catch { return null; }
-  if (!st.isFile() || st.size > MAX_AUTH_FILE_SIZE) return null;
+function regularFileSize(file, maxSize = MAX_AUTH_FILE_SIZE) {
+  if (!file) return 0;
   try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch (e) {
-    throw new Error(`${label} 无法解析（不是有效 JSON）：${String((e && e.message) || e).slice(0, 80)}`);
-  }
+    const st = fs.statSync(file);
+    return st.isFile() && st.size > 0 && st.size <= maxSize ? st.size : 0;
+  } catch { return 0; }
 }
 
-/** os_crypt 密钥：Local State 的 encrypted_key → DPAPI。非 Windows/读不到返回 null */
+function readJsonFile(file, label) {
+  if (!regularFileSize(file)) return null;
+  try { return JSON.parse(fs.readFileSync(file, "utf8").replace(/^﻿/, "")); }
+  catch (e) { throw new Error(`${label} 无法解析（不是有效 JSON）：${String((e && e.message) || e).slice(0, 80)}`); }
+}
+
 function loadOsCryptKey(localStatePath) {
   if (process.platform !== "win32") return null;
   const state = readJsonFile(localStatePath, "AutoClaw Local State");
   const b64 = state && state.os_crypt && state.os_crypt.encrypted_key;
   if (!b64) return null;
-  try {
-    return qoderAuth.dpapiUnprotectKey(b64);
-  } catch {
-    return null;
-  }
+  try { return qoderAuth.dpapiUnprotectKey(b64); } catch { return null; }
 }
 
-/** 解一个 enc: 字段（或明文直回）。解密失败抛错（带人话） */
+function decryptV10Json(blob, key) {
+  if (!Buffer.isBuffer(blob) || blob.length < 32 || blob.subarray(0, 3).toString("ascii") !== "v10") {
+    throw new Error("AutoClaw 凭据不是合法 v10 信封");
+  }
+  if (!key) throw new Error("登录态是加密格式但无法取得解密密钥（仅支持 Windows 上已登录的 AutoClaw 客户端）");
+  let plain;
+  try { plain = qoderAuth.decryptV10(blob, key).toString("utf8").replace(/^﻿/, ""); }
+  catch { throw new Error("AutoClaw 登录态解密失败（常见于与客户端不同的 Windows 用户）"); }
+  try { return JSON.parse(plain); }
+  catch (e) { throw new Error(`AutoClaw 凭据解密后不是有效 JSON：${String((e && e.message) || e).slice(0, 80)}`); }
+}
+
 function decryptEncValue(value, key) {
   const raw = String(value || "").trim();
   if (!raw) return "";
   if (!raw.startsWith("enc:")) return raw.replace(/^Bearer\s+/i, "").trim();
-  if (!key) throw new Error("登录态是加密格式但无法取得解密密钥（仅支持 Windows 上已登录的 AutoClaw 客户端）");
   const b64 = raw.slice(4).trim();
-  let blob;
-  try { blob = Buffer.from(b64, "base64"); } catch {
-    throw new Error("AutoClaw 加密字段不是合法 base64");
-  }
-  try {
-    return qoderAuth.decryptV10(blob, key).replace(/^Bearer\s+/i, "").trim();
-  } catch {
-    throw new Error("AutoClaw 登录态解密失败（常见于与客户端不同的 Windows 用户）");
-  }
+  const blob = Buffer.from(b64, "base64");
+  if (!b64 || blob.length < 32 || blob.subarray(0, 3).toString("ascii") !== "v10") throw new Error("AutoClaw 加密字段不是合法 v10/base64");
+  if (!key) throw new Error("登录态是加密格式但无法取得解密密钥（仅支持 Windows 上已登录的 AutoClaw 客户端）");
+  try { return qoderAuth.decryptV10(blob, key).toString("utf8").replace(/^Bearer\s+/i, "").trim(); }
+  catch { throw new Error("AutoClaw 登录态解密失败（常见于与客户端不同的 Windows 用户）"); }
 }
 
-/** JWT 里的 user_id（解不出给空串） */
 function uidFromToken(token) {
-  try {
-    const payload = jwtDecode(token);
-    return String((payload && (payload.user_id || payload.uid || payload.sub)) || "");
-  } catch { return ""; }
+  try { const p = jwtDecode(token); return String((p && (p.user_id || p.userId || p.uid || p.sub)) || ""); }
+  catch { return ""; }
 }
 
-/** openclaw.json 的 token：models.providers.*.models[].headers 里第一个非空 X-Authorization */
+function first(obj, names) {
+  if (!obj || typeof obj !== "object") return "";
+  for (const name of names) if (obj[name] != null && String(obj[name]).trim()) return obj[name];
+  return "";
+}
+
 function tokenFromOpenclaw(parsed) {
   const providers = parsed && parsed.models && parsed.models.providers;
   if (!providers || typeof providers !== "object") return "";
-  for (const p of Object.values(providers)) {
-    const models = p && Array.isArray(p.models) ? p.models : [];
-    for (const m of models) {
-      const headers = m && m.headers;
-      if (!headers || typeof headers !== "object") continue;
-      const t = String(headers["X-Authorization"] || headers["x-authorization"] || "").trim();
-      if (t) return t.replace(/^Bearer\s+/i, "").trim();
-    }
+  for (const p of Object.values(providers)) for (const m of (p && Array.isArray(p.models) ? p.models : [])) {
+    const h = m && m.headers;
+    const t = h && String(h["X-Authorization"] || h["x-authorization"] || "").trim();
+    if (t) return t.replace(/^Bearer\s+/i, "").trim();
   }
   return "";
 }
 
-/**
- * 读桌面登录态（auth.json 优先，openclaw.json 兜底）。
- * 返回 { ok, token, refreshToken, deviceId, uid, name, email, source, message? }。
- * auth.json 存在但解密失败 → 如实抛/报错（不静默回落，否则错误被掩盖）。
- */
-function readDesktopLogin() {
+function readOfficialLogin(product, opts = {}) {
+  const paths = desktopPaths(product);
+  if (!paths.officialDir || !fs.existsSync(paths.officialDir)) return null;
+  const active = readJsonFile(paths.activeAccountFile, "AutoClaw active-product-account") || {};
+  const accountKey = String(first(active, ["accountKey", "account_key"])).trim();
+  if (!accountKey) return null;
+  if (!ACCOUNT_KEY_RE.test(accountKey)) throw new Error("AutoClaw accountKey 格式异常（应为 64 位十六进制）");
+  const accountDir = path.join(paths.accountsDir, accountKey);
+  const credFile = path.join(accountDir, "account-credentials.enc");
+  if (!regularFileSize(credFile)) return null;
+  const keyLoader = typeof opts.keyLoader === "function" ? opts.keyLoader : loadOsCryptKey;
+  const root = decryptV10Json(fs.readFileSync(credFile), keyLoader(paths.localState));
+  const cred = root.credentials && typeof root.credentials === "object"
+    ? root.credentials : root.auth && typeof root.auth === "object" ? root.auth : root;
+  const token = String(first(cred, ["accessToken", "access_token", "token", "deviceToken", "device_token"]) || "")
+    .replace(/^Bearer\s+/i, "").trim();
+  if (!token) throw new Error("AutoClaw account-credentials.enc 中没有 access token");
+  const refreshToken = String(first(cred, ["refreshToken", "refresh_token"]) || "").trim();
+  const profileRoot = readJsonFile(path.join(accountDir, "account-profile.json"), "AutoClaw account-profile") || {};
+  const profile = profileRoot.profile || profileRoot.user || profileRoot.userInfo || profileRoot;
+  const deviceRoot = readJsonFile(paths.deviceFile, "AutoClaw device-id") || {};
+  const device = deviceRoot.device || deviceRoot;
+  // uid 口径必须与短信/OAuth 登录路径（saveAutoclawAccount → uidFromToken）一致，
+  // 否则同一账号经两条路径导入会各建一条记录。实测 profile.accountId 是 32 位 hex，
+  // 而 token 里的 uid（= profile.numericUserId）才是登录接口返回的 user_id —— 优先取后者。
+  const uid = String(uidFromToken(token) || first(profile, ["numericUserId", "id", "userId", "user_id", "uid", "accountId", "account_id"]) || first(cred, ["userId", "user_id", "uid", "accountId", "account_id"]) || accountKey);
+  return {
+    ok: true, product, token, refreshToken,
+    deviceId: String(first(device, ["deviceId", "device_id", "id"]) || first(cred, ["deviceId", "device_id"])),
+    uid,
+    // 新版 profile 常只有脱敏手机号可展示
+    name: String(first(profile, ["name", "nickname", "userName", "user_name", "displayName", "display_name", "phone", "mobile", "phoneNumber"])),
+    email: String(first(profile, ["email", "mail"])),
+    source: `${PRODUCTS[product]}/accounts/${accountKey}/account-credentials.enc`,
+  };
+}
+
+function readLegacyLogin() {
   const paths = desktopPaths();
   if (fs.existsSync(paths.authFile)) {
     const parsed = readJsonFile(paths.authFile, "AutoClaw auth.json");
     if (parsed && typeof parsed === "object") {
-      const token = String(parsed.token || "");
-      if (!token.trim()) throw new Error("AutoClaw auth.json 中没有 token");
-      const key = loadOsCryptKey(paths.localState);
-      const plain = decryptEncValue(token, key);
-      const refreshToken = (() => {
-        try { return decryptEncValue(parsed.refreshToken, key); } catch { return ""; }
-      })();
-      const info = parsed.userInfo && typeof parsed.userInfo === "object" ? parsed.userInfo : {};
-      const uid = String(info.id || info.user_id || "") || uidFromToken(plain);
-      return {
-        ok: true,
-        token: plain,
-        refreshToken,
-        deviceId: String(parsed.deviceId || ""),
-        uid,
-        name: String(info.name || info.nickname || info.user_name || ""),
-        email: String(info.email || ""),
-        source: "auth.json",
-      };
+      const key = loadOsCryptKey(paths.legacyLocalState);
+      const token = decryptEncValue(first(parsed, ["token", "accessToken", "access_token"]), key);
+      if (!token) throw new Error("AutoClaw auth.json 中没有 token");
+      let refreshToken = "";
+      try { refreshToken = decryptEncValue(first(parsed, ["refreshToken", "refresh_token"]), key); } catch { /* optional */ }
+      const info = parsed.userInfo || parsed.user || {};
+      return { ok: true, token, refreshToken, deviceId: String(first(parsed, ["deviceId", "device_id"])), uid: String(first(info, ["id", "userId", "user_id", "uid"]) || uidFromToken(token)), name: String(first(info, ["name", "nickname", "userName", "user_name"])), email: String(first(info, ["email"])), source: "AutoClaw/auth.json" };
     }
-    // auth.json 存在但结构不对 → 尝试 openclaw.json，都不行才报 auth.json 的错
   }
   const oc = readJsonFile(paths.openclawFile, "AutoClaw 网关配置 openclaw.json");
-  if (oc) {
-    const token = tokenFromOpenclaw(oc);
-    if (token) {
-      return {
-        ok: true,
-        token,
-        refreshToken: "", // openclaw.json 只有 access token，无 refresh_token（不可刷新）
-        deviceId: "",
-        uid: uidFromToken(token),
-        name: "",
-        email: "",
-        source: "openclaw.json",
-      };
-    }
-    if (fs.existsSync(paths.authFile)) throw new Error("AutoClaw auth.json 结构异常且 openclaw.json 中没有可用 token");
-  }
-  return { ok: false, message: "本机未找到 AutoClaw 登录态（%APPDATA%/AutoClaw/auth.json 不存在）" };
+  const token = oc && tokenFromOpenclaw(oc);
+  if (token) return { ok: true, token, refreshToken: "", deviceId: "", uid: uidFromToken(token), name: "", email: "", source: "openclaw.json" };
+  return null;
 }
 
-module.exports = { readDesktopLogin, desktopPaths, decryptEncValue, tokenFromOpenclaw, uidFromToken };
+function readDesktopLogin(product, opts) {
+  if (PRODUCTS[product]) {
+    const official = readOfficialLogin(product, opts);
+    if (official) return official;
+  }
+  const legacy = readLegacyLogin();
+  return legacy || { ok: false, message: "本机未找到 AutoClaw 登录态" };
+}
+
+/** 逐地区读登录态。**单个地区读失败不得掩盖其它地区**：新版两区各有独立登录态，
+ *  一个坏掉（换过 Windows 用户/文件损坏）只应让该地区如实出行，不能把好的一起标成不可读。
+ *  返回 { autoclaw?, autoclaw_intl?, legacy?, errors: { <地区|legacy>: 原因 } }。 */
+function readDesktopLogins(opts) {
+  const out = { errors: {} };
+  for (const product of Object.keys(PRODUCTS)) {
+    try {
+      const login = readOfficialLogin(product, opts);
+      if (login) out[product] = login;
+    } catch (e) {
+      out.errors[product] = String((e && e.message) || e).slice(0, 90);
+    }
+  }
+  try {
+    const legacy = readLegacyLogin();
+    if (legacy) out.legacy = legacy;
+  } catch (e) {
+    // 旧布局是两区共用的单一来源，读失败对每个渠道都算数（与历史行为一致）
+    out.errors.legacy = String((e && e.message) || e).slice(0, 90);
+  }
+  return out;
+}
+
+module.exports = { PRODUCTS, readDesktopLogin, readDesktopLogins, readOfficialLogin, desktopPaths, decryptEncValue, decryptV10Json, tokenFromOpenclaw, uidFromToken };

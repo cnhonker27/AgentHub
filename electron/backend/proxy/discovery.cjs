@@ -454,10 +454,13 @@ function scanRaccoon() {
   const token = String(parsed.access_token || "").trim();
   if (!token) return out;
   const dec = raccoonJwtPayload(token);
-  // uid 取小浣熊 JWT 的 iss（账户 ID，十六进制缩写，跨登录稳定 → 号池去重正确）；
-  // 缺失才退回 sid（会话 ID，每次登录变化）。util.jwtDecode 只认 data.id/auth_id/sub/user_id，
-  // 小浣熊顶层 iss/sid/name 读不出，故本地解析。
-  const uid = String(dec.iss || dec.sid || "");
+  // uid 取小浣熊 JWT 的 sub（账号 ID，每账号稳定唯一 → 号池去重正确）。
+  // iss 是签发方常量（"xiaohuanxiong.com/iam"，所有账号相同）**不是**账号 ID；sid 是登录会话 ID。
+  // 口径必须与 raccoonAuth.tokenUid 完全一致：否则同一条凭据「OAuth 登录落库」与「本机扫描」
+  // 会算出两个不同 uid —— 同一账号在号池里出现两条，且 store.open() 的一次性历史纠正
+  // 会被下一次扫描重新打回域名形态（来回震荡，永远修不干净）。
+  // util.jwtDecode 只认 data.id/auth_id/sub/user_id，小浣熊顶层 sub/iss/sid/name 读不出，故本地解析。
+  const uid = String(dec.sub || dec.uid || dec.id || dec.iss || "");
   const name = String(parsed.name || parsed.nickname || dec.name || (uid ? `账号 ${uid}` : ""));
   out.push({
     channel: "raccoon",
@@ -475,7 +478,7 @@ function scanRaccoon() {
   return out;
 }
 
-/** 小浣熊 JWT payload 本地解析（不进 store，仅扫描用）：读顶层 exp/iss/jti/name/sid */
+/** 小浣熊 JWT payload 本地解析（不进 store，仅扫描用）：读顶层 exp/sub/iss/jti/name/sid */
 function raccoonJwtPayload(token) {
   try {
     const t = String(token || "").trim().replace(/^Bearer\s+/i, "");
@@ -581,44 +584,48 @@ function scanAll() {
   return [...scanTrae(), ...scanWorkBuddy(), ...scanRaccoon(), ...scanZcode(), ...scanQoder(), ...scanCatpaw(), ...scanAutoclaw(), ...scanCline()];
 }
 
-/** AutoClaw 本机登录态扫描：读 %APPDATA%/AutoClaw/auth.json（加密）→ ~/.openclaw-autoclaw/openclaw.json（明文 JWT）。
- *
- *  与参照实现同一条歧义的处置：两地（国内/国际构建）**共用同一个登录态文件**且文件无地区标记，
- *  不猜地区——对两个渠道各产出一份候选，用户在哪个渠道下点导入就得到哪一家的账号
- *  （猜错可见 = 上游 401，换一项重导即可）。 */
+/** AutoClaw 本机登录态扫描：新版两个官方目录按地区归属；旧版共享来源仍同时产出双区候选。 */
 function scanAutoclaw() {
   const out = [];
   const channels = ["autoclaw", ...(store.AUTOCLAW_INTL_ENABLED ? ["autoclaw_intl"] : [])]
     .filter((ch) => store.CHANNELS.some((c) => c.id === ch) && adapters.channelOn(ch));
   if (!channels.length) return out;
-  let login = null;
-  try {
-    login = require("./autoclaw/credentials.cjs").readDesktopLogin();
-  } catch (e) {
-    // 解密失败如实回报原因（常见：与客户端不同 Windows 用户 / Local State 缺失），两区各一条
+  const credentials = require("./autoclaw/credentials.cjs");
+  let logins;
+  try { logins = credentials.readDesktopLogins(); }
+  catch (e) {
+    // 兜底：readDesktopLogins 已逐地区吞错，走到这里说明是更外层的意外失败
     const reason = String((e && e.message) || e).slice(0, 90);
-    for (const ch of channels) {
-      out.push({ channel: ch, uid: "", name: "", token: "", refreshToken: "", source: "scan", encrypted: true, file: `AutoClaw 登录态：${reason}` });
-    }
-    return out;
+    return channels.map((channel) => ({ channel, uid: "", name: "", token: "", refreshToken: "", source: "scan", encrypted: true, file: `AutoClaw 登录态：${reason}` }));
   }
-  if (!login || !login.ok) return out;
-  const exp = (() => {
-    try { const p = util.jwtDecode(login.token); return p && p.exp ? p.exp * 1000 : 0; } catch { return 0; }
-  })();
-  for (const ch of channels) {
+  const errors = logins.errors || {};
+  const add = (channel, login) => {
+    if (!login || !login.ok || !channels.includes(channel)) return;
+    const exp = (() => { try { const p = util.jwtDecode(login.token); return p && p.exp ? p.exp * 1000 : 0; } catch { return 0; } })();
     out.push({
-      channel: ch,
+      channel,
       uid: login.uid,
       name: login.name || login.email || (login.uid ? `账号 ${String(login.uid).slice(-6)}` : ""),
       token: login.token,
       refreshToken: login.refreshToken,
       expiresAt: exp,
-      // desktop 标记 + deviceId（刷新/签到/登录接口的 device_id 来源）
-      meta: { desktop: true, ...(login.deviceId ? { deviceId: login.deviceId } : {}) },
+      meta: { desktop: true, ...(login.deviceId ? { deviceId: login.deviceId } : {}), ...(login.email ? { email: login.email } : {}) },
       source: "scan",
-      file: `%APPDATA%/AutoClaw/auth.json（${login.source}）`,
+      file: `%APPDATA%/${login.source}`,
     });
+  };
+  // 新版目录名本身就是地区信号，不能再复制到另一地区。
+  add("autoclaw", logins.autoclaw);
+  add("autoclaw_intl", logins.autoclaw_intl);
+  // 旧布局没有地区信息，保留历史行为：每个启用渠道各一条候选。
+  if (logins.legacy) for (const channel of channels) add(channel, logins.legacy);
+  // 读失败按地区如实出行（常见：与客户端不同 Windows 用户 / Local State 缺失）。
+  // 只在对应地区**没有**成功候选时才出，避免好账号被同一地区的错误行盖住；
+  // 旧布局是两区共用来源，读失败对每个尚无候选的渠道都算数。
+  for (const [product, channel] of [["autoclaw", "autoclaw"], ["autoclaw_intl", "autoclaw_intl"]]) {
+    if (!channels.includes(channel) || out.some((c) => c.channel === channel)) continue;
+    const reason = errors[product] || errors.legacy;
+    if (reason) out.push({ channel, uid: "", name: "", token: "", refreshToken: "", source: "scan", encrypted: true, file: `AutoClaw 登录态：${reason}` });
   }
   return out;
 }
@@ -762,12 +769,16 @@ function currentLocalLogins() {
     if (login.uid) out.catpaw = { uid: login.uid, name: String(login.loginName || "") };
   } catch { /* 同上 */ }
   try {
-    // AutoClaw 两地共用同一个登录态文件（无地区标记），两键同值——徽标只是「本机有登录态」的提示
-    const login = require("./autoclaw/credentials.cjs").readDesktopLogin();
-    if (login && login.ok && login.uid) {
-      const name = String(login.name || login.email || "");
-      out.autoclaw = { uid: login.uid, name };
-      if (store.AUTOCLAW_INTL_ENABLED) out.autoclaw_intl = { uid: login.uid, name };
+    // 新版两个官方目录各自带地区标记，按地区点亮徽标；旧布局无地区信息，两键同值
+    //（徽标只是「本机有登录态」的提示）。
+    const logins = require("./autoclaw/credentials.cjs").readDesktopLogins();
+    for (const [channel, login] of [["autoclaw", logins.autoclaw], ["autoclaw_intl", logins.autoclaw_intl]]) {
+      if (login && login.ok && login.uid) out[channel] = { uid: login.uid, name: String(login.name || login.email || "") };
+    }
+    if (logins.legacy && logins.legacy.ok && logins.legacy.uid) {
+      const name = String(logins.legacy.name || logins.legacy.email || "");
+      out.autoclaw = { uid: logins.legacy.uid, name };
+      if (store.AUTOCLAW_INTL_ENABLED) out.autoclaw_intl = { uid: logins.legacy.uid, name };
     }
   } catch { /* 同上 */ }
   try {
@@ -817,7 +828,12 @@ function importCandidate(candidate, channelOverride) {
       token: candidate.token,
       refreshToken: candidate.refreshToken || undefined,
       expiresAt: candidate.expiresAt || undefined,
-      meta: { ...curMeta, ...meta, deviceId: curMeta.deviceId || meta.deviceId },
+      // 设备标识一律「旧值优先」：machineId 是**该账号登录时**客户端生成并落盘的，
+      // 而读取端（~/.qoder{,-cn}/.auth/machine_id）永远只能读到「当前登录的那个账号」的。
+      // 重新导入别的账号时若直接覆盖，两个账号会共用同一个设备标识——上游按设备去重时，
+      // 第二个账号永远领不到（issue #118：多账号只有一个能签到）。
+      // raccoon 的 deviceId 早就是这么处理的，qoder 这边漏了
+      meta: { ...curMeta, ...meta, deviceId: curMeta.deviceId || meta.deviceId, machineId: curMeta.machineId || meta.machineId },
       status: "online",
       coolUntil: 0,
       coolReason: "",
@@ -848,10 +864,14 @@ function traeCfg() {
   return rules.get("headers.json").trae || {};
 }
 
-/** 账号级稳定设备指纹：15 位纯数字 deviceId + 64 hex machineId（与对话请求同源） */
+/** 账号级稳定设备指纹：复用 adapters.deviceIds 的派生算法（逐字节取模 + 连续零扰动，
+ *  熵高于本文件原先的"去字母取前 15 位"写法——后者把 SHA-256 的 hex 去字母后有效随机位
+ *  被压缩，且相邻重复数字进一步拉低熵；设备指纹是风控识别关键，弱随机会增加多账号被
+ *  上游判为同设备的概率）。seed 形态与 adapters 的 `agenthub:device:{seed}` 命名空间错开，
+ *  避免与对话请求侧撞出同一 deviceId */
 function deviceFingerprint(seed) {
-  const h = crypto.createHash("sha256").update(String(seed || "")).digest("hex");
-  return { deviceId: Array.from(h.replace(/[a-f]/g, "")).slice(0, 15).join("").padEnd(15, "0"), machineId: h };
+  const { deviceIds } = require("./adapters.cjs");
+  return deviceIds({ id: `discovery:${seed}` });
 }
 
 function pkcePair() {
@@ -1296,9 +1316,18 @@ async function beginRaccoonOAuth(channel, onDone, helpers) {
         finishOAuth({ ok: false, message: cred.message });
         return { ok: false, message: cred.message };
       }
-      // uid 从 access_token 的 iss 解（与 scanRaccoon 同口径），office_identity 入 meta
+      // uid 从 access_token 的 sub 解（账号 ID；iss 是签发方常量），office_identity 入 meta
       const uid = raccoonAuth.tokenUid(cred.token) || "";
-      const existing = uid ? store.listAccounts(channel).find((a) => a.uid === uid) : null;
+      // 二次判别：历史版本把 iss 常量当 uid 存过库，那些行 uid 全是同一个域名 ⇒ 只按 uid 判等会把
+      // 新号误判成「已存在」而只更新不新增。officeIdentity 是本账号真正身份，用它区分；
+      // 两边都为空时退回按 uid 判等（老数据行为不变）。
+      const sameAccount = (a) => {
+        if (!a || String(a.uid || "") !== String(uid)) return false;
+        const oldOi = String((a.meta && a.meta.officeIdentity) || "");
+        const newOi = String(cred.officeIdentity || "");
+        return oldOi && newOi ? oldOi === newOi : true;
+      };
+      const existing = uid ? store.listAccounts(channel).find(sameAccount) : null;
       const seed = crypto.createHash("sha256").update(`agenthub:raccoon:${uid || "anon"}`).digest("hex");
       const deviceId = `${seed.slice(0, 8)}-${seed.slice(8, 12)}-4${seed.slice(13, 16)}-a${seed.slice(17, 20)}-${seed.slice(20, 32)}`;
 
@@ -1696,7 +1725,10 @@ async function saveQoderAccount(channel, cred) {
       token,
       refreshToken,
       expiresAt: expiresAt || undefined,
-      meta: { ...oldMeta, ...meta },
+      // machineId 旧值优先：同 importCandidate 的注释（issue #118）——重新登录/续期时
+      // 当前机器上读到的是「正在登录的那个账号」的 machine_id，直接覆盖会把同渠道
+      // 其它账号的设备标识一起改掉，多账号从此共用一个身份
+      meta: { ...oldMeta, ...meta, machineId: oldMeta.machineId || meta.machineId },
       status: "online",
       coolUntil: 0,
       coolReason: "",

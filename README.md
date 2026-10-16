@@ -6,32 +6,34 @@
 
 > 把「技能、用量、额度、记忆」四件事收进一个 Windows 桌面应用。
 
-AgentHub 是一个**本地运行**的中控台（Electron + Vue 3 + TypeScript）。它自己不带任何模型，做的是把你在各家 AI 编程工具里的东西统一管起来：技能在哪个工具里重复安装、这个月 token 花在哪儿、订阅额度能不能给别的客户端用、Agent 记不住项目——这四类日常麻烦，对应下面四个板块。
+AgentHub 是本地运行的中控台（Electron + Vue 3 + TypeScript），自身不带模型，只把你散在各家 AI 编程工具里的东西管起来：Skill 重复安装、这个月 token 花在哪儿、订阅额度能不能给别的客户端用、Agent 记不住项目。这四件事对应下面四个板块。
+
+它有两个形态：**Windows 桌面版**（四个板块全功能，见 [Windows 版下载与安装](#windows-版下载与安装)）和 **Docker 版**（只含反代网关，适合放到服务器上常驻，见 [Docker 版下载与安装](#docker-版下载与安装)）。
 
 | 板块 | 一句话 | 适合谁 |
 | --- | --- | --- |
-| **技能仓库** | 把散落在各工具的 Skill 收进中央库，一处维护、一键分发 | 同时用 Codex / Claude Code / ZCode / Cursor 等多个工具的人 |
-| **用量统计** | 汇总 20 个数据源的 token 用量与费用，按天/项目/模型看趋势 | 想知道「这个月到底烧了多少」的人 |
-| **反代网关** | 把已登录的订阅额度包成 OpenAI 兼容 API，给任何客户端用 | 有 Trae / WorkBuddy / 商汤小浣熊 / ModelScope（魔搭）/ LobsterAI / ZCode / CatPaw / Qoder / AutoClaw / Cline 任一渠道的订阅额度、想让其他软件也能调用的人 |
-| **记忆中枢** | 本地 Markdown 记忆库 + MCP 服务，让 Agent 记住项目与偏好 | 不想每次开新会话都重新交代背景的人 |
+| **技能仓库** | 各工具的 Skill 收进一个中央库，一处维护、一键挂回 | 同时用 Codex / Claude Code / ZCode / Cursor 等多个工具的人 |
+| **用量统计** | 汇总 20 个数据源的 token 用量与费用，按天 / 项目 / 模型看趋势 | 想知道这个月到底烧了多少的人 |
+| **反代网关** | 把本机已登录的订阅额度包成标准 API，任何客户端都能调 | 手里有订阅额度（Trae / WorkBuddy / 小浣熊 / 魔搭 / ZCode / Qoder / Cline 等 14 个渠道）、想让别的软件也用上的人 |
+| **记忆中枢** | 本地 Markdown 记忆库 + MCP 服务，让 Agent 记住项目和偏好 | 不想每次开新会话都重新交代背景的人 |
 
 ---
 
 ## 目录
 
-- [下载与安装](#下载与安装)
-- [界面总览](#界面总览)
+- [Windows 版下载与安装](#windows-版下载与安装)
+- [Docker 版下载与安装](#docker-版下载与安装)
 - [板块一：技能仓库](#板块一技能仓库)
 - [板块二：用量统计](#板块二用量统计)
 - [板块三：反代网关](#板块三反代网关)
 - [板块四：记忆中枢](#板块四记忆中枢)
 - [常见问题](#常见问题)
 - [开发与自测](#开发与自测)
-- [免责声明](#免责声明)
+- [使用声明](#使用声明)
 
 ---
 
-## 下载与安装
+## Windows 版下载与安装
 
 ### 安装版（推荐）
 
@@ -58,12 +60,39 @@ AgentHub 是一个**本地运行**的中控台（Electron + Vue 3 + TypeScript�
 
 ---
 
-## 界面总览
+## Docker 版下载与安装
 
-- **左侧**：四个板块卡片（可拖动排序），卡片上直接显示该板块的关键状态；最左下角是设置齿轮、版本号、亮暗主题切换
-- **顶部横条**：当前板块的子页面切换；最右侧「配置」按钮进入该板块的配置页
-- **页面红点**：某个页签右上角出现小红点，表示那一页有东西等你处理（如技能冲突裁决、记忆待确认），处理完自动消失
-- **托盘**：双击唤回窗口；右键可暂停同步、手动同步、查看今日用量
+Docker 版只含**反代网关**（没有桌面端的技能 / 用量 / 记忆三个板块），适合把网关丢到服务器上常驻。渠道代码与桌面版同一套，账号通过 WebDAV/S3 号池同步互通；镜像自带 **Web 控制台**，浏览器打开服务器地址就能管号池、Key 和渠道。
+
+前提：Docker 20.10+ 与 Compose v2，Linux 服务器 1 核 512MB 起。
+
+```bash
+git clone https://github.com/HUIdada1/AgentHub.git && cd AgentHub
+
+# 凭据加密密钥，务必留存好：丢了以后已加密的凭据不可恢复
+export AGENTHUB_SECRET_KEY=$(openssl rand -base64 32)
+
+# 容器内以 uid 1000 运行，宿主数据目录属主要对齐
+mkdir -p gateway-data && sudo chown 1000:1000 gateway-data
+
+docker compose -f gateway/docker-compose.yml up -d --build
+```
+
+起来后自检：
+
+```bash
+curl -s http://127.0.0.1:9528/api/livez     # {"ok":true}，进程活着
+curl -s http://127.0.0.1:9528/api/readyz    # 503 = 池里还没账号，正常
+```
+
+- 浏览器打开 `http://<服务器>:9528/` 即 **Web 控制台**（需先设 `AGENTHUB_ADMIN_TOKEN`，登录时输入的就是它）
+- 客户端连 `http://<服务器>:9527/v1`，Key 在控制台里建，也可以用管理 API（`POST /api/keys`）
+- 管理 API 与 Web 控制台默认只绑宿主 `127.0.0.1:9528`；设了 `AGENTHUB_ADMIN_TOKEN` 才能从外部访问
+- 账号来源：桌面版配好 WebDAV 后同步过去（推荐），或 `POST /api/accounts/import` 导入 JSON
+- 容器里没有桌面客户端，**本机软件导入、切到 IDE、Qoder 双区**这些依赖 Windows 客户端的能力用不了
+- 别把桌面版的数据目录挂给容器：那边凭据是 DPAPI 密文，Linux 侧解不开
+
+端口、备份、密钥轮换、WebDAV 与容器同机部署、排障等完整说明见 [gateway/README.md](./gateway/README.md)。
 
 ---
 
@@ -71,7 +100,7 @@ AgentHub 是一个**本地运行**的中控台（Electron + Vue 3 + TypeScript�
 
 ### 它解决什么问题
 
-同一个 Skill 你可能在 Codex、Claude Code、ZCode、Cursor 里各装了一份，改一处忘一处。技能仓库的做法是：**把所有工具的 Skill 目录收进一个中央仓库，再由中央仓库挂载回各工具**——之后只在中央仓库维护，一处更新，处处生效。
+同一个 Skill 你在 Codex、Claude Code、ZCode、Cursor 里各装了一份，改一处忘三处。技能仓库把所有工具的 Skill 目录收进一个中央仓库，再挂载回各工具：以后只在中央库维护，一处更新，处处生效。
 
 ### 页面构成
 
@@ -79,7 +108,7 @@ AgentHub 是一个**本地运行**的中控台（Electron + Vue 3 + TypeScript�
 | --- | --- |
 | 仪表盘 | 中央库与各工具连接状态总览：收了多少技能、挂载是否健康、有没有孤儿目录 |
 | 中央技能库 | 技能列表与详情，逐条查看/收纳/挂载，挂载失效时可一键修复 |
-| 去重与冲突 | 同一技能在不同工具里内容不一致时列出差异，人工裁决保留哪份 |
+| 去重与冲突 | 同一技能在不同工具里内容不一致时列出差异，人工裁决保留哪份；工具目录里的链接指向别处时，决定链接该指向谁 |
 | 同步中心 | 扫描预览 → 确认执行 → 查看报告，一次把「收什么、挂什么、有什么要裁决」讲清楚 |
 | WebDAV 同步 | 中央仓库跨设备同步（服务器地址在「设置 · WebDAV 同步」里配） |
 
@@ -97,7 +126,7 @@ AgentHub 是一个**本地运行**的中控台（Electron + Vue 3 + TypeScript�
 
 ### 它解决什么问题
 
-各家 AI 工具的用量分散在各自的本地数据库里，没人告诉你「这个月一共花了多少」。用量统计直接读**本机客户端自己的数据文件**，把 20 个数据源归一成同一套口径，做汇总、趋势、费用与跨设备对比。
+用量散在各家工具自己的本地库里，没人告诉你这个月一共花了多少。用量统计直接读**本机客户端的数据文件**，把 20 个数据源归一到同一套口径，做汇总、趋势、费用和跨设备对比。
 
 ### 支持的数据源（20 个）
 
@@ -125,7 +154,17 @@ ZCode、商汤小浣熊、Xiaomi MiMo、Codex、DeepSeek Harness、WorkBuddy、W
 
 ## 板块三：反代网关
 
-> 这是本项目最核心的板块。它把你**本机已经登录**的订阅额度，包装成一个标准的 **OpenAI Chat Completions API**，任何支持「自定义 OpenAI 接口」的客户端都能直接调用。
+> 这是本项目最核心的板块：把**本机已经登录**的订阅额度包成标准 API，任何支持「自定义接口」的客户端都能直接调用。
+>
+> 入站三条协议面，**同一个地址、同一把 Key**，按客户端讲的协议自动分流：
+>
+> | 端点 | 协议 | 谁会用 |
+> | --- | --- | --- |
+> | `POST /v1/chat/completions` | OpenAI Chat Completions | Cherry Studio / ChatBox / NextChat / Cline / Roo Code 等「OpenAI 兼容」客户端 |
+> | `POST /v1/messages`（另有 `POST /v1/messages/count_tokens`） | Anthropic Messages | Claude Code / Anthropic SDK |
+> | `POST /v1/responses` | OpenAI Responses | Codex CLI |
+>
+> 三条面共用同一套调度：鉴权、模型别名、模型禁用、回退链、号池换号、冷却决策与记账完全一致，区别只在「怎么读网关 Key」和「写成什么字节」。所以 **Claude Code 与 Codex 可以直接把网关地址填进去，用到全部渠道**，不必再经 CC Switch 做协议翻译。
 
 ### 支持的渠道
 
@@ -167,9 +206,9 @@ ZCode、商汤小浣熊、Xiaomi MiMo、Codex、DeepSeek Harness、WorkBuddy、W
 | 号池 | 按渠道管理账号：状态、余额、套餐到期、策略、添加账号、一键签到、切到 IDE |
 | API Keys | 生成/停用 Key，配置日配额与限速；完整 Key 随时可查看复制 |
 | 模型目录 | 全渠道模型合并视图，逐模型启停、指定渠道、设置倍率与别名；各渠道官方目录可一键从云端拉取 |
-| 用量统计 | 网关自身的请求流水：总览 / 趋势 / TOP（渠道、模型、Key、账号）/ 明细分页，保留 90 天 |
+| 用量统计 | 网关自身的请求流水：时间区间可选（今天 / 7 天 / 30 天 / 90 天 / 自定义）、KPI 与趋势（请求数 / Token / 成功率 / 延迟多指标切换，悬停看精确数值）、Token 构成与请求状态环形图、用量占比 TOP（渠道 / 模型 / Key / 账号 × 按请求 / 按 Token，含请求与响应 token 分列）、各 Key 用量、明细（Key / 模型模糊搜索 + 渠道 / 状态筛选）；流水保留期可配（默认 90 天） |
 | 号池同步 | 多台电脑共享号池：账号与凭据打包经 WebDAV 同步，可选只同步某一个渠道 |
-| 生态接入 | 一键把网关注册进 CC Switch，给 Claude Code / Codex / Claude Desktop 用 |
+| 生态接入 | 一键把网关注册进 CC Switch，给 Claude Code / Codex / Claude Desktop 用（这三家也能直接填网关地址，见上方三条入站协议面） |
 
 ### 上手教程
 
@@ -228,15 +267,23 @@ http://127.0.0.1:9527/v1
 
 保存后发一句话测试，回到「总览」看到实时请求流里出现记录，就说明链路通了。
 
-> **给 Claude Code / Codex / Claude Desktop 用？** 它们说的是自家协议（Anthropic Messages / Responses），不能直连。按下面第 5 步走「生态接入」。
+> **给 Claude Code / Codex / Claude Desktop 用？** 网关听得懂它们的原生协议，可以直接把网关地址填进去（见本节开头的三条入站协议面）。想让 CC Switch 在一个地方统管多套 provider 配置，走下面第 5 步「生态接入」。
 
 #### 第 5 步（可选）：接入 Claude Code / Codex
+
+**方式 A：直连（推荐，不用额外装东西）**
+
+- **Claude Code / Anthropic SDK**：`ANTHROPIC_BASE_URL` 填 `http://127.0.0.1:9527`（不要带 `/v1`），`ANTHROPIC_AUTH_TOKEN` 填第 3 步生成的 Key
+- **Codex CLI**：`~/.codex/config.toml` 里把 provider 的 `base_url` 填 `http://127.0.0.1:9527/v1`、`wire_api = "responses"`（Codex 已移除对 `chat` 的支持，写 `chat` 会直接报错）
+- 模型名从「模型目录」页里挑一个可用的填上即可
+
+**方式 B：经 CC Switch 托管**（想在一个地方统管多套 provider 配置时）
 
 1. 先装好 [CC Switch](https://github.com/farion1231/cc-switch)
 2. 进入「反代网关 · 生态接入」，选择要接入的应用（Claude Code / Codex / Claude Desktop），选定一个 API Key 和默认模型，点注册
    - 注册前会自动备份 CC Switch 数据库，且只会写入自己那一条固定条目，不动你的其它 provider
-   - Claude 侧只写 `ANTHROPIC_AUTH_TOKEN`（网关只认 `Authorization: Bearer`），避免和 `x-api-key` 同时出现触发鉴权告警
-3. 注册完成后，到 CC Switch 里**打开「代理接管」**再启动对应客户端——CC Switch 要靠它做协议翻译，直连网关必 404
+   - Claude 侧只写 `ANTHROPIC_AUTH_TOKEN`。网关的 Messages 面同时认 `x-api-key` 与 `Authorization: Bearer`，但两个头都带且不是同一把 Key 时会被判成配置错误（拒绝而不是猜一把），所以只写一个
+3. 注册完成后，到 CC Switch 里**打开「代理接管」**再启动对应客户端
 4. Codex 的 `wire_api` 语义上必须是 `responses`，CC Switch 会依据条目里的 `apiFormat` 判定需要转换，不用手动改
 
 ### 号池与自动切换
@@ -255,6 +302,12 @@ http://127.0.0.1:9527/v1
 - 点击后会弹确认框，确认即自动：关闭客户端 → 备份原登录态 → 写入 → 重新打开客户端
 - 写入前后有多道校验（防并发回写、写后回读校验失败自动回滚）；ZCode 采用合并式写回，不会动你的远程连接地址；小浣熊会保留账号专属设备指纹，避免跨号串号导致旧号被吊销
 
+### 连接远程网关（可选）
+
+服务器上用 Docker 版常驻网关时，桌面版可以在「反代网关 → 配置 → 远程实例」里连上它：填地址（`http://<服务器>:9528`）和管理令牌（服务器上的 `AGENTHUB_ADMIN_TOKEN`），测试通过后，反代页右上角的切换按钮可以在「本机 / 远程」之间切换——切到远程后，反代板块所有页面对的就是那台服务器，建 Key、改渠道、触发签到这些操作都在桌面界面里完成；容器里做不了的事（启停网关、IDE 切号、打开目录）会直接说明原因。
+
+日常监视建议在服务器上另设只读令牌 `AGENTHUB_ADMIN_READONLY_TOKEN`（只能看不能改）；`http` 地址仅限内网，公网请给 9528 配 https——管理令牌不能明文出网。
+
 ### 多台电脑共享号池
 
 「号池同步」页把账号与凭据打包（用统一 WebDAV 密码 AES-256-GCM 加密）传到 WebDAV，另一台电脑拉下来即可共用同一批号。可以选择同步全部渠道，也可以只同步某一个渠道；进度按阶段展示，中途可看细节。
@@ -272,9 +325,9 @@ http://127.0.0.1:9527/v1
 
 ### 它解决什么问题
 
-Agent 每次开新会话都不记得你的项目背景、技术决策和踩过的坑。记忆中枢在本地维护一个 **Markdown 记忆库**，把会话中值得长期保留的事实沉淀下来，再通过 **MCP 服务**提供给各个 Agent 读写——你的记忆始终是本地一堆可读可 diff 的 md 文件。
+Agent 每次开新会话都不记得你的项目背景、技术决策和踩过的坑。记忆中枢在本地维护一个 **Markdown 记忆库**，把会话里值得长期保留的事实沉淀下来，再通过 **MCP 服务**给各个 Agent 读写——你的记忆始终是本地一堆可读、可 diff 的 md 文件。
 
-默认仓库位置：`~/AgentHub/memory`，按 `projects/<项目>/l1/<agent>/<日期>.md`（原始事实）与 `projects/<项目>/l2/...`（蒸馏出的项目汇总 / 决策 / 知识）组织。
+默认仓库在 `~/AgentHub/memory`：`projects/<项目>/l1/<agent>/<日期>.md` 存原始事实，`projects/<项目>/l2/...` 存蒸馏出的项目汇总、决策与知识。
 
 ### 页面构成
 
@@ -320,6 +373,9 @@ Trae 的本地登录态是 ByteCrypto 加密信封，绑定了设备密钥，无
 **Q：小浣熊多账号要注意什么？**
 多账号入池请统一在 AgentHub 的「OAuth 登录」里做。**不要在电脑端小浣熊软件里点「退出登录」**——商汤服务端会因此吊销旧号凭证，导致号池里的旧账号失效。
 
+**Q：号池用 WebDAV 同步到第二台电脑后，小浣熊账号显示「需重登」怎么办？**
+不用重新登录，先让它自己缓过来：小浣熊的刷新令牌是一次性轮换的（第一台每刷一次，同步过去的那份就会作废），v1.68.1 起刷新被服务端拒绝时会自动到其他设备把最新凭据取回来重试，第一台下次刷新也会立刻回传，所以**保持两台都开着、网络与 WebDAV 正常，等一轮额度刷新（默认 30 分钟）即可**。同一账号请只在 AgentHub 里登录一次：**不要在第二台电脑上用 OAuth 或客户端再登录同一个号**——那会产生第二个会话（服务端按会话互踢），连第一台也会一起掉。真掉登录时账号气泡会说明原因（服务端拒绝 / 并发抢刷 / 疑似在别处重新登录）。
+
 **Q：点「切到 IDE」会不会打断我正在用的客户端？**
 会：程序需要先关闭对应客户端，写入登录态后再自动打开（这也是为什么每次都会先弹一个确认框）。如果你此刻正在那个客户端里干活，先存盘再点。
 
@@ -352,6 +408,14 @@ npm run electron:build   # 打包安装版与便携版到 release/
 ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron.exe tools/proxy-smoke.cjs
 ```
 
+三条入站协议面各自的回归闸（真实 HTTP 打进真调度核心，只桩上游与号池；纯 Node，不需要 Electron）：
+
+```bash
+node scripts/dev-sink-golden.cjs         # OpenAI 通路：16 场景的响应字节 / 冷却决策 / 选号顺序 / 流水与基线逐字相等（动调度核心前后必跑）
+node scripts/dev-anthropic-in-test.cjs   # /v1/messages：归一 + 事件序 + 错误外壳 + 止血开关
+node scripts/dev-responses-in-test.cjs   # /v1/responses：归一 + 事件序 + Codex 三条硬约束 + 止血开关
+```
+
 Qoder 渠道专项自测（离线，默认不联网、不消耗额度；凭据与签名器相关断言需要本机装有 Qoder 客户端）：
 
 ```bash
@@ -366,10 +430,17 @@ Cline 双渠道专项自测（离线 + 本地假上游，不联网、不消耗�
 ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron.exe tools/proxy-cline-selftest.cjs   # 协议断言 + 假上游端到端
 ```
 
+技能仓库自测（纯 Node，只在临时目录里造现场，不碰真实 home / 不联网）：
+
+```bash
+node scripts/test-skills-diff-link.cjs    # 链接指向异常：现场识别 + relink / adopt 两个动词 + 裁决后不复发
+```
+
 记忆中枢验证入口：
 
 ```bash
-npm run verify:memory
+npm run verify:memory                                             # 静态校验：IPC 管道 / 配置分档 / 术语 / 导航 / 结构
+node tools/memory-runtime-path-selftest.cjs                       # 桥的 runtime 定位：各平台目录布局 + 大小写 + 离线报错
 ```
 
 代码结构：
@@ -379,6 +450,7 @@ electron/            主进程
   backend/
     adapter-*.cjs    各用量数据源适配器
     proxy/           反代网关（存储 / 适配器 / 号池 / 网关服务 / 规则热加载 / IDE 切换）
+      protocols/     入站与出线协议面（openai-out / anthropic-in+out / responses-in+out）
     memory/          记忆中枢（存储 / 索引 / 检索 / 接入 / 自动化 / 导入）
   main.cjs           应用入口（窗口 / 托盘 / 更新）
 src/                 渲染层（Vue 3）
@@ -390,9 +462,61 @@ src/                 渲染层（Vue 3）
 
 ---
 
-## 免责声明
+## 使用声明
 
-本项目为**开源学习研究项目**，仅供个人在已合法订阅相应服务的前提下，于本地环境调用自有账号额度。使用者不得用于任何违反目标服务条款、侵犯第三方权益或商业转售的用途；因使用本项目产生的一切后果（包括但不限于账号限制、封禁）由使用者自行承担，作者概不负责。本项目与 Trae、WorkBuddy、腾讯、商汤、智谱等公司无任何关联，相关商标归其各自所有者。
+> 请在使用本项目前完整阅读本节。**下载、安装、启动或以任何方式使用本项目，即视为你已阅读、理解并全部接受以下条款。**
+
+### 一、仅供学习与交流
+
+本项目是一个用于学习 **HTTP 反向代理、SSE 流式透传、多上游协议适配、本地凭据管理、跨工具技能目录管理与 Electron 桌面端打包**等技术主题的实践项目，仅供个人学习与研究使用，不是任何公司的官方产品。
+
+本项目与下列公司及其产品**均无任何关联**，未获得其授权、认可、赞助或背书：
+
+腾讯及 WorkBuddy / CodeBuddy、字节跳动及 Trae、商汤科技及小浣熊、智谱及 ZCode / AutoClaw / AutoGLM、美团及 CatPaw、阿里巴巴及 Qoder / ModelScope（魔搭）、网易有道及 LobsterAI、小米及 MiMo、DeepSeek 及 DeepSeek Harness、Google 及 Antigravity、Cline，以及其他文中提及的服务提供方。
+
+文中出现的所有产品名、商标、服务名、协议名均归其各自所有者，仅用于标识与说明用途，不构成任何形式的关联或授权。
+
+### 二、关于反向代理行为
+
+本项目实现的是**本地反向代理**：在你自己的机器上复用**你自己账号**的登录态，把请求转发到官方上游网关。它不破解、不绕过任何付费或权限校验，使用的额度始终来自你自己账号本就拥有的配额。
+
+但需要明确的是，这种「以非官方客户端形态复用登录态」的转发方式，**可能不符合上游服务的用户协议或使用条款**；是否使用、以及由此产生的一切后果（包括但不限于账号被限流、被风控、被降权、被冻结或封禁，订阅被终止，积分/额度被清零），**均由使用者自行承担，作者不承担任何责任**。
+
+### 三、禁止用途
+
+禁止将本项目用于：
+
+- 任何商业用途、二次分发牟利、以本项目为载体售卖账号或额度
+- 批量账号运营、账号买卖、代刷代领、养号
+- 绕过上游计费、配额、风控或权限限制
+- 攻击、爬取、扫描或干扰任何服务的正常运行
+- 其他违反当地法律法规或上游服务条款的活动
+
+上述禁止事项同时写入 [LICENSE](./LICENSE) 第二部分的「附加使用条款」，构成本项目授权与使用约定的一部分，**不是仅作呼吁**。
+
+如需在生产环境或商业场景中调用相关模型服务，请使用**官方渠道与官方 API**。
+
+### 四、凭证与数据风险
+
+本项目需要读写本机已登录客户端的账号凭据（accessToken / refreshToken 等）与本地数据文件：
+
+- 凭据在本机经 Windows DPAPI 加密后落盘，网关 API Key 在库中仅存 SHA-256 哈希；但**导出与备份功能生成的文件包含可还原的凭据**，请自行妥善保管
+- 切勿将导出的凭据文件提交到公开仓库、上传到网盘、发送到聊天群或分享给他人
+- 若将服务绑定到 `0.0.0.0`（供局域网访问），同网段设备均可访问，请自行评估风险并设置 Key 的日配额与限速
+- 「切到 IDE」会关闭并重新写入本机客户端登录态，操作前请自行保存工作内容
+- 因凭证泄露、设备被他人使用、配置不当或误操作造成的任何损失，**由使用者自行承担，作者不承担任何责任**
+- 卸载程序**不会删除** `%APPDATA%\AgentHub`，如需彻底清除请自行删除该目录
+
+### 五、无担保与权利通知
+
+本项目按「现状」（AS IS）提供，作者**不对其可用性、稳定性、安全性、合法性、准确性或对特定用途的适用性作任何明示或默示的承诺与保证**。
+
+- 上游接口、鉴权方式、协议字段随时可能变更，本项目可能随时失效且不再维护，作者无更新、修复或答疑的义务
+- 使用本项目造成的任何直接或间接损失（包括但不限于账号损失、额度损失、数据丢失、业务中断、第三方索赔、监管处罚），**作者一概不承担任何责任**
+- 本项目中的接口形态、协议字段等信息来自对各官方客户端**公开网络通信的观察与整理**，仅用于学习研究；相关商标与服务的权利归其各自所有者
+- 若权利方认为本项目存在不当之处，请联系作者，将及时调整或删除
+
+**完整条款见 [LICENSE](./LICENSE)。** 若你不同意本节任何一条，请立即停止使用并删除本项目及其相关数据。
 
 ## 作者
 
@@ -400,12 +524,15 @@ src/                 渲染层（Vue 3）
 
 ## License
 
-本项目基于 [MIT License](./LICENSE) 开源发布。
+本项目采用 **[MIT License](./LICENSE) + 附加使用条款** 的**复合授权**，**不是纯粹的 MIT 项目**：
+
+| 部分 | 内容 |
+| --- | --- |
+| 第一部分 · MIT License | 授予软件层面的使用、复制、修改、合并、发布、分发、再许可与销售权利 |
+| 第二部分 · 附加使用条款 | 对本项目的使用场景作进一步限制：禁止商业用途、禁止二次分发牟利、禁止批量账号运营、禁止绕过上游计费与配额、禁止攻击与干扰、禁止违法用途 |
+
+两部分**不可分割**，共同构成本项目完整的授权与使用约定；仅接受其中一部分者，不得以任何形式使用、复制、修改或分发本项目。附加条款与上文[使用声明](#使用声明)第三节「禁止用途」一致，如表述有出入以 [LICENSE](./LICENSE) 为准。
+
+商业场景使用须事先联系作者另行取得书面授权。完整条款（含 MIT 全文）见 [LICENSE](./LICENSE)。
 
 Copyright (c) 2026 沐辉 (HUIdada1)
-
-> Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
->
-> The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
->
-> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

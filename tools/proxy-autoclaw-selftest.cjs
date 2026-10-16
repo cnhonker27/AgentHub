@@ -26,6 +26,26 @@ const storeMod = require("../electron/backend/proxy/store.cjs");
 
 // ===== 离线协议断言 =====
 function offline() {
+  // ⓪ 主窗口 CSP 必须放行阿里云验证码 SDK（issue #105：v1.0.0 起 script-src 'self' 拦死
+  //   o.alicdn.com，脚本加载即报「验证码组件加载失败」，国际版 OAuth 从未走通过）。
+  //   这条护栏防止以后再改 CSP 时悄悄删掉放行项。SDK 实测触达：
+  //   脚本 o.alicdn.com / XHR *.aliyuncs.com（动态拼端点）/ iframe+图片 *.alicdn.com / 内嵌 data: 字体
+  {
+    const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
+    const m = html.match(/Content-Security-Policy"[^>]*content="([^"]+)"/);
+    assert(m, "index.html 存在 CSP meta");
+    const dir = {};
+    for (const part of m[1].split(";")) {
+      const [k, ...v] = part.trim().split(/\s+/);
+      if (k) dir[k] = v.join(" ");
+    }
+    assert((dir["script-src"] || "").includes("o.alicdn.com"), "CSP script-src 放行 o.alicdn.com（验证码 SDK 脚本）");
+    assert((dir["connect-src"] || "").includes("*.aliyuncs.com"), "CSP connect-src 放行 *.aliyuncs.com（SDK XHR 验证端点）");
+    assert((dir["connect-src"] || "").includes("*.alicdn.com"), "CSP connect-src 放行 *.alicdn.com（SDK 资源请求）");
+    assert((dir["frame-src"] || "").includes("*.alicdn.com"), "CSP frame-src 放行 *.alicdn.com（SDK 会建 iframe）");
+    assert((dir["font-src"] || "").includes("data:"), "CSP font-src 放行 data:（SDK 内嵌 iconfont）");
+  }
+
   // ① X-Auth-Sign 签名向量（拼接 appId&秒级时间戳&appKey，MD5 小写）
   {
     const { ts, sign } = headers.authSign("100003", "38d2391985e2369a5fb8227d8e6cd5e5", 1760000000000);
@@ -370,18 +390,161 @@ async function e2e() {
     assert(/手机验证码/.test(autoThrew), "beginOAuth(autoclaw) 显式 throw 指引 SMS");
     const noCaptcha = await discovery.beginOAuth("autoclaw_intl", () => {}, {}, {});
     assert(noCaptcha.ok === false && /风控验证参数/.test(noCaptcha.message || ""), "intl 缺 captchaVerifyParam 被前置拦截");
-    // 桌面导入：写明文形态 auth.json（明文 token 直通解密），两区各产出一条候选
+    // 桌面导入：新版官方目录按地区归属（device/active-product-account.json →
+    // accounts/<accountKey>/account-credentials.enc，v10 信封 + Local State os_crypt 密钥），
+    // 旧版 auth.json 无地区标识时仍双区候选。
+    const credentialsMod = require("../electron/backend/proxy/autoclaw/credentials.cjs");
+    const qoderAuth = require("../electron/backend/proxy/qoderAuth.cjs");
+    const testKey = crypto.randomBytes(32);
+    const keyLoader = () => testKey;
+    const mkOfficial = (productDir, accountKey, plain, profile, deviceId) => {
+      const dir = path.join(process.env.APPDATA, productDir);
+      const accDir = path.join(dir, "accounts", accountKey);
+      fs.mkdirSync(accDir, { recursive: true });
+      fs.mkdirSync(path.join(dir, "device"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "device", "active-product-account.json"), JSON.stringify({ schemaVersion: 1, accountKey }), "utf8");
+      fs.writeFileSync(path.join(dir, "device", "device-id.json"), JSON.stringify({ schemaVersion: 1, deviceId }), "utf8");
+      fs.writeFileSync(path.join(accDir, "account-profile.json"), JSON.stringify(profile), "utf8");
+      fs.writeFileSync(path.join(accDir, "account-credentials.enc"), qoderAuth.encryptV10(Buffer.from(JSON.stringify(plain), "utf8"), testKey));
+      return dir;
+    };
+    const cnKey = "a".repeat(64);
+    // 真实形态：token 里的 uid（= numericUserId）与 profile.accountId（32hex）**不同**，
+    // uid 必须取前者才能与短信/OAuth 登录路径（saveAutoclawAccount）同口径、不重复建号。
+    const cnDir = mkOfficial("AutoClaw-official", cnKey,
+      { access_token: jwtOf("874974", Math.floor(Date.now() / 1000) + 86400), refresh_token: "rt-cn" },
+      { profile: { accountId: "3b6336752803d5968ad77011f6885ae2", numericUserId: 874974, phone: "173****7208" } }, "c".repeat(64));
+    const intlKey = "b".repeat(64);
+    const intlDir = mkOfficial("AutoClaw-oversea-official", intlKey,
+      { accessToken: jwtOf("u-intl", Math.floor(Date.now() / 1000) + 86400), refreshToken: "rt-intl" },
+      { profile: { accountId: "u-intl", phone: "+1 555****000" } }, "i".repeat(64));
+
+    // 单元级（跨平台）：注入密钥绕过 DPAPI，校验真实布局解析与字段别名
+    const cnLogin = credentialsMod.readOfficialLogin("autoclaw", { keyLoader });
+    assert(cnLogin.ok && cnLogin.uid === "874974" && cnLogin.refreshToken === "rt-cn", "uid 取 token（与登录路径同口径），非 profile.accountId");
+    assert(cnLogin.deviceId === "c".repeat(64) && cnLogin.name === "173****7208", "device-id.json 元数据与脱敏手机号显示名");
+    assert(cnLogin.source.includes(`accounts/${cnKey}/account-credentials.enc`), "source 指向真实凭据文件");
+    const both = credentialsMod.readDesktopLogins({ keyLoader });
+    assert(both.autoclaw && both.autoclaw.uid === "874974" && both.autoclaw_intl && both.autoclaw_intl.uid === "u-intl" && !both.legacy, "两区目录各自归属（不串区）");
+    let badKeyThrew = "";
+    try { credentialsMod.readOfficialLogin("autoclaw", { keyLoader: () => crypto.randomBytes(32) }); } catch (e) { badKeyThrew = String((e && e.message) || e); }
+    assert(/解密失败/.test(badKeyThrew), "错误密钥如实报解密失败（不静默）");
+    // 单区失败不得掩盖另一区：两区各有独立登录态，一区坏掉只应让它自己出行。
+    const partial = credentialsMod.readDesktopLogins({
+      keyLoader: (localStatePath) => (String(localStatePath).includes("AutoClaw-official") ? testKey : crypto.randomBytes(32)),
+    });
+    assert(partial.autoclaw && partial.autoclaw.uid === "874974", "一区解密失败时另一区仍正常解出（不互相掩盖）");
+    assert(!partial.autoclaw_intl && /解密失败/.test(partial.errors.autoclaw_intl || ""), "失败地区单独记入 errors，不影响成功地区");
+
+    // e2e（仅 win32）：真 DPAPI 包密钥写 Local State，走完整 scanAutoclaw → importCandidate
+    // 沙箱/CI 里 powershell.exe 可能起不来（DPAPI 要靠它 Protect），给一条跳过路径：
+    // 只跳过这一段的桌面导入断言，其余 e2e（含 #107 的首字节预算解除）照跑——
+    // 否则一个环境限制会把整条闸红掉，真正的回归信号被淹没。
+    if (process.platform === "win32" && process.env.AGENTHUB_SKIP_DPAPI !== "1") {
+      const { execFileSync } = require("node:child_process");
+      const protect = (key) => {
+        const script = [
+          "$ErrorActionPreference='Stop'",
+          "Add-Type -AssemblyName System.Security | Out-Null",
+          `$b=[Convert]::FromBase64String('${key.toString("base64")}')`,
+          "$k=[System.Security.Cryptography.ProtectedData]::Protect($b,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser)",
+          "[Convert]::ToBase64String($k)",
+        ].join("; ");
+        const out = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", windowsHide: true, timeout: 15000 }).trim();
+        return Buffer.concat([Buffer.from("DPAPI", "ascii"), Buffer.from(out, "base64")]).toString("base64");
+      };
+      for (const d of [cnDir, intlDir]) fs.writeFileSync(path.join(d, "Local State"), JSON.stringify({ os_crypt: { encrypted_key: protect(testKey) } }), "utf8");
+      let cands = discovery.scanAutoclaw();
+      assert(cands.length === 2 && cands.some((c) => c.channel === "autoclaw" && c.uid === "874974") && cands.some((c) => c.channel === "autoclaw_intl" && c.uid === "u-intl"), "新版双区各出一条候选（不串区）");
+      const cnCand = cands.find((c) => c.channel === "autoclaw");
+      assert(cnCand.meta.deviceId === "c".repeat(64) && cnCand.file.includes(cnKey) && cnCand.name === "173****7208", "候选携带 deviceId/稳定 file 标签/显示名");
+      const importedCn = discovery.importCandidate(cnCand, "autoclaw");
+      assert(!!importedCn.id, "新版 CN 候选可导入");
+      // 让国际版解密失败（覆盖其 Local State 密钥），国内版仍须正常出候选，
+      // 国际版如实出一行「加密不可读」——而不是两区一起消失。
+      fs.writeFileSync(path.join(intlDir, "Local State"), JSON.stringify({ os_crypt: { encrypted_key: protect(crypto.randomBytes(32)) } }), "utf8");
+      const mixed = discovery.scanAutoclaw();
+      const cnRow = mixed.find((c) => c.channel === "autoclaw");
+      const intlRow = mixed.find((c) => c.channel === "autoclaw_intl");
+      assert(cnRow && cnRow.uid === "874974" && !cnRow.encrypted, "一区坏掉时另一区仍出可用候选（不被掩盖）");
+      assert(intlRow && intlRow.encrypted && /解密失败/.test(intlRow.file || ""), "失败地区如实出一行加密不可读（带原因）");
+    }
+    fs.rmSync(cnDir, { recursive: true, force: true });
+    fs.rmSync(intlDir, { recursive: true, force: true });
+
     const authDir = path.join(process.env.APPDATA, "AutoClaw");
     fs.mkdirSync(authDir, { recursive: true });
     fs.writeFileSync(path.join(authDir, "auth.json"), JSON.stringify({ deviceId: "d".repeat(64), token: jwtOf("u77", Math.floor(Date.now() / 1000) + 86400), refreshToken: "rt-desktop" }), "utf8");
     const cands = discovery.scanAutoclaw();
-    assert(cands.length === 2 && cands.every((c) => c.uid === "u77"), "桌面登录态两区各产出候选（不猜地区）");
-    assert(cands[0].meta.deviceId === "d".repeat(64), "桌面导入带 deviceId 进 meta");
+    assert(cands.length === 2 && cands.every((c) => c.uid === "u77"), "旧版桌面登录态仍为两区各产出候选");
+    assert(cands[0].meta.deviceId === "d".repeat(64), "旧版桌面导入带 deviceId 进 meta");
     const imported = discovery.importCandidate(cands[0], "autoclaw");
     assert(!!imported.id, "桌面候选可导入");
     fs.rmSync(authDir, { recursive: true, force: true });
+    assert(credentialsMod.readDesktopLogin("autoclaw").ok === false, "无登录文件时安全返回未找到");
 
-    console.log("AutoClaw e2e 全绿（对话/目录/余额/签到/刷新不回写/凭证缓存/登录/桌面导入）");
+    // —— 7. 首个 SSE 事件必须解除首字节预算（issue #107：漏解除 → 正常长回答被 30s 掐断）
+    // 行为级复现：把预算压到 400ms，假上游首块后延迟 1200ms 才发完。
+    // 漏解除时 400ms 就被 abort（客户端拿到半截回答），修复后整条流走完。
+    {
+      const { makeAutoClaw } = require("../electron/backend/proxy/autoclaw/adapter.cjs");
+      const utilMod = require("../electron/backend/proxy/util.cjs");
+      const enc7 = (o) => `data: ${JSON.stringify(o)}\n\n`;
+      // delayed=首块后延迟发完 / empty=只给响应头不给 body（首字节始终不到）
+      let mode7 = "delayed";
+      const srv7 = http.createServer((req, res) => {
+        req.resume();
+        req.on("end", () => {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          if (mode7 === "empty") return;
+          res.write(enc7({ id: "x", choices: [{ index: 0, delta: { role: "assistant", content: "你" } }] }));
+          setTimeout(() => {
+            res.write(enc7({ id: "x", choices: [{ index: 0, delta: { content: "好" }, finish_reason: "stop" }] }));
+            res.write("data: [DONE]\n\n");
+            res.end();
+          }, 1200);
+        });
+      });
+      await new Promise((r) => srv7.listen(0, "127.0.0.1", r));
+      const p7 = srv7.address().port;
+      const cfg7 = JSON.parse(JSON.stringify(rules.DEFAULTS["headers.json"]));
+      cfg7.autoclaw.userapiBase = `http://127.0.0.1:${p7}`;
+      cfg7.autoclaw_intl.userapiBase = `http://127.0.0.1:${p7}`;
+      fs.writeFileSync(hf, JSON.stringify(cfg7, null, 2), "utf8");
+      rules.reload("headers.json");
+
+      const ad7 = makeAutoClaw("autoclaw", {
+        fetchStream: adapters.fetchStream, pumpSse: adapters.pumpSse, httpJson: adapters.httpJson,
+        rules, util: utilMod,
+        deviceIds: () => ({ deviceId: "1".repeat(15), machineId: "a".repeat(64) }),
+        firstByteBudgetMs: () => 400, // 真实值 30s，这里压到 400ms 让缺陷在毫秒级暴露
+      });
+      const opts7 = (emit) => ({
+        account: acc, secrets, model: "glm-5.3",
+        body: { model: "glm-5.3", messages: [{ role: "user", content: "hi" }] },
+        emit, meta: {},
+      });
+
+      try {
+        const ev7 = [];
+        const r7 = await ad7.chat(opts7((e) => ev7.push(e)));
+        const deltas = ev7.filter((e) => e.type === "delta").length;
+        assert(r7.status === 200 && deltas === 2, `首块后延迟 1200ms 的第二块仍到达（预算已被首事件解除，实际 delta=${deltas}）`);
+        assert(!ev7.some((e) => e.type === "error"), "预算解除后整条流无截断错误");
+
+        // 首字节始终不到（响应头已到、body 空）：预算到点必须按「首字节超时」抛，
+        // 分类器据此不熔断、不冷却账号——否则一次慢请求就能把整条渠道冻结半小时
+        mode7 = "empty";
+        let emptyErr = null;
+        try { await ad7.chat(opts7(() => {})); } catch (e) { emptyErr = e; }
+        assert(emptyErr && emptyErr.firstByteTimeout === true, `未出内容的首字节预算到点按首字节超时抛出（实际：${emptyErr && emptyErr.message}）`);
+      } finally {
+        srv7.closeAllConnections?.();
+        srv7.close();
+      }
+    }
+
+    console.log("AutoClaw e2e 全绿（对话/目录/余额/签到/刷新不回写/凭证缓存/登录/桌面导入/流式预算解除）");
   } finally {
     fu.server.close();
   }

@@ -42,7 +42,7 @@ function save(dataDir, state) {
   try {
     fs.mkdirSync(dataDir, { recursive: true });
     const p = statePath(dataDir);
-    const tmp = p + ".tmp";
+    const tmp = `${p}.tmp.${process.pid}`;
     fs.writeFileSync(tmp, JSON.stringify(state, null, 2), "utf8");
     fs.renameSync(tmp, p);
     return true;

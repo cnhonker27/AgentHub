@@ -3,9 +3,10 @@
 // 现象（GitHub issue #90 评论 / javalover123 2026-10-10）：
 //   「似乎有个 上游启闭，关掉 有道，点击 完成，就可以了。
 //     但是，如果再次点击 保存并重启服务，再次点击 上游启闭，有道 又打开了」
-// 由独立 IPC 直接写盘、不经设置页表单的字段（共 2 个）：
+// 由独立 IPC 直接写盘、不经设置页表单的字段（共 4 个）：
 //   · channelEnabled   ← proxy_channel_toggle（上游启闭）
 //   · checkinAutoRules ← proxy_checkin_auto_set（按渠道自动签到）
+//   · enableAnthropic / enableResponses ← 新增协议面的紧急止血开关（界面无入口，手工改 config.json）
 // restoreOnLaunch 刻意不在名单里：设置页「记住网关开关」开关本身就经整份保存写盘，
 // 磁盘优先会把它架空；渲染层快照由总览页每次启停同步（ProxyHomeView），不会过期。
 //
@@ -43,9 +44,9 @@ if (!inSandbox) { console.error("拒绝运行：配置路径不在沙箱内"); p
 const FIELDS = config.OUT_OF_BAND_PROXY_FIELDS;
 console.log("");
 console.log("=== 前置：名单与接口存在 ===");
-ok("导出了 OUT_OF_BAND_PROXY_FIELDS", Array.isArray(FIELDS) && FIELDS.length === 2, JSON.stringify(FIELDS));
-ok("名单只含 channelEnabled / checkinAutoRules",
-  FIELDS.includes("channelEnabled") && FIELDS.includes("checkinAutoRules") && !FIELDS.includes("restoreOnLaunch"),
+ok("导出了 OUT_OF_BAND_PROXY_FIELDS", Array.isArray(FIELDS) && FIELDS.length === 4, JSON.stringify(FIELDS));
+ok("名单含 channelEnabled / checkinAutoRules / enableAnthropic / enableResponses",
+  ["channelEnabled", "checkinAutoRules", "enableAnthropic", "enableResponses"].every((f) => FIELDS.includes(f)) && !FIELDS.includes("restoreOnLaunch"),
   JSON.stringify(FIELDS));
 ok("导出了 saveConfigFromUI", typeof config.saveConfigFromUI === "function");
 
@@ -55,6 +56,8 @@ function writeDiskState() {
   cfg.proxy.channelEnabled = { lobster: false };            // 有道 已关闭
   cfg.proxy.checkinAutoRules = { lobster: { enabled: true, time: "09:00", jitterMin: 30 } };
   cfg.proxy.restoreOnLaunch = true;
+  cfg.proxy.enableAnthropic = false;                        // 手工改 config.json 关掉的新协议面
+  cfg.proxy.enableResponses = false;
   config.saveConfig(cfg);                                   // = 那几个 IPC 所用的路径
 }
 writeDiskState();
@@ -64,9 +67,12 @@ console.log("=== 磁盘初始状态（模拟用户已用各弹窗设好）===");
 console.log("  channelEnabled   = " + JSON.stringify(disk0.channelEnabled));
 console.log("  checkinAutoRules = " + JSON.stringify(disk0.checkinAutoRules));
 console.log("  restoreOnLaunch  = " + JSON.stringify(disk0.restoreOnLaunch));
+console.log("  enableAnthropic  = " + JSON.stringify(disk0.enableAnthropic));
+console.log("  enableResponses  = " + JSON.stringify(disk0.enableResponses));
 ok("磁盘已记录 channelEnabled.lobster=false", disk0.channelEnabled && disk0.channelEnabled.lobster === false);
 ok("磁盘已记录 checkinAutoRules.lobster", !!(disk0.checkinAutoRules && disk0.checkinAutoRules.lobster));
 ok("磁盘已记录 restoreOnLaunch=true", disk0.restoreOnLaunch === true);
+ok("磁盘已记录 enableAnthropic=false / enableResponses=false", disk0.enableAnthropic === false && disk0.enableResponses === false);
 
 // —— 契约 A：设置页整份提交（旧快照）不得冲掉 ——
 console.log("");
@@ -92,6 +98,11 @@ ok("A4 设置页真正拥有的字段照常生效（port 改成了 9600）", Num
   config.saveConfigFromUI(c);
   ok("A5 restoreOnLaunch 反向提交（true）同样生效", config.loadConfig().proxy.restoreOnLaunch === true);
 }
+// A6/A7：两个协议面止血开关。界面没有入口（用户手工改 config.json），应用在跑的时候改盘后
+// 内存快照与渲染层快照都还是旧的——此时任何一次无关的整份保存都会把这个 false 抹掉，
+// 等于止血开关自己弹回来。故与上面两个字段同列，以磁盘为准。
+ok("A6 enableAnthropic 未被冲掉（仍是关闭）", after.enableAnthropic === false, JSON.stringify(after.enableAnthropic));
+ok("A7 enableResponses 未被冲掉（仍是关闭）", after.enableResponses === false, JSON.stringify(after.enableResponses));
 
 // —— 契约 B：三个写入方自己的写入必须仍然生效 ——
 console.log("");

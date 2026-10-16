@@ -3,8 +3,9 @@
 //   参照项目 ZCode 领取专用，AgentHub 无此场景，未移植）。
 //
 // 用途：AutoClaw 国际版网页登录前强制过一道风控滑块，拿到不透明 verifyParam
-// 才能向上游换授权地址。SDK 从 o.alicdn.com 加载——主窗口必须放行该域（当前
-// AgentHub 主窗口未设 CSP；若未来加 CSP，须在 script-src 放行 o.alicdn.com）。
+// 才能向上游换授权地址。SDK 从 o.alicdn.com 加载——主窗口 CSP 必须放行（issue #105：
+// 自 v1.0.0 起 script-src 'self' 一直拦着该域，脚本加载即报「验证码组件加载失败」，
+// 国际版 OAuth 因此从未走通过）。需放行的域与护栏见 index.html 的 CSP 注释。
 //
 // 一次只允许一个验证码流程（SDK 客户端是模块级的）：靠代际号让后发起的一轮
 // 作废前一轮，迟到的回调对照代际号丢弃。

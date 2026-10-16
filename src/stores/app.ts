@@ -1,6 +1,7 @@
 // 应用级状态：配置（主题 / 模块顺序 + 技能仓库配置）、当前模块与子页面、技能仓库全局数据
 import { defineStore } from "pinia";
 import { MODULES } from "../types";
+import { moduleEnabled } from "../api/caps";
 import type { AppConfig, SettingsTab, ModuleDef, ModuleKey, PageDef, Overview, ToolRow } from "../types";
 import * as api from "../api/ipc";
 
@@ -50,6 +51,8 @@ const defaultConfig: AppConfig = {
     rateLimitPerMin: 120,
     concurrency: 8,
     creditsRefreshMin: 30,
+    usageRetentionDays: 90,
+    expiringSoonDays: 1,
     poolsyncSchedule: { hourly: false, hourlyInterval: 6, daily: false, dailyTime: "04:00" },
     debugStatus: false,
     modelOverrides: {},
@@ -145,10 +148,12 @@ export const useAppStore = defineStore("app", {
     isDark: (s) => s.config.theme === "dark",
     moduleOf: () => (key: ModuleKey): ModuleDef => MODULES.find((m) => m.key === key) || MODULES[0],
     /** 左栏模块列表：用户自定义顺序优先，缺失模块按内置默认补尾；
-     *  附 enabled 标志（issue #91）：关闭的板块左上角置灰不可点 */
+     *  附 enabled 标志（issue #91）：关闭的板块左上角置灰不可点；
+     *  Web 托管形态按服务端能力清单裁剪（容器版只有 proxy），桌面全量 */
     orderedModules(s): (ModuleDef & { enabled: boolean })[] {
       const byKey = new Map(MODULES.map((m) => [m.key, m]));
       return s.config.moduleOrder.map((k) => byKey.get(k)).filter((m): m is ModuleDef => !!m)
+        .filter((m) => moduleEnabled(m.key))
         .map((m) => ({ ...m, enabled: !s.config.modules?.[m.key] || s.config.modules[m.key].enabled !== false }));
     },
     /** 当前模块的子页面：memory 模块按 ui.tabs 白名单过滤（空=默认 5 个核心页；dashboard/browse 保底），其余模块全量返回 */

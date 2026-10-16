@@ -483,7 +483,7 @@ function saveConfig(cfg) {
   const p = configPath();
   const out = { ...cfg, webdav: { ...(cfg.webdav || {}) } };
   if (out.webdav) out.webdav.password = encryptPassword(out.webdav.password);
-  const tmp = p + ".tmp";
+  const tmp = `${p}.tmp.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(out, null, 2), "utf8");
   fs.renameSync(tmp, p);
 }

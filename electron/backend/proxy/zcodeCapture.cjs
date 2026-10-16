@@ -12,7 +12,7 @@
 //   ② 主进程 120s 总体看门狗 —— 用户放着窗口不管 / SDK 回调全丢时强制失败关窗；
 //   ③ render-process-gone / unresponsive —— 沙箱页崩溃或死循环时立刻失败。
 "use strict";
-const { BrowserWindow, ipcMain } = require("electron");
+const platform = require("./platform/index.cjs");
 
 // 同一时刻只允许一个验证窗（多账号连跑领取时排队，互不取消）
 let pending = null;
@@ -129,6 +129,12 @@ function captchaHtml(sceneId, region, prefix) {
  */
 function solveCaptcha(cfg, opts) {
   if (!cfg || !cfg.sceneId) return Promise.resolve({ ok: false, message: "验证码配置缺失（sceneId 为空）" });
+  // 无图形环境不假装能过人机校验：交回 needCaptcha，由调用方如实标记人工
+  if (!platform.isElectron) {
+    return Promise.resolve({ ok: false, needCaptcha: true, message: "无图形环境无法过人机校验；请在桌面版号池页手动领取（账号经号池同步过来）" });
+  }
+  // electron API 只在桌面路径可达（上方守卫已拦截 headless），惰性 require 让本文件在容器内可安全加载
+  const { BrowserWindow, ipcMain } = require("electron");
   if (pending) {
     return pending.then(() => solveCaptcha(cfg, opts), () => solveCaptcha(cfg, opts)); // 排队：前一个结束后接着跑
   }

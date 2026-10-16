@@ -1,5 +1,7 @@
 <!-- 沐辉制作：AgentHub Agent中控台入口 -->
 <script setup lang="ts">
+import zhCn from "element-plus/es/locale/lang/zh-cn";
+import { ElConfigProvider } from "element-plus";
 import { onMounted, onUnmounted, ref, watch } from "vue";
 import { animate, stagger } from "motion-v";
 import { usePreferredReducedMotion } from "@vueuse/core";
@@ -31,7 +33,9 @@ import SyncBillingRulesView from "./views/sync/BillingRulesView.vue";
 import SyncLogView from "./views/sync/LogView.vue";
 import ProxyHomeView from "./views/proxy/ProxyHomeView.vue";
 import ProxyKeysView from "./views/proxy/ProxyKeysView.vue";
+import ProxyProvidersView from "./views/proxy/ProxyProvidersView.vue";
 import ProxyAgentsView from "./views/proxy/ProxyAgentsView.vue";
+import ProxyExpiryView from "./views/proxy/ProxyExpiryView.vue";
 import ProxyModelsView from "./views/proxy/ProxyModelsView.vue";
 import ProxyStatsView from "./views/proxy/ProxyStatsView.vue";
 import ProxyPoolSyncView from "./views/proxy/ProxyPoolSyncView.vue";
@@ -632,6 +636,11 @@ const seen = (mod: string, page: string) => !!visited.value[`${mod}/${page}`];
 </script>
 
 <template>
+  <el-config-provider :locale="zhCn">
+  <!-- 全库唯一的 locale 注入点：按需注册后没有 app.use(ElementPlus, { locale }) 了，
+       el-date-picker 面板的月份/星期等内置文案全靠这里，删掉会静默回退英文。
+       provider 自身不渲染 DOM 节点（config-provider 直接 renderSlot default），
+       包一层不改变结构与 .app 的背景层叠。 -->
   <!-- 最底层：粒子尘场（z-index: -2）→ 随机涌动的液态色块 + 两团跟着光标游走的光池（z-index: -1），
        都在玻璃壳之下被折射出来；3D 球体作为氛围浮在主区右上的玻璃之下；
        最上面一层是颗粒质感。都不吃鼠标事件 -->
@@ -664,7 +673,9 @@ const seen = (mod: string, page: string) => !!visited.value[`${mod}/${page}`];
         <SyncLogView v-if="seen('sync', 'log')" v-show="on('sync', 'log')" class="sync-scope" :class="{ 'page-anim': on('sync', 'log') }" />
         <ProxyHomeView v-if="seen('proxy', 'home')" v-show="on('proxy', 'home')" :class="{ 'page-anim': on('proxy', 'home') }" />
         <ProxyKeysView v-if="seen('proxy', 'keys')" v-show="on('proxy', 'keys')" :class="{ 'page-anim': on('proxy', 'keys') }" />
+        <ProxyProvidersView v-if="seen('proxy', 'providers')" v-show="on('proxy', 'providers')" :class="{ 'page-anim': on('proxy', 'providers') }" />
         <ProxyAgentsView v-if="seen('proxy', 'agents')" v-show="on('proxy', 'agents')" :class="{ 'page-anim': on('proxy', 'agents') }" />
+        <ProxyExpiryView v-if="seen('proxy', 'expiry')" v-show="on('proxy', 'expiry')" :class="{ 'page-anim': on('proxy', 'expiry') }" />
         <ProxyModelsView v-if="seen('proxy', 'models')" v-show="on('proxy', 'models')" :class="{ 'page-anim': on('proxy', 'models') }" />
         <ProxyStatsView v-if="seen('proxy', 'stats')" v-show="on('proxy', 'stats')" :class="{ 'page-anim': on('proxy', 'stats') }" />
         <ProxyPoolSyncView v-if="seen('proxy', 'poolsync')" v-show="on('proxy', 'poolsync')" :class="{ 'page-anim': on('proxy', 'poolsync') }" />
@@ -708,4 +719,5 @@ const seen = (mod: string, page: string) => !!visited.value[`${mod}/${page}`];
       @changed="memory.onMemoryUpdated"
     />
   </div>
+  </el-config-provider>
 </template>
