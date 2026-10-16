@@ -1,12 +1,15 @@
 @echo off
 rem ============================================================
-rem  AgentHub - check updates / install deps / run   (Windows)
+rem  AgentHub - sync upstream / install deps / run   (Windows)
 rem  Double-click this file, or run it with arguments, e.g.
 rem    update-install-run.cmd --proxy=http://192.168.0.54:1234
 rem    update-install-run.cmd --no-run
+rem    update-install-run.cmd --remote=upstream --branch=main
+rem  Merges upstream (default remote=upstream, branch=main) into the CURRENT branch:
+rem  local commits are kept, a CONFLICT stops and asks you to resolve it by hand.
 rem  Proxy can also be put in update-install-run.proxy.txt (first line).
-rem  Update failures (offline / timeout / pull error) do NOT block startup:
-rem  the app still launches with the local version. Use --strict-update to abort instead.
+rem  If upstream is unreachable, the app still launches with the local version;
+rem  use --strict-update to abort instead.
 rem  All user-facing messages are printed by the Node script
 rem  (this file stays ASCII-only on purpose, to avoid codepage issues).
 rem ============================================================
