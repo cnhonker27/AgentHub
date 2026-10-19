@@ -461,9 +461,34 @@ function estimateTokens(text) {
   return Math.max(1, Math.ceil(String(text || "").length / 4));
 }
 
+/**
+ * HTTP header 值必须是 ByteString（每字符 ≤ 0xFF），否则 undici 在发请求前直接抛
+ * TypeError（issue #148：中文计算机名写进 Cosy-MachineHostname）。非 Latin-1 值按
+ * UTF-8 字节映射到 Latin-1：线上传出的字节仍是原 UTF-8，与原生 HTTP 栈一致；
+ * ASCII 值逐字节不变。
+ */
+function byteSafeHeaderValue(value) {
+  const s = String(value ?? "");
+  return /[^\x00-\xff]/.test(s) ? Buffer.from(s, "utf8").toString("latin1") : s;
+}
+
+/** 批量清洗 header 值；没有非 Latin-1 项时原样返回同一个对象（零分配、零行为变更） */
+function byteSafeHeaders(headers) {
+  if (!headers || typeof headers !== "object") return headers;
+  let out = null;
+  for (const [key, value] of Object.entries(headers)) {
+    const s = String(value ?? "");
+    if (!/[^\x00-\xff]/.test(s)) continue;
+    if (!out) out = { ...headers };
+    out[key] = Buffer.from(s, "utf8").toString("latin1");
+  }
+  return out || headers;
+}
+
 module.exports = {
   uuid, traceId, jwtDecode, dig, toMs, normalizeExpiryMs,
   isCompleteJson, parseRetryAfterHeaders, stableConvId, promptCacheKey,
   isDeepSeekModel, injectThinking, normalizeReasoningEffort, backfillReasoningContent, EFFORT_RANK, EFFORT_LEVELS,
   SseScanner, stripEmptyDelta, hasConsumableDelta, chunk, DONE, Aggregator, openaiError, validateChatBody, normalizeRoles, estimateTokens,
+  byteSafeHeaderValue, byteSafeHeaders,
 };

@@ -646,6 +646,9 @@ export interface ProxyStatsRange {
 
 /** 富字段聚合行：TOP 排行与各 Key 用量共用（tokens = prompt + completion，缓存 token 是 prompt 的子集） */
 export interface ProxyStatsAggRow {
+  /** 分组身份 id：channel/model 为值本身，key/account 为 key_id/account_id——
+   *  名字可改且可能撞名，前端列表 key 必须绑它而不是 name */
+  id: string;
   name: string;
   req: number;
   ok: number;

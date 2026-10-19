@@ -124,13 +124,18 @@ function normalizeAccountJson(raw, fallbackChannel) {
   return out;
 }
 
-/** 解析 JSON 文本（对象 / 数组 / {accounts:[...]} 包装），返回 { list, invalid } */
+/** 解析 JSON 文本（对象 / 数组 / {accounts:[...]} 包装），返回 { list, invalid, reason? } */
 function parseAccountsJson(text, fallbackChannel) {
   let parsed;
   try {
     parsed = JSON.parse(String(text || ""));
   } catch {
     throw new Error("JSON 解析失败：内容不是合法 JSON");
+  }
+  // 桌面端「导出选中账号」是元数据包（format=agenthub-accounts，故意不含 token）。
+  // 它与容器灌号所需的凭据包语义不同，直接按「缺 token」报错会把用户引向错误方向。
+  if (parsed && parsed.format === "agenthub-accounts") {
+    return { list: [], invalid: Array.isArray(parsed.accounts) ? parsed.accounts.length : 0, reason: "metadata-only" };
   }
   const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed && parsed.accounts) ? parsed.accounts : [parsed];
   const list = [];
@@ -142,6 +147,11 @@ function parseAccountsJson(text, fallbackChannel) {
   }
   return { list, invalid };
 }
+
+// 桌面元数据包 vs 凭据包：报错必须说清「文件本来就没有 token」，否则用户会反复换文件格式。
+const METADATA_ONLY_MESSAGE =
+  "这是桌面端导出的账号元数据（不含 token），不能用于灌号。请改用：① 号池同步（推荐）；" +
+  "② 粘贴含 token/refreshToken 的凭据 JSON；③ 管理 API POST /api/accounts/import";
 
 /** 批量入池：同渠道同 uid 已存在则跳过；入池即后台查一次额度 */
 function importAccounts(list) {
@@ -1026,7 +1036,8 @@ function register(ipcMain) {
   // ===== 凭据接入：粘贴 JSON / 从 JSON/ZIP 文件添加（批量，字段容忍别名） =====
   ipcMain.handle("proxy_account_import_json", handle(({ channel, json }) => {
     const fallback = adapters.get(channel) ? String(channel) : store.CHANNELS[0].id;
-    const { list, invalid } = parseAccountsJson(json, fallback);
+    const { list, invalid, reason } = parseAccountsJson(json, fallback);
+    if (reason === "metadata-only") return fail(METADATA_ONLY_MESSAGE);
     if (!list.length) return fail(invalid ? `没有可导入的账号（${invalid} 条记录缺 token）` : "没有可导入的账号");
     const r = importAccounts(list);
     const parts = [`成功导入 ${r.added} 个账号`];
@@ -1059,7 +1070,7 @@ function register(ipcMain) {
     } else {
       texts = [buf.toString("utf8")];
     }
-    let added = 0, dup = 0, invalid = 0;
+    let added = 0, dup = 0, invalid = 0, metaOnly = 0;
     for (const text of texts) {
       let parsed;
       try {
@@ -1068,18 +1079,24 @@ function register(ipcMain) {
         invalid++; // 单个 JSON 坏了不拖垮整包
         continue;
       }
+      if (parsed.reason === "metadata-only") {
+        metaOnly += parsed.invalid;
+        continue;
+      }
       invalid += parsed.invalid;
       const r2 = importAccounts(parsed.list);
       added += r2.added;
       dup += r2.dup;
     }
+    if (!added && !dup && metaOnly) return fail(METADATA_ONLY_MESSAGE);
     if (!added && !dup) return fail(`没有可导入的账号（${invalid ? `${invalid} 条记录无效` : "文件为空"}）`);
     const parts = [`成功导入 ${added} 个账号`];
     if (dup) parts.push(`${dup} 个同 UID 已存在跳过`);
     if (invalid) parts.push(`${invalid} 条记录无效忽略`);
+    if (metaOnly) parts.push(`${metaOnly} 条元数据（无凭据）已跳过`);
     const message = parts.join("，");
     oplog.log("info", "号池账号", `文件导入（${path.basename(file)}）：${message}`);
-    return ok({ added, dup, invalid, file: path.basename(file), message });
+    return ok({ added, dup, invalid, metaOnly, file: path.basename(file), message });
   }));
 
   // ===== 模型目录 =====
@@ -1293,4 +1310,4 @@ function register(ipcMain) {
 }
 
 // 计划判定与抖动的纯函数一并导出：供自测直接验证跨午夜 / 不补欠账 / 已完成等分支
-module.exports = { boot, shutdown, stopTimers, setRuntime, register, settings, checkinJitterOffset, checkinPlannedAt, checkinDueKey };
+module.exports = { boot, shutdown, stopTimers, setRuntime, register, settings, checkinJitterOffset, checkinPlannedAt, checkinDueKey, parseAccountsJson, normalizeAccountJson, METADATA_ONLY_MESSAGE };

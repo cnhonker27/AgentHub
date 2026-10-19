@@ -204,7 +204,9 @@ curl -X PUT http://127.0.0.1:9528/api/config/webdav \
 ### 6.2 JSON 导入
 
 ```bash
-# 桌面版导出的号池快照，或手工凭据（单条/数组均可）
+# 手工/脚本生成的含凭据 JSON（单条/数组均可）
+# 注意：桌面端「导出选中账号」是元数据包（不含 token），不能用于灌号；
+#       跨机传号请走 §6.1 的号池同步。
 curl -X POST http://127.0.0.1:9528/api/accounts/import \
   -H "Authorization: Bearer $AGENTHUB_ADMIN_TOKEN" -H "Content-Type: application/json" \
   -d '{"channel":"modelscope","accounts":[{"uid":"u1","name":"我的号","token":"..."}]}'
@@ -213,6 +215,7 @@ curl -X POST http://127.0.0.1:9528/api/accounts/import \
 ### 6.3 与桌面版协同的分工
 
 - **登录/扫码/本机导入**：在桌面版做（OAuth 回调、设备码、客户端登录态都在那边）；
+- **跨机传号**：桌面版设置 → 号池同步（WebDAV/S3），账号与凭据加密同步到容器；桌面端「导出选中账号」只有元数据，不能直接导入容器；
 - **人机校验**（ZCode 领奖）：在桌面版号池页手动过码，Docker 侧自动签到遇到需要过码的行会如实标记；
 - **号池**：两边经 §6.1 同步后都有；哪边重新登录过，凭据按"有效性优先 + 时间新者胜"仲裁。
 

@@ -439,11 +439,13 @@ const PROXY_TREND = Array.from({ length: 7 }, (_, i) => {
 });
 
 // ===== 预览用：区间化统计总览（与真实后端契约一致，见《反代网关-用量统计增强方案.md》§4.2） =====
-/** 富字段排行行：由「请求数 + 总 Token」派生出输入/输出/缓存与成功率，形状与后端 statsTopRich 对齐 */
-function mockTopRow(name: string, req: number, tokens: number) {
+/** 富字段排行行：由「请求数 + 总 Token」派生出输入/输出/缓存与成功率，形状与后端 statsTopRich 对齐。
+ *  id 是分组身份：channel/model 就是值本身，key/account 是 key_id/account_id（名字可改、可能撞名，
+ *  列表 v-for 绑的是它），所以这里允许单独指定，缺省才回落成 name */
+function mockTopRow(name: string, req: number, tokens: number, id = name) {
   const ok = Math.round(req * 0.99);
   return {
-    name, req, ok, err: req - ok, successRate: req ? Math.round((ok / req) * 1000) / 10 : 0,
+    id, name, req, ok, err: req - ok, successRate: req ? Math.round((ok / req) * 1000) / 10 : 0,
     promptTokens: Math.round(tokens * 0.78), completionTokens: Math.round(tokens * 0.22),
     cacheReadTokens: Math.round(tokens * 0.28), cacheCreationTokens: 0, tokens,
     ttftAvg: 820, latencyAvg: 1900,
@@ -480,13 +482,13 @@ function mockProxyOverview(args?: { from?: number; to?: number; granularity?: st
     tops: {
       channel: [mockTopRow("trae", 745, 182000), mockTopRow("workbuddy", 421, 96000), mockTopRow("workbuddy_ai", 118, 34400)],
       model: [mockTopRow("deepseek-v4-flash", 512, 120000), mockTopRow("glm-4.6", 233, 62000), mockTopRow("claude-sonnet-4.5", 301, 88000)],
-      key: [mockTopRow("本地主 Key", 612, 148200), mockTopRow("Trae 专用", 403, 96400), mockTopRow("WorkBuddy 专用", 269, 67800)],
+      key: [mockTopRow("本地主 Key", 612, 148200, "k1"), mockTopRow("Trae 专用", 403, 96400, "k2"), mockTopRow("WorkBuddy 专用", 269, 67800, "k3")],
       account: [mockTopRow("主账号 · 沐", 560, 132000), mockTopRow("工作号", 421, 96000), mockTopRow("备用号", 185, 50000)],
     },
     keys: [
-      { keyId: "k1", lastTs: NOW - 60000, ...mockTopRow("本地主 Key", 612, 148200) },
-      { keyId: "k2", lastTs: NOW - 89000, ...mockTopRow("Trae 专用", 403, 96400) },
-      { keyId: "k3", lastTs: NOW - 140000, ...mockTopRow("WorkBuddy 专用", 269, 67800) },
+      { keyId: "k1", lastTs: NOW - 60000, ...mockTopRow("本地主 Key", 612, 148200, "k1") },
+      { keyId: "k2", lastTs: NOW - 89000, ...mockTopRow("Trae 专用", 403, 96400, "k2") },
+      { keyId: "k3", lastTs: NOW - 140000, ...mockTopRow("WorkBuddy 专用", 269, 67800, "k3") },
     ],
     status: [
       { name: "成功 2xx", key: "ok", value: 1276 },
@@ -1437,12 +1439,18 @@ export const mock = {
           { name: "workbuddy", req: 421, tokens: 96000 },
         ];
       case "proxy_stats_detail": {
-        // 与后端同口径：Key / 模型模糊搜索 + 渠道 / 状态过滤，并回筛选命中的 token 汇总
-        const a = (args || {}) as { key?: string; model?: string; channel?: string; status?: string; page?: number; pageSize?: number };
-        const kw = String(a.key || "").toLowerCase();
+        // 与后端同口径：Key 精确（key_id = ?）+ 模型模糊 + 渠道 / 状态过滤，并回筛选命中的 token 汇总
+        const a = (args || {}) as {
+          keyId?: string;
+          model?: string;
+          channel?: string;
+          status?: string;
+          page?: number;
+          pageSize?: number
+        };
         const mw = String(a.model || "").toLowerCase();
         let rows = PROXY_USAGE.filter((r) => {
-          if (kw && !(r.keyName || "").toLowerCase().includes(kw) && !(r.keyId || "").toLowerCase().includes(kw)) return false;
+          if (a.keyId && r.keyId !== a.keyId) return false;
           if (mw && !(r.model || "").toLowerCase().includes(mw)) return false;
           if (a.channel && r.channel !== a.channel) return false;
           if (a.status === "ok" && !(r.status >= 200 && r.status < 300)) return false;

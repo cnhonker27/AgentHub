@@ -59,6 +59,7 @@ jobs:
           run_sbx tools/proxy-failover-selftest.cjs
           run_sbx tools/proxy-cost-route-selftest.cjs
           run_sbx tools/proxy-empty-pool-route-selftest.cjs
+          run_sbx tools/proxy-stats-rename-selftest.cjs
 
   docker:
     runs-on: ubuntu-latest

@@ -98,7 +98,7 @@ const detail = ref<ProxyStatsDetail | null>(null);
 const page = ref(1);
 const pageSize = 15;
 const err = ref("");
-const filters = reactive({ key: "", model: "", channel: "", status: "" });
+const filters = reactive({key: "", model: "", channel: "", status: ""}); // key 存 Key 的 keyId（明细筛选是下拉精确选择）
 
 const s = computed(() => ov.value?.summary);
 const successCls = computed(() => ((s.value?.successRate ?? 100) < 99 ? "err" : "acc"));
@@ -148,7 +148,7 @@ async function loadDetail() {
       to,
       page: page.value,
       pageSize,
-      key: filters.key || undefined,
+      keyId: filters.key || undefined,
       model: filters.model || undefined,
       channel: filters.channel || undefined,
       status: filters.status || undefined,
@@ -182,9 +182,10 @@ function resetFilters() {
   filters.status = "";
   applyFilter();
 }
-/** 从各 Key 用量表下钻：把 Key 名灌进明细搜索框并滚过去 */
+
+/** 从各 Key 用量表下钻：把 Key 的 keyId 灌进明细筛选下拉并滚过去 */
 function drillToKey(k: ProxyStatsKeyRow) {
-  filters.key = k.name || k.keyId;
+  filters.key = k.keyId;
   filters.channel = "";
   filters.status = "";
   page.value = 1;
@@ -232,11 +233,12 @@ watch(range, () => {
   scheduleRefresh();
 });
 // 文本搜索防抖 300ms（每次敲键都打一次 IPC 太浪费）
-watch([() => filters.key, () => filters.model], () => {
+watch(() => filters.model, () => {
   window.clearTimeout(searchTimer);
   searchTimer = window.setTimeout(applyFilter, 300);
 });
-watch([() => filters.channel, () => filters.status], applyFilter);
+// 下拉筛选（Key / 渠道 / 状态）都是点选，选中立即刷新
+watch([() => filters.key, () => filters.channel, () => filters.status], applyFilter);
 
 watch(active, (on) => {
   if (on) scheduleRefresh();
@@ -352,14 +354,14 @@ onUnmounted(() => {
           <span class="right">TOP 10</span>
         </div>
         <div class="tbl-wrap">
-          <table class="tbl">
+          <table class="tbl tbl-c">
             <tbody>
               <tr>
-                <th style="text-align: left">{{ dimLabel }}</th>
-                <th style="text-align: left; width: 32%">占比（{{ topBy === "tokens" ? "Token" : "请求" }}）</th>
+                <th>{{ dimLabel }}</th>
+                <th style="width: 32%">占比（{{ topBy === "tokens" ? "Token" : "请求" }}）</th>
                 <th>请求</th><th>请求 Tok</th><th>响应 Tok</th><th>总 Tok</th><th>成功率</th><th>平均 TTFT</th>
               </tr>
-              <tr v-for="r in topRows" :key="r.name">
+              <tr v-for="r in topRows" :key="r.id">
                 <td>{{ r.label }}</td>
                 <td>
                   <div class="ratio">
@@ -386,10 +388,18 @@ onUnmounted(() => {
       <div class="card anim" style="margin-top: 12px">
         <div class="card-title">各 Key 用量 <span class="right">按总 Token 倒序 · 共 {{ keyRows.length }} 把</span></div>
         <div class="tbl-wrap">
-          <table class="tbl">
+          <table class="tbl tbl-c">
             <tbody>
               <tr>
-                <th style="text-align: left">Key</th><th>请求</th><th>请求 Tok</th><th>响应 Tok</th><th>总 Tok</th><th>成功率</th><th>平均 TTFT</th><th>最近使用</th><th></th>
+                <th>Key</th>
+                <th>请求</th>
+                <th>请求 Tok</th>
+                <th>响应 Tok</th>
+                <th>总 Tok</th>
+                <th>成功率</th>
+                <th>平均 TTFT</th>
+                <th>最近使用</th>
+                <th></th>
               </tr>
               <tr v-for="k in keyRows" :key="k.keyId">
                 <td>{{ k.name || "（未命名）" }}</td>
@@ -410,15 +420,20 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- 请求明细：Key / 模型模糊搜索 + 渠道 / 状态过滤 + 筛选汇总 -->
+      <!-- 请求明细：Key 下拉选择 + 模型模糊搜索 + 渠道 / 状态过滤 + 筛选汇总 -->
       <div ref="detailRef" class="card anim" style="margin-top: 12px">
         <div class="card-title">
           请求明细
           <span class="right">{{ fmtInt(detail?.total || 0) }} 条 · 第 {{ page }}/{{ totalPages }} 页</span>
         </div>
         <div class="detail-filters">
-          <el-input v-model="filters.key" placeholder="搜索 Key 名 / ID" clearable class="f-input" popper-class="glass-popper" />
-          <el-input v-model="filters.model" placeholder="搜索模型" clearable class="f-input" popper-class="glass-popper" />
+          <el-select v-model="filters.key" placeholder="全部 Key" clearable class="f-el-select"
+                     popper-class="glass-popper">
+            <el-option value="" label="全部 Key"/>
+            <el-option v-for="k in keyRows" :key="k.keyId" :value="k.keyId" :label="k.name || k.keyId"/>
+          </el-select>
+          <el-input v-model="filters.model" placeholder="搜索模型" clearable class="f-el-input"
+                    popper-class="glass-popper"/>
           <el-select v-model="filters.channel" placeholder="全部渠道" clearable class="f-el-select" popper-class="glass-popper">
             <el-option value="" label="全部渠道" />
             <el-option v-for="c in channelOptions" :key="c.id" :value="c.id" :label="c.label" />
@@ -434,7 +449,7 @@ onUnmounted(() => {
           <span class="detail-agg">{{ detail?.agg ? `命中 ${fmtInt(detail.agg.req)} 条 · 输入 ${fmtK(detail.agg.promptTokens)} · 输出 ${fmtK(detail.agg.completionTokens)} · 合计 ${fmtK(detail.agg.tokens)}` : "" }}</span>
         </div>
         <div class="tbl-wrap">
-          <table class="tbl">
+          <table class="tbl tbl-c">
             <tbody>
               <tr><th>时间</th><th>模型</th><th>渠道</th><th>KEY</th><th>账号</th><th>状态</th><th>请求 Tok</th><th>缓存命中</th><th>响应 Tok</th><th>TTFT</th><th>耗时</th></tr>
               <tr v-for="r in detail?.rows || []" :key="r.id">
@@ -556,13 +571,13 @@ onUnmounted(() => {
   gap: 8px;
   margin-bottom: 10px;
 }
-.detail-filters :deep(.f-input) {
+.detail-filters :deep(.f-el-input) {
   width: 180px;
 }
 .detail-filters :deep(.f-el-select) {
   width: 140px;
 }
-.detail-filters :deep(.f-input .el-input__wrapper),
+.detail-filters :deep(.f-el-input .el-input__wrapper),
 .detail-filters :deep(.f-el-select .el-select__wrapper) {
   min-height: 30px;
   font-size: 12.5px;
@@ -572,6 +587,12 @@ onUnmounted(() => {
   font-size: 11.5px;
   color: var(--text-3);
   font-family: var(--font-mono);
+}
+
+/* 三个表（TOP / 各 Key / 明细）字段值居中；th 全局 .tbl 已居中，这里覆盖默认左对齐的 td */
+.tbl-c th,
+.tbl-c td {
+  text-align: center;
 }
 
 /* 成功率低于阈值时着色（TOP / Key 表共用） */
