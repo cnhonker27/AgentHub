@@ -75,7 +75,9 @@ async function fetchStream(url, opts) {
     // redirect 默认 follow，但**必须允许调用方覆盖**：Qoder 的请求头带签名且签名覆盖
     // path+query，301 重定向后签名必然失效（实测 gateway http→301 https 真实存在），
     // 故它传 redirect:"error" 要明确报错而非跟随。原先写死 "follow" 会吃掉该参数。
-    resp = await fetch(url, { redirect: "follow", ...rest, signal: ctrl.signal });
+    // 统一出口兜底：header 值必须是 ByteString，中文机器名/设备名会让 fetch 在发请求前抛错。
+    // 只在值含非 Latin-1 时改写，ASCII 请求逐字节不变（issue #148）。
+    resp = await fetch(url, { redirect: "follow", ...rest, headers: util.byteSafeHeaders(rest.headers), signal: ctrl.signal });
   } catch (e) {
     clearTimeout(timer);
     const timedOut = !!(e && e.name === "AbortError");
@@ -110,7 +112,8 @@ async function httpJson(url, opts) {
   const budget = timeoutMs("httpJsonTimeoutMs", 60000);
   const timer = setTimeout(() => ctrl.abort(), budget);
   try {
-    const resp = await fetch(url, { ...opts, signal: ctrl.signal });
+    // 同 fetchStream：header 值统一转 ByteString（仅非 Latin-1 项变化）
+    const resp = await fetch(url, { ...opts, headers: util.byteSafeHeaders(opts && opts.headers), signal: ctrl.signal });
     const text = await resp.text();
     let data = null;
     try { data = JSON.parse(text); } catch { /* 非 JSON 响应留原文 */ }
@@ -4563,14 +4566,17 @@ function reverseAliasEntry(model, cfg) {
   return null;
 }
 
-/** 反向映射的渠道目标。自映射（统一名 -> 同名）是历史 UI 污染，不构成可转发目标。 */
+/** 反向映射的渠道目标。自映射只有在目标不是该渠道原生模型时才是脏配置：
+ * 候选来自渠道原始目录，此时「统一名 == 实际模型」说明统一名就是该渠道真实模型名，
+ * 恒等映射合法；非原生的同名目标仍返回 null，防止虚拟名透传上游（issue #145）。 */
 function reverseAliasTarget(model, channel, cfg) {
   const entry = reverseAliasEntry(model, cfg);
   if (!entry) return null;
   const raw = entry[channel];
   if (typeof raw !== "string" || !raw.trim()) return null;
   const target = raw.trim();
-  return target.toLowerCase() === String(model || "").trim().toLowerCase() ? null : target;
+  const same = target.toLowerCase() === String(model || "").trim().toLowerCase();
+  return same && !nativeModel(channel, target) ? null : target;
 }
 
 function nativeModel(channel, model) {
@@ -4580,8 +4586,9 @@ function nativeModel(channel, model) {
 }
 
 /** 模型在某渠道上的实际可转发名。
- * 该渠道显式配了反向映射时，只认映射结果；自映射/空映射不得再回退成“原生模型”，
- * 否则历史脏目录里恰好混入统一名时，仍可能把统一名发给上游。
+ * 该渠道显式配了反向映射时，只认映射结果；空映射/非原生自映射不得再回退成“原生模型”，
+ * 否则历史脏目录里恰好混入统一名时，仍可能把虚拟名发给上游。
+ * 原生模型的恒等映射是合法目标（统一名就是该渠道真实模型名，issue #145）。
  * 未配该渠道映射时，原生模型名可继续作为合法目标（保留 issue #78 的跨渠道备选）。 */
 function resolveModelTarget(model, channel, cfg) {
   const normalized = String(model || "").trim();

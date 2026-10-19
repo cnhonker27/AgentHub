@@ -286,7 +286,15 @@ function makeAutoClaw(channel, deps) {
       const c = cfg();
       const { token } = credentialsOf(account, secrets);
       if (!token) return { ok: false, authError: true, message: "该账号没有凭据" };
-      return checkinMod.checkin(userapiEnv(c, token, account));
+      const env = userapiEnv(c, token, account);
+      const r = await checkinMod.checkin(env);
+      // 签到（含「今天已签到」的幂等结果）后触发一次「登录活跃」，让活动福利入账：
+      // 这类活动没有领取接口，只有 user-info 能触发（见 checkin.cjs 的 triggerLoginActive）。
+      // 失败静默——附加收益，绝不改签到结论
+      if (r && r.ok) {
+        try { await checkinMod.triggerLoginActive(env); } catch { /* 附加收益，失败不影响签到 */ }
+      }
+      return r;
     },
 
     /** 签到状态探测（只读 task-list） */

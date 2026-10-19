@@ -9,6 +9,7 @@ import type { ProxyChannelView, ProxyAccount, ProxyChannelId, ProxyPoolStrategy,
 import { useAppStore } from "../../stores/app";
 import { fmtInt, fmtK, fmtDate, fmtAgo, fmtCredits, ACCOUNT_STATUS, SOURCE_NAMES, channelName, fmtBalance, fmtPkgTotal, fmtPkgUsed, pkgFallbackName, balanceUnit, isQoderChannel, isClineChannel, costTierName, checkinLabels, todayStr } from "./format";
 import { coalesceAsync } from "../../utils/timing";
+import { commandMode } from "../../api/caps";
 import { solveCaptcha, cancelCaptcha, CaptchaCancelledError } from "../../utils/aliyunCaptcha";
 
 const app = useAppStore();
@@ -146,6 +147,10 @@ const SMS_ONLY_CHANNELS: ProxyChannelId[] = ["autoclaw"];
 // 与 NO_OAUTH_CHANNELS 同一分工：渠道能力的展示层开关，判定口径在各自适配器
 const NO_CHECKIN_CHANNELS: ProxyChannelId[] = ["catpaw", "cline_free", "cline_pass"];
 function addTabAllowed(key: AddMethod, channel: ProxyChannelId = activeChannel.value): boolean {
+  // 容器形态：服务端 deny 的入口直接隐藏，避免用户点了才看到错误文案
+  if (key === "oauth" && commandMode("proxy_oauth_begin") === "deny") return false;
+  if (key === "file" && commandMode("proxy_account_import_file") === "deny") return false;
+  if (key === "local" && (commandMode("proxy_scan") === "deny" || commandMode("proxy_scan_import") === "deny")) return false;
   if (key === "oauth" && NO_OAUTH_CHANNELS.includes(channel)) return false;
   // 手机验证码页签只给 AutoClaw 国内版；它自身也没有 OAuth 页签可放
   if (key === "sms") return SMS_ONLY_CHANNELS.includes(channel);
@@ -160,6 +165,9 @@ function addTabAllowed(key: AddMethod, channel: ProxyChannelId = activeChannel.v
 function allowedMethods(channel: ProxyChannelId): AddMethod[] {
   return (["oauth", "sms", "local", "file", "paste"] as AddMethod[]).filter((key) => addTabAllowed(key, channel));
 }
+
+// 容器形态（OAuth 被服务端 deny）：添加弹窗只保留粘贴 JSON，并给出号池同步引导
+const containerForm = computed(() => commandMode("proxy_oauth_begin") === "deny");
 
 // 渠道允许的添加方式（分段控件按渠道过滤）
 const METHOD_TABS = computed(
@@ -271,36 +279,46 @@ watch(activeChannel, () => {
   selectedIds.value = new Set();
 });
 
-/** 导出选中账号为 JSON 文件：仅元数据，不含凭据（凭据仅本机 DPAPI 加密保管，不外发） */
-function exportSelected() {
+/** 导出选中账号为 JSON 文件：**含明文凭据**（token/refreshToken 由主进程解密后回传），
+ *  供用户在其它软件里直接使用；落盘仍是浏览器下载那条链路（与旧的元数据导出一致） */
+const exportOpen = ref(false);
+const exportBusy = ref(false);
+async function doExport() {
+  if (exportBusy.value) return;
   const rows = activeChannelAccounts.value.filter((a) => selectedIds.value.has(a.id));
-  if (!rows.length) return;
-  const payload = {
-    format: "agenthub-accounts",
-    exportedAt: new Date().toISOString(),
-    channel: activeChannel.value,
-    accounts: rows.map((a) => ({
-      id: a.id,
-      channel: a.channel,
-      uid: a.uid,
-      name: a.name,
-      note: a.note || "",
-      source: a.source,
-      status: a.status,
-      credits: a.credits,
-      creditsAt: a.creditsAt,
-      expiresAt: a.expiresAt,
-      createdAt: a.createdAt,
-    })),
-  };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `agenthub-accounts-${activeChannel.value}-${todayStr()}.json`;
-  link.click();
-  URL.revokeObjectURL(url);
-  toast(`已导出 ${rows.length} 个账号（仅元数据，不含凭据）`);
+  if (!rows.length) {
+    exportOpen.value = false;
+    return;
+  }
+  exportBusy.value = true;
+  try {
+    const r = await api.proxyAccountExportPlain(rows.map((a) => a.id));
+    if (r.ok === false) throw new Error(r.message || "导出失败");
+    const accounts = r.accounts || [];
+    if (!accounts.length) throw new Error("选中账号都已不存在");
+    const payload = {
+      // 格式名与元数据导出（agenthub-accounts，故意不含 token）刻意区分开：
+      // 灌号侧对旧格式是按「元数据包」直接拒绝的，新格式不能撞名
+      format: "agenthub-credentials",
+      exportedAt: new Date().toISOString(),
+      channel: activeChannel.value,
+      accounts,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `agenthub-credentials-${activeChannel.value}-${todayStr()}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    const miss = (r.missing || []).length;
+    toast(`已导出 ${accounts.length} 个账号的明文凭据${miss ? `（${miss} 个已不存在，已跳过）` : ""}，请妥善保管`, "info");
+    exportOpen.value = false;
+  } catch (e) {
+    toast(String((e as Error)?.message || e), "err");
+  } finally {
+    exportBusy.value = false;
+  }
 }
 
 /** 批量删除：主进程逐个走单删链路（墓碑先行，经 WebDAV 传播到其他设备） */
@@ -1458,10 +1476,10 @@ onUnmounted(() => {
               <button class="btn btn-sm" @click="openStrategy(ch)">调度策略</button>
             </el-tooltip>
             <button class="btn btn-sm" @click="openAdd(ch)">添加账号</button>
-            <!-- 多选后出现的批量操作：导出（仅元数据）与批量删除（二次确认） -->
+            <!-- 多选后出现的批量操作：导出凭据（明文，二次确认）与批量删除（二次确认） -->
             <template v-if="selectedCount">
-              <el-tooltip content="把选中账号导出为 JSON 文件（仅元数据，不含凭据）" placement="top">
-                <button class="btn btn-sm" @click="exportSelected">导出</button>
+              <el-tooltip content="把选中账号导出为 JSON 文件（含明文 token/refreshToken，可直接用于其他软件）" placement="top">
+                <button class="btn btn-sm" @click="exportOpen = true">导出</button>
               </el-tooltip>
               <el-tooltip content="删除选中的账号（本地加密凭据一并删除，删除会经 WebDAV 同步传播到其他设备）" placement="top">
                 <button class="btn btn-sm danger" :disabled="batchDelBusy" @click="batchDelOpen = true">批量删除</button>
@@ -1575,11 +1593,21 @@ onUnmounted(() => {
               <template v-if="loading && !ch.accounts.length">
                 <tr v-for="n in 4" :key="'sk-' + n">
                   <td class="sel-col"><div class="skeleton" style="height: 14px; width: 14px; margin: 0 auto"></div></td>
-                  <td><div class="skeleton" style="height: 20px; width: 120px"></div></td>
-                  <td><div class="skeleton" style="height: 18px; width: 50px"></div></td>
-                  <td><div class="skeleton" style="height: 18px; width: 70px"></div></td>
-                  <td><div class="skeleton" style="height: 18px; width: 80px"></div></td>
-                  <td><div class="skeleton" style="height: 18px; width: 90px"></div></td>
+                  <td>
+                    <div class="skeleton" style="height: 20px; width: 120px; margin: 0 auto"></div>
+                  </td>
+                  <td>
+                    <div class="skeleton" style="height: 18px; width: 50px; margin: 0 auto"></div>
+                  </td>
+                  <td>
+                    <div class="skeleton" style="height: 18px; width: 70px; margin: 0 auto"></div>
+                  </td>
+                  <td>
+                    <div class="skeleton" style="height: 18px; width: 80px; margin: 0 auto"></div>
+                  </td>
+                  <td>
+                    <div class="skeleton" style="height: 18px; width: 90px; margin: 0 auto"></div>
+                  </td>
                   <td style="text-align: right"><div class="skeleton" style="height: 20px; width: 140px; margin-left: auto"></div></td>
                 </tr>
               </template>
@@ -1826,6 +1854,11 @@ onUnmounted(() => {
             </button>
           </div>
 
+          <!-- 容器形态的可行路径：OAuth/本机扫描/文件选择都被服务端禁用，先把话说清楚 -->
+          <div v-if="containerForm" class="add-msg">
+            容器形态推荐：设置 → 号池同步（WebDAV/S3）；也可粘贴含 token/refreshToken 的凭据 JSON，或调用管理 API <code>/api/accounts/import</code>。桌面端号池「导出」按钮的产物已含明文凭据（<code>format=agenthub-credentials</code>），可以直接拿来灌号。
+          </div>
+
           <!-- 方式内容：各面板共用固定高度，切换时弹窗不跳高度 -->
           <div class="add-body">
             <!-- OAuth 官方登录（三渠道各自主流形态） -->
@@ -2017,6 +2050,24 @@ onUnmounted(() => {
           <div class="p-actions">
             <button class="btn" @click="delOpen = false">取消</button>
             <button class="btn btn-primary danger-solid" @click="doDelete">删除</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 导出凭据确认（明文凭据落盘不可撤回，先让用户过目） -->
+      <div v-if="exportOpen" class="p-mask" @click.self="exportOpen = false">
+        <div class="p-dlg glass">
+          <div class="p-title">导出账号凭据</div>
+          <div class="set-desc">
+            将把选中的 {{ selectedCount }} 个账号导出为一个 JSON 文件，其中
+            <b>token / refreshToken 是明文</b>，可直接粘贴到其他软件使用。<br />
+            文件一旦落盘就无法撤回，请勿放进网盘、聊天记录或代码仓库等会被他人看到的地方。
+          </div>
+          <div class="p-actions">
+            <button class="btn" @click="exportOpen = false">取消</button>
+            <button class="btn btn-primary" :disabled="exportBusy" @click="doExport">
+              {{ exportBusy ? "导出中…" : "导出明文凭据" }}
+            </button>
           </div>
         </div>
       </div>
@@ -3144,9 +3195,20 @@ onUnmounted(() => {
   word-break: break-all;
   user-select: all;
 }
-/* ===== 列表布局：账号两行式 + 数字列右对齐 ===== */
+
+/* ===== 列表布局：账号两行式 + 列值居中 ===== */
+/* th 全站已强制居中（global.css），这里覆盖 td 默认左对齐；td.num 单列保持同优先级，
+   压过全局 .table td.num 的右对齐（对齐用量统计页 .tbl-c 的配方）。
+   操作列不参与：td 内联 text-align: right 优先级更高，保持右对齐 */
+.pool-tbl td,
 .pool-tbl td.num {
-  text-align: right;
+  text-align: center;
+}
+
+/* 操作列定宽：auto 布局下容器超宽时剩余空间会被按钮组最多的操作列吸走（撑到近 1/3 表宽），
+   定宽后它收缩到按钮组实际宽度，富余回流给账号等列；内容超出（更多按钮的渠道）时仍可自动撑开 */
+.pool-tbl th:last-child {
+  width: 340px;
 }
 /* 积分包展开：账号行下的只读明细表（数据来自 poolView 附的 packages） */
 .pkg-caret {
@@ -3211,10 +3273,14 @@ onUnmounted(() => {
 }
 .acc-cell {
   line-height: 1.3;
+  /* 列宽建议值：账号列给足展示空间，压缩操作列的富余占比（auto 布局下的分配 hint） */
+  width: 280px;
 }
 .acc-name {
   display: block;
-  max-width: 220px;
+  /* 列值居中配套：280px 限宽块在 td 里水平居中，避免「块靠左、文本居中」的错位 */
+  margin-inline: auto;
+  max-width: 280px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3230,9 +3296,12 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 5px;
+  /* flex 不吃 text-align：列值居中时副行内容同步居中；margin-inline 让限宽块跟随居中 */
+  justify-content: center;
   margin-top: 2px;
-  /* 副行限宽锚定 .acc-name 的 220px：账号列宽度由名称行决定，备注再长也不撑列 */
-  max-width: 220px;
+  margin-inline: auto;
+  /* 副行限宽锚定 .acc-name 的 280px：账号列宽度由名称行决定，备注再长也不撑列 */
+  max-width: 280px;
   min-width: 0;
   font-size: 10.5px;
   color: var(--text-3);

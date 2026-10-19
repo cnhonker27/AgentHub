@@ -301,6 +301,13 @@ export const proxyAccountRemove = (id: string) => call<{ ok: boolean; message?: 
 /** 批量删除（号池列表多选）：主进程逐个走单删链路（墓碑先行 + WebDAV 传播），removed = 实删条数 */
 export const proxyAccountRemoveBatch = (ids: string[]) =>
   call<{ ok: boolean; removed?: number; missing?: number; message?: string }>("proxy_account_remove_batch", { ids });
+/** 明文导出选中账号（号池多选「导出凭据」）：token/refreshToken 为解密后的明文，
+ *  供用户在其它软件里直接使用；落盘由渲染层 Blob 下载完成 */
+export const proxyAccountExportPlain = (ids: string[]) =>
+  call<{ ok: boolean; accounts?: Record<string, unknown>[]; missing?: string[]; exportedAt?: number; message?: string }>(
+    "proxy_account_export_plain",
+    { ids }
+  );
 export const proxyAccountToggle = (id: string, enabled: boolean) =>
   call<{ ok: boolean; message?: string }>("proxy_account_toggle", { id, enabled });
 /** 重命名账号（自定义备注），WebDAV 同步时 LWW 传播 */

@@ -7,6 +7,9 @@
 
 const DAILY_SIGNIN_TASK_ID = "daily_signin";
 
+/** 「登录」端点（客户端启动同款 user-info）：活动福利的发放钩子挂在它上面 */
+const USER_INFO_PATH = "/userapi/v1/user-info";
+
 /**
  * 签到主流程（纯协议函数）：
  *   env = { cfg, token, headers, httpJson, deviceId? }
@@ -28,9 +31,12 @@ async function checkin(env) {
   if (!r.ok || !data || typeof data !== "object") {
     return { ok: false, message: `签到接口 HTTP ${r.status}` };
   }
+  // 业务码只在**字段真的存在**时判：`Number(undefined)` 是 NaN，而 `NaN !== 0` 恒为真——
+  // 上游成功响应不带 code 时会被整条判成「签到失败」（参考实现用 `if let Some(code)` 守住这点）。
+  const hasCode = data.code !== undefined && data.code !== null;
   const code = Number(data.code);
-  if (code === 410000 || code === 400000) return { ok: false, authError: true, message: "登录态已过期，无法签到" };
-  if (code !== 0) {
+  if (hasCode && (code === 410000 || code === 400000)) return { ok: false, authError: true, message: "登录态已过期，无法签到" };
+  if (hasCode && code !== 0) {
     return { ok: false, message: String(data.msg || data.message || "签到失败") };
   }
   const d = data.data && typeof data.data === "object" ? data.data : {};
@@ -69,6 +75,29 @@ async function taskListHint(env) {
 }
 
 /**
+ * 「登录活跃」触发：POST user-info（客户端启动时打的同一个动作）。
+ *
+ * 活动福利（Weekly Perks / 登录奖励这类「活跃即发」的活动）**没有领取接口**，服务端把
+ * 「登录」的判据挂在这个动作上（参考实现 2026-10-15 逐条实测：签到本身、refresh 强制刷新、
+ * home-fetch 都不触发发放，只有 user-info 打下去才入账）。签到后顺手触发一次，用户当天
+ * 开过客户端时这一步是幂等的、不会重复入账。
+ *
+ * 返回是否成功打出这次请求；**失败静默**——活动福利是签到之外的附加收益，绝不因它把一次
+ * 真签到判成失败（与 balance.cjs「订阅失败不影响积分结果」同一取向）。
+ */
+async function triggerLoginActive(env) {
+  const { cfg, headers, httpJson, deviceId } = env;
+  const base = String(cfg.userapiBase || "").replace(/\/+$/, "");
+  const r = await httpJson(`${base}${cfg.userInfoPath || USER_INFO_PATH}`, {
+    method: "POST",
+    headers,
+    // body 与客户端 withWebInfo 一致：source_id + device_id（device_id 可能为空串）
+    body: JSON.stringify({ source_id: "autoclaw", device_id: deviceId || "" }),
+  });
+  return !!(r && r.ok);
+}
+
+/**
  * 签到状态探测（只读）：task-list 里 daily_signin 的 completed 字段。
  * 列表拿不到 → unavailable（不是假装可领）；completed → already。
  */
@@ -94,4 +123,4 @@ async function checkinStatus(env) {
   }
 }
 
-module.exports = { DAILY_SIGNIN_TASK_ID, checkin, checkinStatus, taskListHint };
+module.exports = { DAILY_SIGNIN_TASK_ID, USER_INFO_PATH, checkin, checkinStatus, taskListHint, triggerLoginActive };

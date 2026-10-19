@@ -24,6 +24,28 @@ function noCreditsMessage(channel) {
   return store.isBuiltinChannel(channel) ? "该渠道不提供额度查询（官方无对外余额接口）" : "该渠道为 API Key 直连，无余额概念";
 }
 
+/** 临期预刷新（参考项目 RefreshSkew 语义）：JWT 到期前窗口内先刷 token，返回可直接用于
+ *  本次/下次请求的 secrets（刷新失败原样返回，绝不因刷新失败把调用方拖进错误分支）。
+ *
+ *  窗口按渠道取：默认 24h；小浣熊 access 仅 3h（会话1 §2），用 24h 会把每轮刷新都变成一次
+ *  刷新——与桌面端抢同一个 refresh_token 互相作废（掉登录根因），故贴官方 300s 惰性语义。
+ *
+ *  抽成公共函数而不是各链路各写一份：余额与签到面对的是同一个「手上 token 已过期」问题，
+ *  口径一旦分叉就会出现「余额正常、签到报登录态已过期」这类只在一处暴露的缺陷。
+ *  noPersist 渠道（AutoClaw）：新凭证只进适配器进程缓存、不落库（方案 §7）——服务端轮换
+ *  refresh_token，落库会与桌面端自己的刷新互相顶掉。 */
+async function ensureFreshSecrets(acc, secrets) {
+  const adapter = adapters.get(acc && acc.channel);
+  if (!adapter || !secrets || !secrets.token || !secrets.refreshToken) return secrets;
+  const windowSec = Number(adapter.refreshWindowSec) > 0 ? Number(adapter.refreshWindowSec) : 86400;
+  const dec = util.jwtDecode(secrets.token);
+  if (!(dec.exp && dec.exp * 1000 < Date.now() + windowSec * 1000)) return secrets;
+  const rr = await adapters.refreshTokenLocked(acc.channel, acc, secrets).catch(() => ({ ok: false }));
+  if (!rr.ok) return secrets;
+  if (!rr.noPersist) store.updateAccount(acc.id, { token: rr.token, refreshToken: rr.refreshToken });
+  return { ...secrets, token: rr.token, refreshToken: rr.refreshToken };
+}
+
 /** 单账号额度刷新：成功回写余额缓存 + credits_history 日快照 */
 async function refreshAccount(id) {
   const acc = store.getAccount(id);
@@ -35,19 +57,8 @@ async function refreshAccount(id) {
   if (!secrets.token) throw new Error("该账号没有凭据");
 
   let r = await adapter.queryCredits(acc, secrets).catch((e) => ({ error: String((e && e.message) || e) }));
-  // 临期预刷新（参考项目 RefreshSkew 语义）：JWT 到期前窗口内先刷 token，避免下次对话首请求吃 401。
-  // 窗口按渠道取：默认 24h；小浣熊 access 仅 3h（会话1 §2），用 24h 会把每轮额度刷新都变成
-  // 一次刷新——与桌面端抢同一个 refresh_token 互相作废（掉登录根因），故贴官方 300s 惰性语义
-  const windowSec = Number(adapter.refreshWindowSec) > 0 ? Number(adapter.refreshWindowSec) : 86400;
-  const dec = util.jwtDecode(secrets.token);
-  if (dec.exp && dec.exp * 1000 < Date.now() + windowSec * 1000 && secrets.refreshToken) {
-    const rr = await adapters.refreshTokenLocked(acc.channel, acc, secrets).catch(() => ({ ok: false }));
-    if (rr.ok) {
-      // noPersist 渠道（AutoClaw）：新凭证只进适配器进程缓存，不落库（方案 §7）
-      if (!rr.noPersist) store.updateAccount(acc.id, { token: rr.token, refreshToken: rr.refreshToken });
-      secrets = { token: rr.token, refreshToken: rr.refreshToken };
-    }
-  }
+  // 临期预刷新（参考项目 RefreshSkew 语义）：JWT 到期前窗口内先刷 token，避免下次对话首请求吃 401
+  secrets = await ensureFreshSecrets(acc, secrets);
   if (r.unavailable) {
     // 积分服务对该账号不开放（实测 Trae pay/ug 域 code 1001，但同一 token 对话域正常）：
     // 不是凭证失效，账号保持可用，余额不动，只把原因带回去展示。
@@ -214,4 +225,4 @@ function stopScheduler() {
   timer = null;
 }
 
-module.exports = { refreshAccount, refreshChannel, refreshAll, startScheduler, stopScheduler, isRefreshing: () => refreshing };
+module.exports = { refreshAccount, refreshChannel, refreshAll, startScheduler, stopScheduler, isRefreshing: () => refreshing, ensureFreshSecrets };

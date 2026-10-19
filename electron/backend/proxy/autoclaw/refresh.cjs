@@ -44,9 +44,13 @@ async function refreshToken(env) {
   if (!r.ok || !data || typeof data !== "object") {
     return { ok: false, message: `AutoClaw 刷新接口失败（HTTP ${r.status}）` };
   }
+  // 业务码只在**字段真的存在**时判：`Number(undefined)` 是 NaN，而 `NaN !== 0` 恒为真——
+  // 刷新成功响应不带 code 时会被误判成「刷新失败」，于是签到/对话继续拿着旧 token 打，
+  // 表现为「登录态已过期」而刷新其实成功（与 checkin.cjs 同一处判据缺陷）
+  const hasCode = data.code !== undefined && data.code !== null;
   const code = Number(data.code);
-  if (code === 401 || code === 410000) return { ok: false, authError: true, message: "登录态已过期，请重新导入或登录" };
-  if (code !== 0) {
+  if (hasCode && (code === 401 || code === 410000)) return { ok: false, authError: true, message: "登录态已过期，请重新导入或登录" };
+  if (hasCode && code !== 0) {
     const msg = String(data.msg || data.message || "服务器未返回新 token");
     return { ok: false, message: `AutoClaw token 刷新失败 code=${code} msg=${msg}` };
   }

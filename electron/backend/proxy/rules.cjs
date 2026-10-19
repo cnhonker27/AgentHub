@@ -585,6 +585,9 @@ const DEFAULTS = {
       // 结尾斜杠是上游要求的（带不带斜杠是两个路由）
       loginPath: "/userapi/v1/agent-login/",
       userProfilePath: "/userapi/v1/user-profile",
+      // 客户端启动同款的「登录」端点：活动福利（Weekly Perks / 登录奖励）没有领取接口，
+      // 服务端把发放判据挂在这个动作上（签到后触发，见 autoclaw/checkin.cjs）
+      userInfoPath: "/userapi/v1/user-info",
       walletsPath: "/agent-assetmgr/api/v2/wallets?biz_app_id=autoclaw",
       walletInstancesPath: "/agent-assetmgr/api/v1/wallet-instances?wallet_type=all&wallet_scope=all",
       pointsExpiringPath: "/agent-assetmgr/api/v1/points/expiring?biz_app_id=autoclaw",
@@ -612,6 +615,9 @@ const DEFAULTS = {
       sendCodePath: "/userapi/v1/agent-send-code",
       loginPath: "/userapi/v1/agent-login/",
       userProfilePath: "/userapi/v1/user-profile",
+      // 客户端启动同款的「登录」端点：活动福利（Weekly Perks / 登录奖励）没有领取接口，
+      // 服务端把发放判据挂在这个动作上（签到后触发，见 autoclaw/checkin.cjs）
+      userInfoPath: "/userapi/v1/user-info",
       walletsPath: "/agent-assetmgr/api/v2/wallets?biz_app_id=autoclaw",
       walletInstancesPath: "/agent-assetmgr/api/v1/wallet-instances?wallet_type=all&wallet_scope=all",
       pointsExpiringPath: "/agent-assetmgr/api/v1/points/expiring?biz_app_id=autoclaw",
