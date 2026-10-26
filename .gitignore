@@ -34,9 +34,6 @@ npm-debug.log*
 .zcode/
 .box-agent/
 
-# 本机代理地址（每台机器不同，不入库）
-scripts/update-install-run.proxy.txt
-
 # 评审中的设计稿（不入库，评审通过后再决定是否归档）
 /记忆仓库*.md
 # 上面通配覆盖：设计稿 / 实测结论 / 架构调研与选型报告
