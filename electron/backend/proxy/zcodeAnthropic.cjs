@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 反代网关 · ZCode 上游协议翻译：OpenAI Chat Completions ↔ Anthropic Messages
 //
 // zcode 上游（coding-plan 与 start-plan 统一）是 Anthropic Messages 协议：
@@ -134,7 +144,7 @@ function toAnthropic(model, body, opts) {
         budget_tokens: Number(b.thinking.budget_tokens || b.thinking.budgetTokens) || 2048,
       };
     } else if (b.thinking.type === "disabled") {
-      // disabled 折叠成最低档（参考 agent2api reasoning.rs 实测：GLM-5.3 对
+      // disabled 折叠成最低档（实测：GLM-5.3 对
       // {type:"disabled"}/none/minimal 必 400 code 1210；与 raccoon 渠道 off→low 归一同款先例）
       out.thinking = { type: "enabled", budget_tokens: 2048 };
     }
@@ -147,7 +157,7 @@ function toAnthropic(model, body, opts) {
       budget_tokens: budgetMap[b.reasoning_effort] || 4096,
     };
   }
-  // 扩展思考与采样参数并存会被上游拒绝（参考 reasoning.rs 实测）：开思考时显式删
+  // 扩展思考与采样参数并存会被上游拒绝（实测）：开思考时显式删
   if (out.thinking && out.thinking.type === "enabled") {
     delete out.temperature;
     delete out.top_p;

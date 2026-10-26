@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 软件自更新
 // 安装版走 electron-updater（下载和安装都由用户点）；便携版只会读 latest.yml 比版本，提示手动下
 // GitHub 直连在部分网络环境（如国内）会被掐断（net::ERR_CONNECTION_CLOSED）：
@@ -6,6 +16,7 @@
 const path = require("node:path");
 const { app, BrowserWindow, Notification, nativeImage, shell, net, session } = require("electron");
 const config = require("./config.cjs");
+const crashlog = require("./crashlog.cjs");
 
 const GITHUB_REPO_URL = "https://github.com/HUIdada1/AgentHub";
 const GITHUB_RELEASES_URL = GITHUB_REPO_URL + "/releases";
@@ -387,25 +398,166 @@ function download() {
   return status;
 }
 
-function triggerInstall() {
-  if (installTriggered || !autoUpdater || status.status !== "downloaded") return status;
-  installTriggered = true;
-  // 复位通知去重，万一安装器被拦没装上，下次启动还能提醒
-  config.setUpdateNotified("");
-  autoUpdater.quitAndInstall(true, true);
-  // 杀软拦安装器时 electron-updater 只发 error 不退出进程。
-  // 10 秒后还活着说明安装没走起来，复位标志报错，不然退出流程被吞掉
-  setTimeout(() => {
-    if (installTriggered) {
-      installTriggered = false;
-      onUpdateError(new Error("安装程序未能启动"));
+// ===== 安装器启动（自管） =====
+// electron-updater 的 quitAndInstall 在 spawn 发起后立即退出应用，spawn 一旦失败
+// （杀软对刚落盘安装包的实时扫描锁、MOTW 放行、文件占用等 EACCES/EBUSY），错误事件
+// 随进程一起消失——表现为「应用退了、新版本没装上、也没自动重启」且无任何日志可查，
+// 1.87.0 更新即命于此。所以不再走 quitAndInstall：自己校验、自己 spawn，失败可重试
+// 可报错，应用绝不盲退。
+function installerPaths() {
+  const helper = autoUpdater && autoUpdater.downloadedUpdateHelper;
+  if (!helper || !helper.file) return null;
+  const file = String(helper.file);
+  return {
+    file,
+    fileName: path.basename(file),
+    // 下载清单里的 sha512（base64）：spawn 前整包校验，防半包与被替换
+    sha512: (helper.downloadedFileInfo && helper.downloadedFileInfo.sha512) || "",
+  };
+}
+
+// ===== 安装包「搬台面」（stage 到 TEMP 副本） =====
+// 安全软件对「刚从网络下载的未签名 exe」所在的更新缓存区（%LOCALAPPDATA%\<app>-updater）
+// 盯得最紧——1.87.0/1.87.1 更新时 quitAndInstall 的 spawn 首击即败且错误随进程一起丢失，
+// 历次成功纯属首击恰好没撞上。下载完成立刻把包复制到 TEMP：一) 复制本身就是完整读盘
+// 预热，扫描锁就地解开；二) spawn 落点换出缓存目录，命中盯梢的概率显著降低。
+function stagedDir() {
+  return path.join(require("node:os").tmpdir(), "AgentHub-update");
+}
+
+function stagedInstallerPath(fileName) {
+  return path.join(stagedDir(), fileName);
+}
+
+let stagedPromise = null; // 后台搬台面任务；triggerInstall 等它，失败回退原始路径
+
+async function stageInstaller(pkg) {
+  const fsp = require("node:fs/promises");
+  await verifyAndWarmInstaller(pkg.file, pkg.sha512);
+  const dir = stagedDir();
+  await fsp.mkdir(dir, { recursive: true });
+  const staged = stagedInstallerPath(pkg.fileName);
+  await fsp.copyFile(pkg.file, staged);
+  // 副本也校验一遍：复制中断/截断的文件绝不能拿去装
+  await verifyAndWarmInstaller(staged, pkg.sha512);
+  // 顺手清掉上一版残留的副本（文件名按版本命名，不同版本互不相同）
+  try {
+    for (const name of await fsp.readdir(dir)) {
+      if (name !== pkg.fileName && name.toLowerCase().endsWith(".exe")) {
+        await fsp.unlink(path.join(dir, name)).catch(() => {});
+      }
     }
-  }, 10 * 1000);
+  } catch { /* 清理失败无碍 */ }
+  crashlog.write("updater-staged", staged);
+  return staged;
+}
+
+// 整文件读一遍：一为校验 sha512，二为「预热」——杀软的实时扫描锁通常在读盘后解除，
+// 后续 spawn 不再撞 EACCES
+async function verifyAndWarmInstaller(file, wantSha) {
+  const { createHash } = require("node:crypto");
+  const fsp = require("node:fs/promises");
+  const hash = createHash("sha512");
+  const fd = await fsp.open(file, "r");
+  try {
+    const buf = Buffer.alloc(1024 * 1024);
+    for (;;) {
+      const { bytesRead } = await fd.read(buf, 0, buf.length);
+      if (!bytesRead) break;
+      hash.update(bytesRead === buf.length ? buf : buf.subarray(0, bytesRead));
+    }
+  } finally {
+    await fd.close().catch(() => {});
+  }
+  const got = hash.digest("base64");
+  if (wantSha && got !== wantSha) {
+    throw new Error("安装包校验失败（sha512 与下载清单不符）");
+  }
+}
+
+// ===== 安装器启动：统一收口到「进程退出最后一刻」（quit 事件） =====
+// 真机取证结论（1.88.x，本机 crash.log + CDP 主进程注入实验）：
+// 只要 AgentHub.exe 还在运行，安装器的 CHECK_APP_RUNNING 就会 taskkill 它，而 Electron
+// 多进程死亡慢于安装器的 tasklist 轮询——第二轮判「杀不死」时静默模式下自动选取消，
+// 安装器 Quit：不装、无 UI、无日志，表现为「应用退了、新版本没装上」（v1.88.0→1.88.2 用户四连败）。
+// 外部进程 spawn 同一份安装包多次成功，纯因竞态恰好赢了，不可依赖。
+// 结论：安装器必须在「进程表里没有 AgentHub.exe」时启动——spawn 一律推迟到 quit 事件：
+// 那一刻窗口/渲染/GPU/托盘全部销毁，只剩主进程且即将退出，竞态窗口不复存在。
+
+// 副本就绪后的路径（stage 后台进行）；stage 失败则回退原始 pending 路径（1.87.1 起的旧行为）
+let stagedFile = "";
+let quitSpawn = null; // triggerInstall 武装后的待发射任务，quit 事件消费
+
+// 安装哨兵：spawn 后本进程随即退出，成败只能由下次启动判定。
+// 下次启动时：目标版本 === 当前版本 → 安装成功，清哨兵；否则记日志保留待重试。
+function sentinelPath() {
+  return path.join(config.dataDir(), "update-sentinel.json");
+}
+function writeSentinel(target) {
+  try {
+    require("node:fs").writeFileSync(sentinelPath(), JSON.stringify({ target, at: Date.now() }));
+  } catch { /* 写不了哨兵只损失取证，不阻断更新 */ }
+}
+function settleSentinel() {
+  try {
+    const s = JSON.parse(require("node:fs").readFileSync(sentinelPath(), "utf8"));
+    if (!s.target) return;
+    if (s.target === app.getVersion()) {
+      require("node:fs").unlinkSync(sentinelPath());
+      crashlog.write("updater-sentinel", `上次更新确认完成：v${s.target} 已在运行`);
+    } else {
+      crashlog.write("updater-sentinel-fail", `上次更新的 v${s.target} 没装上（当前 v${app.getVersion()}），pending 包保留可重试`);
+    }
+  } catch { /* 无哨兵或损坏：首次启动/文件问题，无操作 */ }
+}
+
+function pendingInstall() {
+  return !installTriggered && status.status === "downloaded" && !!autoUpdater && !isPortable();
+}
+
+function triggerInstall(opts = {}) {
+  if (installTriggered || !autoUpdater || status.status !== "downloaded") return status;
+  const pkg = installerPaths();
+  if (!pkg) {
+    crashlog.write("updater-install-fail", "下载助手丢失，找不到已下载的安装包");
+    onUpdateError(new Error("找不到已下载的安装包，请重新检查更新"));
+    return status;
+  }
+  installTriggered = true;
+  // 复位通知去重，万一安装器没装上，下次启动还能提醒
+  config.setUpdateNotified("");
+  quitSpawn = { pkg };
+  // 副本搬运：update-downloaded 时已在后台搬台面，这里复用它的结果；用户点得太快没赶上
+  // 就现场搬（秒级），两条路都失败则 spawnAtQuit 用原始 pending 路径兜底
+  (stagedPromise || stageInstaller(pkg))
+    .then((p) => { stagedFile = p; })
+    .catch(() => { stagedFile = ""; });
+  writeSentinel(status.latestVersion || "");
+  // 「立即重启安装」语义：武装完即走正常退出链，quit 事件里完成 spawn。
+  // 「退出时自动安装」（before-quit 调用）本来就在退出中，无需再 quit
+  if (opts.quitAfter !== false) setImmediate(() => app.quit());
   return status;
 }
 
 function pendingInstall() {
   return !installTriggered && status.status === "downloaded" && !!autoUpdater && !isPortable();
+}
+
+/** quit 事件（所有窗口/渲染/GPU/托盘已销毁，主进程即将退出）最后一刻拉起安装器。
+ *  同步发起、不等待不重试——本进程此后自然退出，安装器独立完成安装并 --force-run 启动新版。
+ *  spawn 失败（杀软锁等）由哨兵在下次启动时暴露，pending 包保留可直接重试。 */
+function spawnAtQuit() {
+  if (!quitSpawn) return;
+  const { pkg } = quitSpawn;
+  quitSpawn = null;
+  const file = stagedFile || pkg.file;
+  const args = ["--updated", "/S", "--force-run"];
+  try {
+    const child = require("node:child_process").spawn(file, args, { stdio: "ignore", detached: true });
+    crashlog.write("updater-install", `quit 时刻拉起 pid=${child.pid || "?"} src=${stagedFile ? "副本" : "原始"} ${file}`);
+  } catch (e) {
+    crashlog.write("updater-install-fail", `quit 时刻 spawn 失败 code=${e && e.code} ${(e && e.message) || ""}`);
+  }
 }
 
 function openReleases() {
@@ -429,18 +581,43 @@ function bindUpdaterEvents() {
   autoUpdater.on("update-downloaded", () => {
     setState("downloaded", { percent: 100, message: "" });
     notify("新版本已就绪", "退出应用时自动安装，也可在更新中心立即重启安装");
+    // 下载完成立即后台搬台面（不阻塞）：等用户点安装时副本多半已就绪，spawn 不再撞扫描锁
+    const pkg = installerPaths();
+    if (pkg) {
+      stagedPromise = stageInstaller(pkg).catch((e) => {
+        stagedPromise = null;
+        crashlog.write("updater-stage-fail", String((e && e.message) || e));
+        return "";
+      });
+    }
   });
   autoUpdater.on("error", (e) => onUpdateError(e));
+}
+
+// electron-updater 内部日志接进 crash.log：quitAndInstall/spawn/缓存路径每一步都有迹可循
+// （此前它的错误只进 stdout，GUI 下不可见，出事后无从取证）。debug 调用必须存在
+// （内部多处会调）但置为空实现，否则下载进度级别的噪声会把 crash.log 刷掉。
+function bindUpdaterLogger() {
+  if (!autoUpdater) return;
+  const text = (m) => String(typeof m === "function" ? m() : (m && m.message) || m);
+  autoUpdater.logger = {
+    info: (m) => crashlog.write("updater", text(m)),
+    warn: (m) => crashlog.write("updater-warn", text(m)),
+    error: (m) => crashlog.write("updater-error", text(m)),
+    debug: () => {},
+  };
 }
 
 function init(opts) {
   showWindow = (opts && opts.onShowWindow) || null;
   onTrayRefresh = (opts && opts.onTrayRefresh) || null;
   status = idleStatus();
+  settleSentinel();
   if (autoUpdater) {
     autoUpdater.autoDownload = false; // 下载让用户自己点
     autoUpdater.autoInstallOnAppQuit = false; // 退出安装自己接管，默认实现会弹向导
     bindUpdaterEvents();
+    bindUpdaterLogger();
   }
   if (app.isPackaged) timer = setTimeout(tick, FIRST_CHECK_DELAY_MS);
 }
@@ -456,4 +633,4 @@ function getStatus() {
   return status || idleStatus();
 }
 
-module.exports = { init, check, download, triggerInstall, pendingInstall, getStatus, openReleases, openRepo, isPortable };
+module.exports = { init, check, download, triggerInstall, pendingInstall, spawnAtQuit, getStatus, openReleases, openRepo, isPortable };

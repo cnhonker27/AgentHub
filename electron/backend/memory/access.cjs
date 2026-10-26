@@ -1,6 +1,16 @@
 /**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
+/**
  * AgentHub · 记忆中枢（Memory Hub）
- * Copyright (c) 2026 沐辉 (HUIdada1)
+ * Copyright (c) 2026 沐晖 (HUIdada1)
  * https://github.com/HUIdada1/AgentHub
  * 本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。
  */
@@ -86,6 +96,8 @@ class AgentAccess {
     const steps = [];
     if (adapter.format === "toml-mcp_servers") {
       steps.push(inject.injectTomlConfig(adapter, cmd.command, cmd.args, cmd.env));
+    } else if (adapter.format === "yml-cordis-patch") {
+      steps.push(inject.injectCordisPatch(adapter, cmd.command, cmd.args, cmd.env));
     } else {
       steps.push(inject.injectJsonConfig(adapter, cmd.command, cmd.args, cmd.env));
     }
@@ -109,6 +121,7 @@ class AgentAccess {
     if (!adapter) return { ok: false, message: `未知 Agent：${id}` };
     const steps = [];
     if (adapter.format === "toml-mcp_servers") steps.push(inject.uninjectTomlConfig(adapter));
+    else if (adapter.format === "yml-cordis-patch") steps.push(inject.uninjectCordisPatch(adapter));
     else steps.push(inject.uninjectJsonConfig(adapter));
     if (adapter.instruction && adapter.instruction.path) steps.push(inject.removeBlock(adapter.instruction.path));
     // 与 injectOne 同口径：!s.ok（s.ok === false 会漏掉 ok 为 undefined 的步骤）

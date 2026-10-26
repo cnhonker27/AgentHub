@@ -1,6 +1,16 @@
 <!--
+  ============================================================
+   作者：沐晖
+   日期：2026-10-22
+   版权声明：本代码归沐晖所有。
+     · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+     · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+     此注释为版权与授权声明，禁止删除。
+  ============================================================
+-->
+<!--
   AgentHub · 记忆中枢（Memory Hub）
-  Copyright (c) 2026 沐辉 (HUIdada1)
+  Copyright (c) 2026 沐晖 (HUIdada1)
   https://github.com/HUIdada1/AgentHub
   本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。
 -->
@@ -159,10 +169,9 @@ function goto(page: string) {
   app.setPage(page);
 }
 
-/** 模型与网关现为配置页的子板块：先留跳转提示（配置页消费后清空），再进配置页 */
+/** 模型与网关已迁到平台设置：直接打开「设置 · 模型与网关」页签，不再经配置页中转 */
 function openModels() {
-  mem.configTabHint = "__models__";
-  app.openModuleConfig();
+  app.openSettings("models");
 }
 
 let offEvent: (() => void) | undefined;

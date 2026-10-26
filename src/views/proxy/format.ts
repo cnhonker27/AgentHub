@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-21
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 反代网关 · 视图共享格式化工具
 /** 千分位 */
 export const fmtInt = (n: number) => Math.round(n || 0).toLocaleString("en-US");
@@ -79,6 +89,8 @@ export const isClineChannel = (id?: string): boolean => id === "cline_free" || i
 /** 渠道余额格式化（智谱是 Token 不是积分，同走中文数量级换算；Qoder / Cline 保持浮点 Credits） */
 export function fmtBalance(val: number, channel?: string): string {
   if (val === -1) return "不限";
+  // Accio 是用量百分比（0-100），不是积分：按中文数量级换算会误导，直接原数
+  if (channel === "accio" || channel === "accio_cn") return String(Math.round(val * 10) / 10);
   // Qoder / Cline 的 credits 是浮点（实测 0.0066 / -0.0177 级精度），整数化会丢计量
   if (isQoderChannel(channel) || isClineChannel(channel)) return fmtCredits(val);
   return fmtCnAmount(val);
@@ -86,6 +98,7 @@ export function fmtBalance(val: number, channel?: string): string {
 
 /** 渠道余额单位标签 */
 export function balanceUnit(channel?: string): string {
+  if (channel === "accio" || channel === "accio_cn") return "%";
   if (channel === "zcode") return "Tokens";
   if (isQoderChannel(channel) || isClineChannel(channel)) return "Credits";
   return "积分";
@@ -151,6 +164,10 @@ export function checkinLabels(channel?: string): {
   if (channel === "zcode") {
     return { auto: "自动领取", run: "一键领取", shortRun: "领取", done: "领取成功", shortDone: "已领取", shortFail: "领取失败", detail: "领取详情" };
   }
+  // CodeArts 的「签到」就是每日福利（三段式领取，见 codearts/welfare.cjs），照它的实际形态叫「领福利」
+  if (channel === "codearts") {
+    return { auto: "自动领福利", run: "一键领福利", shortRun: "领福利", done: "领取成功", shortDone: "已领取", shortFail: "领取失败", detail: "福利领取详情" };
+  }
   return { auto: "自动签到", run: "一键签到", shortRun: "签到", done: "签到成功", shortDone: "已签到", shortFail: "签到失败", detail: "签到详情" };
 }
 
@@ -178,6 +195,10 @@ export const CHANNEL_NAMES: Record<string, string> = {
   autoclaw_intl: "AutoClaw 国际版",
   cline_free: "Cline Free",
   cline_pass: "Cline Pass",
+  accio: "Accio",
+  accio_cn: "Accio 国内版",
+  codearts: "CodeArts（华为云）",
+  loomy: "Loomy（讯飞）",
 };
 export const channelName = (id: string) => CHANNEL_NAMES[id] || id || "-";
 

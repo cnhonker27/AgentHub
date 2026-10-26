@@ -1,6 +1,16 @@
 /**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
+/**
  * AgentHub · 记忆中枢（Memory Hub）
- * Copyright (c) 2026 沐辉 (HUIdada1)
+ * Copyright (c) 2026 沐晖 (HUIdada1)
  * https://github.com/HUIdada1/AgentHub
  * 本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。
  */
@@ -18,16 +28,8 @@ const { MemoryIndex, startOfToday } = require("./indexer.cjs");
 const { MemorySearch } = require("./search.cjs");
 const layout = require("./layout.cjs");
 const { redact } = require("./redact.cjs");
-const { SCHEMA } = require("./config-schema.cjs");
+const { flattenConfig } = require("./config.cjs");
 const { ensureSynonyms } = require("./synonyms.cjs");
-
-// schema 里声明为 map / list / providerlist / modeltable 的键要保持整体，不拆点路径。
-// 该判定只依赖静态 SCHEMA：flat() 在每次写入/读取时都会被调用，提前算一次，避免每轮重建 Set。
-const WHOLE_KEYS = new Set(
-  Object.entries(SCHEMA)
-    .filter(([, meta]) => ["map", "list", "providerlist", "modeltable", "orderlist"].includes(meta.type))
-    .map(([key]) => key),
-);
 
 class MemoryService {
   constructor(rootDir, cfg, options = {}) {
@@ -248,22 +250,9 @@ class MemoryService {
 
   flat() {
     // 把嵌套配置拍平成点路径（引擎读取口径与 schema 一致）。
-    // schema 里声明为 map / list / providerlist / modeltable 的键保持整体——
-    // 它们本来就是「一个键装一组数据」，拆成点路径会让 taskEffort.distill 这类读取口径失真。
-    const out = {};
-    const walk = (obj, prefix) => {
-      for (const [k, v] of Object.entries(obj || {})) {
-        const key = prefix ? `${prefix}.${k}` : k;
-        const isLeafObject = v && typeof v === "object" && !Array.isArray(v);
-        if (isLeafObject && !WHOLE_KEYS.has(key)) { walk(v, key); continue; }
-        // schema 删除某键后，旧配置文件里的残留同名键必须被安全忽略，
-        // 否则引擎会读到一个「已从表单消失但仍生效」的幽灵旋钮（dedup.l4.autoDelete 就是这么踩的）
-        if (!Object.prototype.hasOwnProperty.call(SCHEMA, key)) continue;
-        out[key] = v;
-      }
-    };
-    walk(this.cfg.all ? this.cfg.all() : this.cfg);
-    return out;
+    // 实现收在 config.cjs 的 flattenConfig：记忆中枢停用时 ProviderStore.flat() 也用它，
+    // 两处必须同一份实现——否则「设置页看到的配置」与「任务实际用的配置」会分叉。
+    return flattenConfig(this.cfg.all ? this.cfg.all() : this.cfg);
   }
 
   // ---------- 写 ----------
@@ -1679,7 +1668,7 @@ class MemoryService {
   }
 
   /**
-   * 记忆体检（2026-10-16 借鉴 causal-memory 的 drift/bias_audit 本地化）：纯 SQL 统计，不用 LLM。
+   * 记忆体检（2026-10-16 本地化 drift/bias_audit）：纯 SQL 统计，不用 LLM。
    * 五项：僵尸记忆 / 检索趋势 / 分布 / 演化链 / 回收站。任一段异常只让该段为空，不抛。
    * 输出两份：完整报告（调度任务产出，落 mem_meta 供前端/IPC 取）；摘要进 memory_status。
    */

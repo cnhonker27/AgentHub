@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 用量同步模块 IPC 命令注册：对应前端 src/api/sync.ts
 // 从「用量记录同步」backend/ipc.cjs 并入 AgentHub 的适配：
 // - 与框架冲突的 4 个命令加 sync_ 前缀（load_config/save_config/get_data_dir/open_data_dir）
@@ -39,7 +49,7 @@ function registerSync(ctx) {
   ipcMain.handle("sync_load_config", () => {
     const cfg = config.loadConfig();
     applyBillingFx(cfg);
-    // 密码不回传明文：渲染进程只拿掩码，防止渲染层注入/调试口读取 WebDAV 凭据
+    // 密码不回传明文：渲染进程只拿掩码，防止渲染层注入/调试口读取凭据
     if (cfg.webdav) cfg.webdav.password = cfg.webdav.password ? config.PASSWORD_MASK : "";
     return cfg;
   });
@@ -322,27 +332,53 @@ function registerSync(ctx) {
 
   ipcMain.handle("get_unpriced_models", () => db.listUnpricedModels());
 
-  ipcMain.handle("pull_remote_pricing", async (_e, args) => {
+  // ===== 在线定价源：三套内置价格表（官方倍率预设 > models.dev > 远程价格表）=====
+
+  /** 被规则过滤掉的模型明细 → 一句话（让用户知道「为什么有些模型没价」而不是静默少算） */
+  function skippedSummary(s) {
+    if (!s || typeof s !== "object") return "";
+    const parts = [];
+    if (s.request && s.request.length) parts.push(`${s.request.length} 个按次计费`);
+    if (s.invalid && s.invalid.length) parts.push(`${s.invalid.length} 个表达式无法解析`);
+    return parts.length ? `；已跳过 ${parts.join("、")}` : "";
+  }
+
+  /** 拉取即应用（不弹确认），结果一句话回报给界面 toast */
+  ipcMain.handle("pull_pricing_source", async (_e, args) => {
+    const id = String((args && args.id) || "");
     try {
       const cfg = config.loadConfig();
-      const rp = (cfg.billing && cfg.billing.remotePricing) || {};
-      if (!rp.url) return { ok: false, message: "未配置拉取网址" };
-      const r = await billing.pullRemotePricing({
-        url: rp.url, hashUrl: rp.hashUrl, proxy: cfg.billing.importProxy || "", force: !!(args && args.force),
+      const r = await billing.pullPricingSource(id, {
+        proxy: (cfg.billing && cfg.billing.importProxy) || "",
+        force: !!(args && args.force),
       });
-      if (r.action === "unchanged") return { ok: true, message: "远程价格源无变化，本地价格已是最新" };
-      if (r.action === "skipped") return { ok: false, message: r.reason || "已跳过" };
-      return { ok: true, message: `拉取完成：新增 ${r.added} · 调价 ${r.updated} · 未变 ${r.skipped}（本地 ${r.models} 个模型命中，远端共 ${r.total} 个）` };
+      if (r.action === "unchanged") return { ok: true, message: "价格表无变化，本地已是最新" };
+      if (r.action === "empty") {
+        return { ok: false, message: `未匹配到任何本地模型（远端共 ${r.total} 个）${skippedSummary(r.skipped)}，已保留原价格` };
+      }
+      return {
+        ok: true,
+        message: `已更新：新增 ${r.added} · 调价 ${r.updated} · 未变 ${r.same}（命中 ${r.models}/${r.total} 个模型）`
+          + (r.shadowed ? `；${r.shadowed} 个已有手动价，本表暂不生效` : "")
+          + skippedSummary(r.skipped),
+      };
     } catch (e) {
+      try {
+        db.setMeta(`pricing_${id}_error`, e.message);
+        db.setMeta(`pricing_${id}_error_at`, String(Date.now()));
+      } catch { /* 记账失败不影响返回 */ }
       return { ok: false, message: `拉取失败：${e.message}` };
     }
   });
 
-  ipcMain.handle("get_remote_pricing_status", () => {
+  /** 三源状态（含配置里的开关与检查间隔，界面直接渲染三张卡片） */
+  ipcMain.handle("get_pricing_sources_status", () => {
     const cfg = config.loadConfig();
-    const rp = (cfg.billing && cfg.billing.remotePricing) || {};
-    const st = billing.getRemotePricingStatus();
-    return { ...rp, ...st };
+    const cfgSources = (cfg.billing && cfg.billing.sources) || {};
+    return billing.getPricingSourcesStatus().map((s) => {
+      const c = cfgSources[s.id] || {};
+      return { ...s, enabled: !!c.enabled, intervalHours: Number(c.intervalHours) || 24 };
+    });
   });
 
   ipcMain.handle("import_prices_preview", async (_e, args) => {

@@ -1,48 +1,103 @@
+<!--
+  ============================================================
+   作者：沐晖
+   日期：2026-10-22
+   版权声明：本代码归沐晖所有。
+     · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+     · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+     此注释为版权与授权声明，禁止删除。
+  ============================================================
+-->
 <script setup lang="ts">
 import { onMounted, ref, reactive, computed, watch } from "vue";
 import { useSyncStore } from "../../stores/sync";
 import { formatToken, formatInteger, formatDateTime } from "../../composables/useFormat";
 import { toast as ElMessage } from "../../utils/toast";
 import * as api from "../../api/sync";
-import type { PriceRow, PriceEntry, UnpricedModel, ImportPreview, ImportPreviewItem, RemotePricingConfig, ModelAlias } from "../../types/sync";
+import type { PriceRow, PriceEntry, UnpricedModel, ImportPreview, ImportPreviewItem, ModelAlias, PricingSourceStatus } from "../../types/sync";
 
 const app = useSyncStore();
 
-// ===== 远程价格源（来源 remote：自动拉取，优先级 手动 > 远程 > 内置） =====
-const remotePulling = ref(false);
-const remoteStatus = ref<(RemotePricingConfig & { lastAt: number | null; lastHash: string | null; lastModels: number | null }) | null>(null);
-const remoteMsg = ref<{ ok: boolean; text: string } | null>(null);
+// ===== 在线定价源：三套内置价格表（官方倍率预设 > models.dev > 远程价格表）=====
+// 链接内置在代码里（与后端 PRICING_SOURCES 一致），界面只展示域名，不需要用户填地址。
+// 每套独立开关 / 检查间隔 / 立即拉取；拉取即自动应用差异，不弹确认。
+const SOURCE_META = [
+  { id: "official", name: "官方倍率预设", host: "basellm.github.io", note: "倍率表达式" },
+  { id: "modelsdev", name: "models.dev 预设", host: "models.dev", note: "美元单价" },
+  { id: "remote", name: "远程价格表", host: "raw.githubusercontent.com", note: "LiteLLM 格式" },
+];
 
-async function loadRemoteStatus() {
+const sourceStatus = ref<PricingSourceStatus[]>([]);
+const pulling = reactive<Record<string, boolean>>({});
+const sourceMsg = reactive<Record<string, { ok: boolean; text: string } | null>>({});
+
+/** 三张卡片的数据：配置里的开关/间隔 + 上次拉取结果，顺序即优先级 */
+const sourceCards = computed(() => {
+  const st = new Map(sourceStatus.value.map((s) => [s.id, s]));
+  const cfg = app.config.billing.sources || {};
+  return SOURCE_META.map((meta, i) => {
+    const s = st.get(meta.id);
+    const c = cfg[meta.id] || { enabled: false, intervalHours: 24 };
+    return {
+      ...meta,
+      index: i + 1,
+      enabled: !!c.enabled,
+      intervalHours: Number(c.intervalHours) || 24,
+      lastAt: s?.lastAt ?? null,
+      lastModels: s?.lastModels ?? null,
+      lastTotal: s?.lastTotal ?? null,
+      lastError: s?.lastError || "",
+      msg: sourceMsg[meta.id] || null,
+      busy: !!pulling[meta.id],
+    };
+  });
+});
+
+async function loadSourceStatus() {
   try {
-    remoteStatus.value = await api.getRemotePricingStatus();
+    sourceStatus.value = await api.getPricingSourcesStatus();
   } catch {
-    remoteStatus.value = null;
+    sourceStatus.value = [];
   }
 }
-async function saveRemoteField() {
+async function saveBillingField() {
   const r = await app.save();
   if (!r.ok) flash(r);
 }
-function toggleRemotePricing() {
-  app.config.billing.remotePricing.enabled = !app.config.billing.remotePricing.enabled;
-  saveRemoteField();
+function toggleSource(id: string) {
+  const c = app.config.billing.sources[id];
+  if (!c) return;
+  c.enabled = !c.enabled;
+  saveBillingField();
 }
-async function pullRemoteNow() {
-  remotePulling.value = true;
-  remoteMsg.value = null;
+/** 立即拉取：后台拉取 + 自动应用差异，结果一句话回报（不弹确认框） */
+async function pullSourceNow(id: string) {
+  pulling[id] = true;
+  sourceMsg[id] = null;
   try {
-    // 立即拉取强制跳过哈希短路（确保拿到远端最新）
-    const r = await api.pullRemotePricing(true);
-    remoteMsg.value = { ok: !!r.ok, text: r.message };
-    if (r.ok) await Promise.all([loadPrices(), loadRemoteStatus()]);
+    const r = await api.pullPricingSource(id, true);
+    sourceMsg[id] = { ok: !!r.ok, text: r.message };
+    if (r.ok) await Promise.all([loadPrices(), loadSourceStatus(), loadUnpriced()]);
   } catch (e) {
-    remoteMsg.value = { ok: false, text: e instanceof Error ? e.message : "拉取失败" };
+    sourceMsg[id] = { ok: false, text: e instanceof Error ? e.message : "拉取失败" };
   } finally {
-    remotePulling.value = false;
+    pulling[id] = false;
   }
 }
-const sourceLabel: Record<string, string> = { manual: "手动", remote: "远程", builtin: "内置" };
+
+const sourceLabel: Record<string, string> = { manual: "手动", official: "官方预设", modelsdev: "models.dev", newapi: "在线定价", remote: "远程价格表", builtin: "内置" };
+
+/** 来源标签样式：手动=蓝、三套在线源=强调、内置=灰 */
+function srcPillClass(s: string) {
+  if (s === "manual") return "blue";
+  if (s === "builtin") return "src-builtin";
+  return "src-newapi";
+}
+
+/** 价格表里看不见的其它来源（被更高优先级盖住）：如官方预设生效时，远程价仍在表里但不单独出行 */
+function hiddenSources(p: PriceRow) {
+  return (p.sources || []).filter((s) => s !== p.source);
+}
 
 // ===== 价格表 =====
 const prices = ref<PriceRow[]>([]);
@@ -484,17 +539,17 @@ async function applyImport() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadPrices(), loadUnpriced(), loadRemoteStatus(), loadAliases()]);
+  await Promise.all([loadPrices(), loadUnpriced(), loadSourceStatus(), loadAliases()]);
 });
 
-// 视图常驻：同步结束（他机价格表合并 / 远程价格源顺带拉取）或切回本页时刷新
+// 视图常驻：同步结束（他机价格表合并 / 价格源顺带拉取）或切回本页时刷新
 let wasRunning = app.sync.running;
 watch(() => app.sync.running, (now) => {
-  if (wasRunning && !now) { loadPrices(); loadUnpriced(); loadRemoteStatus(); loadAliases(); }
+  if (wasRunning && !now) { loadPrices(); loadUnpriced(); loadSourceStatus(); loadAliases(); }
   wasRunning = now;
 });
 watch(() => app.activePage, (p) => {
-  if (p === "billing") { loadPrices(); loadUnpriced(); loadRemoteStatus(); loadAliases(); }
+  if (p === "billing") { loadPrices(); loadUnpriced(); loadSourceStatus(); loadAliases(); }
 });
 </script>
 
@@ -502,80 +557,92 @@ watch(() => app.activePage, (p) => {
   <div class="sync-page">
     <div v-if="actionResult" class="save-line" :class="{ ok: actionResult.ok }">{{ actionResult.message }}</div>
 
-    <!-- 计费设置 + 远程价格源（左右分栏） -->
+    <!-- ① 计费设置：与价格源解耦，单独成卡（三个字段并排，不再挤在右栏） -->
     <div class="card">
-      <div class="billing-setup">
-        <!-- 左：计费开关与基础设置 -->
-        <div class="bs-col">
-          <div class="rule-group-title">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2.6"/></svg>
-            计费设置
-          </div>
-          <div class="switch-row">
-            <div class="s-left">
-              <div class="s-title">启用费用统计</div>
-              <div class="s-desc">关闭后隐藏「费用」页与所有费用元素，记录与同步不受影响</div>
-            </div>
-            <div class="switch" :class="{ on: app.config.billing?.enabled }" role="switch" :aria-checked="!!app.config.billing?.enabled" @click="toggleEnabled"></div>
-          </div>
-          <div class="form-grid billing-form">
-            <div class="form-field">
-              <label>显示币种</label>
-              <div class="tabs">
-                <button class="tab" :class="{ active: app.config.billing?.displayCurrency === 'CNY' }" @click="setCurrency('CNY')">CNY 人民币</button>
-                <button class="tab" :class="{ active: app.config.billing?.displayCurrency === 'USD' }" @click="setCurrency('USD')">USD 美元</button>
-              </div>
-            </div>
-            <div class="form-field">
-              <label>USD → CNY 汇率</label>
-              <input class="f-input mono" type="number" step="0.01" min="0" v-model="app.config.billing.usdToCny" @blur="onRateBlur" />
-            </div>
-            <div class="form-field full">
-              <label>导入代理（可选，留空直连）</label>
-              <input class="f-input mono" v-model="app.config.billing.importProxy" placeholder="http://127.0.0.1:7897" @blur="autoSave" />
-            </div>
-          </div>
-          <div class="bs-note">汇率修改后，全部历史费用按新汇率即时重算 · jsdelivr 镜像无代理时也可直连</div>
+      <div class="card-head">
+        <h2>计费设置</h2>
+        <span class="hint">汇率修改后，全部历史费用按新汇率即时重算</span>
+      </div>
+      <div class="switch-row">
+        <div class="s-left">
+          <div class="s-title">启用费用统计</div>
+          <div class="s-desc">关闭后隐藏「费用」页与所有费用元素，记录与同步不受影响</div>
         </div>
+        <div class="switch" :class="{ on: app.config.billing?.enabled }" role="switch" :aria-checked="!!app.config.billing?.enabled" @click="toggleEnabled"></div>
+      </div>
+      <div class="form-grid billing-form billing-form-3">
+        <div class="form-field">
+          <label>显示币种</label>
+          <div class="tabs">
+            <button class="tab" :class="{ active: app.config.billing?.displayCurrency === 'CNY' }" @click="setCurrency('CNY')">CNY 人民币</button>
+            <button class="tab" :class="{ active: app.config.billing?.displayCurrency === 'USD' }" @click="setCurrency('USD')">USD 美元</button>
+          </div>
+        </div>
+        <div class="form-field">
+          <label>USD → CNY 汇率</label>
+          <input class="f-input mono" type="number" step="0.01" min="0" v-model="app.config.billing.usdToCny" @blur="onRateBlur" />
+        </div>
+        <div class="form-field">
+          <label>导入代理（可选，留空直连）</label>
+          <input class="f-input mono" v-model="app.config.billing.importProxy" placeholder="http://127.0.0.1:7897" @blur="autoSave" />
+        </div>
+      </div>
+      <div class="bs-note">三套价格源共用这个代理（拉取走独立网络会话，不影响主窗口）</div>
+    </div>
 
-        <!-- 右：远程价格源（来源 remote：手动 > 远程 > 内置） -->
-        <div class="bs-col">
-          <div class="rule-group-title">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>
-            远程价格源
+    <!-- ② 价格来源：三套在线价格表同构卡片，顶部是生效优先级链 -->
+    <div class="card">
+      <div class="card-head">
+        <h2>价格来源</h2>
+        <span class="hint">三套价格表各自拉取，同一模型按下面顺序取价</span>
+      </div>
+
+      <div class="src-chain">
+        <span class="chain-pill">手动价</span>
+        <span class="chain-arrow">›</span>
+        <span class="chain-pill accent">官方倍率预设</span>
+        <span class="chain-arrow">›</span>
+        <span class="chain-pill accent">models.dev</span>
+        <span class="chain-arrow">›</span>
+        <span class="chain-pill accent">远程价格表</span>
+        <span class="chain-arrow">›</span>
+        <span class="chain-pill">内置</span>
+        <span class="chain-note">越靠前越优先；某套没收录的模型自动落到下一套</span>
+      </div>
+
+      <div class="src-grid three">
+        <section v-for="c in sourceCards" :key="c.id" class="src-panel" :class="{ on: c.enabled }">
+          <div class="sp-head">
+            <div class="sp-title">
+              <span class="sp-idx">{{ c.index }}</span>
+              {{ c.name }}
+            </div>
+            <div class="switch" :class="{ on: c.enabled }" role="switch" :aria-checked="c.enabled" @click="toggleSource(c.id)"></div>
           </div>
-          <div class="switch-row">
-            <div class="s-left">
-              <div class="s-title">自动拉取远程价格</div>
-              <div class="s-desc">按间隔随数据同步自动拉取，价格来源标记为「远程」；优先级：手动 &gt; 远程 &gt; 内置</div>
-            </div>
-            <div class="switch" :class="{ on: app.config.billing?.remotePricing?.enabled }" role="switch" :aria-checked="!!app.config.billing?.remotePricing?.enabled" @click="toggleRemotePricing"></div>
+          <div class="p-host mono" :title="c.host">{{ c.host }}</div>
+          <div class="sp-meta">
+            <span class="sp-note">{{ c.note }}</span>
+            <span v-if="c.lastTotal" class="sp-count">{{ formatInteger(c.lastModels || 0) }} / {{ formatInteger(c.lastTotal) }} 命中</span>
+            <span v-else class="sp-count">未拉取</span>
           </div>
-          <div class="form-grid billing-form">
-            <div class="form-field full">
-              <label>价格表网址（LiteLLM 兼容格式）</label>
-              <input class="f-input mono" v-model="app.config.billing.remotePricing.url" placeholder="https://…/model_prices_and_context_window.json" @blur="saveRemoteField" />
-            </div>
-            <div class="form-field">
-              <label>哈希校验网址（可选，远程无变化时短路由）</label>
-              <input class="f-input mono" v-model="app.config.billing.remotePricing.hashUrl" placeholder="https://…/model_prices_and_context_window.sha256" @blur="saveRemoteField" />
-            </div>
-            <div class="form-field">
-              <label>检查间隔（小时）</label>
-              <input class="f-input mono" type="number" min="1" step="1" v-model.number="app.config.billing.remotePricing.intervalHours" @blur="saveRemoteField" />
-            </div>
+          <div class="form-field" style="margin-top: 10px">
+            <label>检查间隔（小时）</label>
+            <input class="f-input mono" type="number" min="1" step="1" v-model.number="app.config.billing.sources[c.id].intervalHours" @blur="saveBillingField" />
           </div>
-          <div class="switch-row">
-            <div class="s-left">
-              <div class="s-desc">
-                <template v-if="remoteStatus?.lastAt">上次拉取 {{ formatDateTime(remoteStatus.lastAt) }} · 命中 {{ remoteStatus.lastModels }} 个本地模型<span v-if="remoteMsg"> · </span></template>
-                <template v-else>尚未拉取过<span v-if="remoteMsg"> · </span></template>
-                <span v-if="remoteMsg" :style="{ color: remoteMsg.ok ? 'var(--ok)' : 'var(--err)' }">{{ remoteMsg.text }}</span>
-              </div>
-            </div>
-            <button class="btn-outline" :disabled="remotePulling" @click="pullRemoteNow">{{ remotePulling ? "拉取中…" : "立即拉取" }}</button>
+          <div class="sp-status" :class="{ err: !c.msg && c.lastError }">
+            <span v-if="c.msg" :style="{ color: c.msg.ok ? 'var(--ok)' : 'var(--err)' }">{{ c.msg.text }}</span>
+            <template v-else-if="c.lastError">最近失败：{{ c.lastError }}</template>
+            <template v-else-if="c.lastAt">上次拉取 {{ formatDateTime(c.lastAt) }}</template>
+            <template v-else>尚未拉取过</template>
           </div>
-        </div>
+          <div class="sp-actions">
+            <button class="btn-outline" :disabled="c.busy" @click="pullSourceNow(c.id)">{{ c.busy ? "拉取中…" : "立即拉取" }}</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="src-foot">
+        立即拉取 = 后台拉取并自动应用差异（新增 / 调价马上生效，历史记录仍按原价格段计费），不弹确认框；已有手动价的模型不被覆盖。
       </div>
     </div>
 
@@ -620,9 +687,14 @@ watch(() => app.activePage, (p) => {
               <td class="num mono">{{ p.cacheReadPerM.toFixed(2) }}</td>
               <td class="num mono">{{ p.cacheWritePerM.toFixed(2) }}</td>
               <td><span class="pill" :class="p.currency === 'USD' ? 'ok' : 'blue'">{{ p.currency }}</span></td>
-              <td><span class="pill" :class="p.source === 'manual' ? 'blue' : p.source === 'remote' ? 'ok' : 'src-builtin'">{{ sourceLabel[p.source] || p.source }}</span></td>
+              <td><span class="pill" :class="srcPillClass(p.source)">{{ sourceLabel[p.source] || p.source }}</span></td>
               <td class="ver">
-                <template v-if="p.active"><b>{{ effLabel(p.effectiveFrom) }}</b> · {{ p.versions > 1 ? `${p.versions} 个历史版本` : "无历史" }}</template>
+                <template v-if="p.active">
+                  <b>{{ effLabel(p.effectiveFrom) }}</b> · {{ p.versions > 1 ? `${p.versions} 个历史版本` : "无历史" }}
+                  <div v-if="hiddenSources(p).length" class="ver-sub">
+                    另有 {{ hiddenSources(p).map((s) => sourceLabel[s] || s).join(" / ") }} 价（优先级更低，未生效）
+                  </div>
+                </template>
                 <template v-else><span class="pill warn">待生效 · {{ effLabel(p.effectiveFrom) }}</span></template>
               </td>
               <td class="op-cell">
@@ -700,7 +772,11 @@ watch(() => app.activePage, (p) => {
       <div class="caliper-grid">
         <div class="cal-item">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
-          <div><b>价格匹配</b>：供应商精确匹配优先，其次仅按模型通配；同一模型跨软件源共用一份价格。</div>
+          <div><b>来源优先级</b>：手动 &gt; 官方倍率预设 &gt; models.dev &gt; 远程价格表 &gt; 内置。同一模型多源并存时按此取价，低优先级来源的价格段保留但不生效（历史抽屉里能看到）。</div>
+        </div>
+        <div class="cal-item">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+          <div><b>供应商匹配</b>：同来源内供应商精确匹配优先，其次按模型通配；同一模型跨软件源共用一份价格。</div>
         </div>
         <div class="cal-item">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
@@ -786,7 +862,7 @@ watch(() => app.activePage, (p) => {
               <b>{{ effLabel(v.effectiveFrom) }}</b>
               {{ v.effectiveTo ? "至 " + formatDateTime(v.effectiveTo) : "· 至今" }}
               <span class="pill" :class="i === 0 ? 'blue' : ''" v-if="i === 0">现行</span>
-              <span class="pill" :class="v.source === 'manual' ? 'blue' : v.source === 'remote' ? 'ok' : 'src-builtin'" style="margin-left: 4px">{{ sourceLabel[v.source] || v.source }}</span>
+              <span class="pill" :class="srcPillClass(v.source)" style="margin-left: 4px">{{ sourceLabel[v.source] || v.source }}</span>
               <span v-if="v.currency === 'USD'" class="pill ok" style="margin-left: 4px">USD</span>
             </div>
             <div class="vt-price mono">输入 {{ v.inputPerM.toFixed(2) }} · 输出 {{ v.outputPerM.toFixed(2) }} · 缓存读 {{ v.cacheReadPerM.toFixed(2) }}</div>
@@ -906,19 +982,51 @@ watch(() => app.activePage, (p) => {
 </template>
 
 <style scoped>
-.rule-group-title { display: flex; align-items: center; gap: 9px; font-size: 13.5px; font-weight: 700; margin-bottom: 12px; color: var(--text); }
-.rule-group-title svg { width: 16px; height: 16px; color: var(--accent); }
-
-/* 计费设置 + 远程价格源：左右分栏 */
-.billing-setup { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 0 32px; }
-.bs-col + .bs-col { border-left: 1px solid var(--border); padding-left: 32px; }
 .billing-form { padding: 4px 0 2px; }
-.bs-note { border-top: 1px solid var(--border); padding-top: 12px; font-size: 11.5px; color: var(--text-3); line-height: 1.6; }
-.bs-col .switch-row:last-child { padding-bottom: 0; }
+/* 计费设置：三字段并排（币种 / 汇率 / 代理）。
+   特异性要压过 sync.css 里的 .sync-scope .form-grid（0,2,0）与它的窄屏覆盖，否则三列不生效 */
+.sync-scope .form-grid.billing-form-3 { grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.8fr) minmax(0, 1.4fr); }
 @media (max-width: 1080px) {
-  .billing-setup { grid-template-columns: 1fr; gap: 20px 0; }
-  .bs-col + .bs-col { border-left: none; padding-left: 0; }
+  .sync-scope .form-grid.billing-form-3 { grid-template-columns: 1fr 1fr; }
+  .sync-scope .form-grid.billing-form-3 > .form-field:last-child { grid-column: 1 / -1; }
 }
+@media (max-width: 640px) {
+  .sync-scope .form-grid.billing-form-3 { grid-template-columns: 1fr; }
+}
+.bs-note { border-top: 1px solid var(--border); padding-top: 12px; font-size: 11.5px; color: var(--text-3); line-height: 1.6; }
+
+/* 价格来源：顶部优先级链 */
+.src-chain { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 10px 14px; margin-bottom: 14px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; }
+.chain-pill { font-size: 11.5px; padding: 2px 10px; border-radius: 999px; background: var(--surface); border: 1px solid var(--border); color: var(--text-2); white-space: nowrap; }
+.chain-pill.accent { background: var(--accent-soft); border-color: var(--accent-soft-2); color: var(--accent-strong); font-weight: 600; }
+.chain-arrow { color: var(--text-3); font-size: 12px; }
+.chain-note { font-size: 11.5px; color: var(--text-3); margin-left: auto; }
+
+/* 价格来源：三套同构卡片，顺序即优先级 */
+.src-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 1180px) { .src-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 840px) { .src-grid { grid-template-columns: 1fr; } }
+.src-panel { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 12px; padding: 13px 14px; background: var(--surface); transition: border-color .16s ease, background .16s ease; }
+.src-panel.on { border-color: var(--accent-soft-2); background: var(--accent-soft); }
+.sp-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.sp-title { display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600; color: var(--text); min-width: 0; }
+.sp-idx { display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; border-radius: 5px; background: var(--surface-3); color: var(--text-2); font-size: 10.5px; font-weight: 700; flex-shrink: 0; }
+.src-panel.on .sp-idx { background: var(--accent); color: #fff; }
+.p-host { font-size: 11.5px; color: var(--text-2); margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; }
+.sp-note { font-size: 11px; color: var(--text-3); }
+.sp-count { font-size: 11px; color: var(--text-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sp-status { font-size: 11.5px; color: var(--text-3); line-height: 1.6; padding: 8px 0 0; margin-top: auto; border-top: 1px dashed var(--border); }
+.sp-status.err { color: var(--err); }
+.sp-actions { display: flex; gap: 8px; margin-top: 10px; }
+.sp-actions .btn-outline { flex: 1; justify-content: center; }
+.src-foot { font-size: 11.5px; color: var(--text-3); line-height: 1.65; margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--border); }
+
+/* 价格表：被更高优先级盖住的来源提示 */
+.ver-sub { font-size: 11px; color: var(--text-3); margin-top: 2px; }
+.pill.src-newapi { color: var(--accent-strong); background: var(--accent-soft); border: 1px solid var(--accent-soft-2); }
+
+.imp-row .ic.fuzz { color: var(--accent-strong); background: var(--accent-soft); }
 
 th.op-cell { text-align: center; white-space: nowrap; }
 td.op-cell { text-align: right; white-space: nowrap; }

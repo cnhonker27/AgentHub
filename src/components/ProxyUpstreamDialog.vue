@@ -1,5 +1,15 @@
+<!--
+  ============================================================
+   作者：沐晖
+   日期：2026-10-22
+   版权声明：本代码归沐晖所有。
+     · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+     · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+     此注释为版权与授权声明，禁止删除。
+  ============================================================
+-->
 <!-- 上游启闭弹窗（渠道级开关）：各渠道图标 + 名称 + 启用开关
-     开关 = 该渠道在反代网关中是否启用与可见：关闭后反代网关全部页面动态隐藏该渠道
+     开关 = 该渠道在号池管家中是否启用与可见：关闭后号池管家全部页面动态隐藏该渠道
      （卡片/下拉/调用等一律不存在），重新打开立即恢复。
      数据走 proxy_channel_list（全量含已关闭渠道，带 enabled）；
      切换走 proxy_channel_toggle（后端写 proxy.channelEnabled + 广播 status 事件，各页面事件刷新即动态显隐） -->
@@ -8,40 +18,12 @@ import { ref, watch } from "vue";
 import * as api from "../api/ipc";
 import type { ProxyChannelView } from "../types";
 import { channelName } from "../views/proxy/format";
-import traeIcon from "../assets/channels/trae.png";
-import workbuddyIcon from "../assets/channels/workbuddy.png";
-import raccoonIcon from "../assets/channels/raccoon.png";
-import qoderIcon from "../assets/channels/qoder.png";
-import zcodeIcon from "../assets/channels/zcode.png";
-// CatPaw 无官方客户端图标可提取，为自绘（tools/gen-catpaw-icon.cjs 生成，可复现）
-import catpawIcon from "../assets/channels/catpaw.png";
-// AutoClaw 双区共用爪印图形，地区角标区分（tools/gen-autoclaw-icon.cjs 生成，可复现）
-import autoclawIcon from "../assets/channels/autoclaw.png";
-import autoclawIntlIcon from "../assets/channels/autoclaw_intl.png";
-// Cline 双池共用「终端窗」图形，池角标区分（tools/gen-cline-icon.cjs 生成，可复现）
-import clineFreeIcon from "../assets/channels/cline_free.png";
-import clinePassIcon from "../assets/channels/cline_pass.png";
+// 渠道图标与首字母徽章统一从 channelIcons 取：号池页顶部切换条也用同一份，
+// 免得两处各存一张映射表、新渠道只补了一边
+import { CHANNEL_ICONS, channelInitial as initial } from "../views/proxy/channelIcons";
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ (e: "close"): void }>();
-
-// 渠道图标（取自各客户端安装目录内嵌的同一张图，与系统里显示的为一致；
-// 没收录图标的渠道回落首字母徽章）
-const CHANNEL_ICONS: Record<string, string> = {
-  trae: traeIcon,
-  workbuddy: workbuddyIcon,
-  workbuddy_ai: workbuddyIcon,
-  raccoon: raccoonIcon,
-  qoder: qoderIcon,
-  qoder_intl: qoderIcon,
-  zcode: zcodeIcon,
-  catpaw: catpawIcon,
-  autoclaw: autoclawIcon,
-  autoclaw_intl: autoclawIntlIcon,
-  cline_free: clineFreeIcon,
-  cline_pass: clinePassIcon,
-};
-const initial = (id: string) => (channelName(id) || id || "?").trim().slice(0, 1).toUpperCase() || "?";
 
 const rows = ref<ProxyChannelView[]>([]);
 const loading = ref(false);
@@ -103,13 +85,13 @@ async function toggle(row: ProxyChannelView, next: boolean) {
               上游启闭
               <el-tooltip placement="top" :show-after="120" popper-class="glass-popper qa-tip">
                 <template #content>
-                  控制各渠道在反代网关中的启用与可见：关闭后，反代网关的全部页面（总览 / 号池 / 模型 / Keys / 统计等）
+                  控制各渠道在号池管家中的启用与可见：关闭后，号池管家的全部页面（总览 / 号池 / 积分日历等）
                   会立即隐藏该渠道，路由与调用、自动签到、额度刷新也不再使用它；重新打开立即恢复。
                 </template>
                 <i class="up-qa ph ph-question" @click.stop></i>
               </el-tooltip>
             </div>
-            <div class="up-sub">关闭的渠道在反代网关全部页面立即隐藏，路由与调用不再使用；重新打开立即恢复</div>
+            <div class="up-sub">关闭的渠道在号池管家全部页面立即隐藏，不再参与余额刷新与签到；重新打开立即恢复</div>
           </div>
           <el-tooltip content="关闭" placement="top">
             <button class="up-close" @click="emit('close')"><i class="ph ph-x"></i></button>
@@ -125,12 +107,12 @@ async function toggle(row: ProxyChannelView, next: boolean) {
           <div v-for="row in rows" :key="row.id" class="up-row">
             <span class="up-icon has-icon" :class="{ off: row.enabled === false }">
               <img v-if="CHANNEL_ICONS[row.id]" :src="CHANNEL_ICONS[row.id]" alt="" loading="lazy" />
-              <b v-else>{{ initial(row.id) }}</b>
+              <b v-else>{{ initial(row.id, row.display) }}</b>
             </span>
             <div class="up-info">
               <div class="up-name">{{ row.display || channelName(row.id) }}</div>
               <div class="up-meta">
-                {{ row.enabled === false ? "已关闭 —— 反代网关全部页面隐藏该渠道" : row.summary.accountCount ? `${row.summary.onlineCount}/${row.summary.accountCount} 账号可用` : "空号池" }}
+                {{ row.enabled === false ? "已关闭 —— 号池管家全部页面隐藏该渠道" : row.summary.accountCount ? `${row.summary.onlineCount}/${row.summary.accountCount} 账号可用` : "空号池" }}
               </div>
             </div>
             <button

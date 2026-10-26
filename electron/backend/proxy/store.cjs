@@ -1,5 +1,15 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-21
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 反代网关 · 存储层：SQLite（WAL）+ DPAPI 加密凭据
-// 表结构对齐方案 §5.1：keys / agents / accounts / credits_history / usage_requests
+// 表结构：keys / agents / accounts / credits_history / usage_requests
 // 驱动优先 better-sqlite3（方案选型），ABI 不匹配等加载失败时回退 Node 22 内置 node:sqlite（接口对齐）
 // 凭据（token/refreshToken）不落明文：复用 config.cjs 的 safeStorage(DPAPI) enc:v1: 信封，等效方案 vault.bin
 "use strict";
@@ -162,7 +172,7 @@ const CHANNELS = [
   // 鉴权 Authorization: Bearer workos:<JWT>，无签名、无会话、无桌面端依赖——登录走 WorkOS
   // 设备授权（RFC 8628，四步：authorize/device → 浏览器确认 → authenticate 轮询 → /auth/register
   // 换 Cline 会话令牌）。两个独立 channel id 不做成「一家的一个选项」：界面混池、模型启停键冲突、
-  // 同名模型短名归属漂移都是混池建模的真实缺陷（参考实现 agent2api 同款拆分）。
+  // 同名模型短名归属漂移都是混池建模的真实缺陷（同款拆分）。
   // 池是身份不是账号属性，cline_free 标 costTier "free"（免费额度池，cost-first 路由正确优先），
   // cline_pass 不标（付费订阅，错标 free 会让 cost-first 烧钱）。
   { id: "cline_free", display: "Cline Free", domain: "api.cline.bot", costTier: "free" },
@@ -191,6 +201,18 @@ const CHANNELS = [
   // 桌面导入时哪边登录了就是哪边的账号，靠用户选对目标渠道（与 Qoder 双区同口径）。
   { id: "autoclaw", display: "AutoClaw 国内版", domain: "autoglm-acceleration-api.zhipuai.cn" },
   ...(AUTOCLAW_INTL_ENABLED ? [{ id: "autoclaw_intl", display: "AutoClaw 国际版", domain: "autoglm-api.autoglm.ai" }] : []),
+  // Accio（阿里）双区：国际版 / 国内版是**同一个网关**（phoenix-gw.alibaba.com），差别只在
+  // x-package-region 头与登录站点（www.accio.com / www.accio-ai.com），账号与额度两区独立。
+  // 上游不是 OpenAI 协议而是阿里 ADK 的 Gemini 风格信封，走会话式转发（stateful）。
+  // 成本档暂不标注（套餐口径未实测）。
+  { id: "accio", display: "Accio", domain: "phoenix-gw.alibaba.com" },
+  { id: "accio_cn", display: "Accio 国内版", domain: "phoenix-gw.alibaba.com" },
+  // CodeArts（华为云 AI 代码助手 / snap-access）：SDK-HMAC-SHA256 签名 + DPoP + 有状态会话
+  // （每账号 3 路并发），临时凭据到期前 15 分钟续，走会话式转发（stateful）。无地区分叉。
+  { id: "codearts", display: "CodeArts（华为云）", domain: "snap-access.cn-north-4.myhuaweicloud.com" },
+  // Loomy（讯飞）：无状态 OpenAI 兼容，HMAC-SHA1 签名（账号域），手机验证码登录，每日签到
+  // 刷赠送积分。无地区分叉。
+  { id: "loomy", display: "Loomy（讯飞）", domain: "loomyad.xunfei.cn", costTier: "low" },
 ];
 
 // 内置渠道 id 的只读名单：凡是「这一行是不是提供商」的判定都走它，而不是看 kind 列——
@@ -281,7 +303,7 @@ function open() {
     db.exec("ALTER TABLE agents ADD COLUMN cost_tier TEXT NOT NULL DEFAULT ''");
   } catch { /* 已存在 */ }
   // 在线迁移：keys.allowed_channels / keys.allowed_models（Key 级渠道/模型白名单，空 = 不限制）
-  // 参考 agent2api apiKeys 的 allowedProviders/allowedModels（R9，对齐 OmniProxy）：
+  // Key 级渠道/模型白名单（allowedProviders/allowedModels，对齐 R9）：
   // 存量行空串 = 不限制（升级绝不能让已有 Key 失效），JSON 数组形态存储
   try {
     db.exec("ALTER TABLE keys ADD COLUMN allowed_channels TEXT NOT NULL DEFAULT ''");
@@ -373,7 +395,7 @@ function routeOrderOk(order) {
   return order === "" || order === "score" || order === "cost-first";
 }
 
-/** Key 参数整单校验（参考 agent2api retry_api 语义：任一字段非法整体拒绝，不落半套配置）。
+/** Key 参数整单校验（retry_api 语义：任一字段非法整体拒绝，不落半套配置）。
  *  isPatch=true 时只校验出现的字段（updateKey 的部分更新）；返回非法原因（空串 = 通过） */
 function validateKeyParams(p, isPatch) {
   if (!isPatch || p.name != null) {
@@ -415,7 +437,7 @@ function createKey({ name, route, routeOrder, dailyQuota, rateLimit }) {
   return { id, secret };
 }
 
-/** Key 白名单字段解析：空串/非数组 → 不限制（与 agent2api 空数组 = 不限制等价）；脏数据容错剔除 */
+/** Key 白名单字段解析：空串/非数组 → 不限制（空数组 = 不限制等价）；脏数据容错剔除 */
 function parseKeyAllowList(raw) {
   if (!raw || typeof raw !== "string") return [];
   try {
@@ -1283,15 +1305,22 @@ function statsTrend(days) {
   return [...buckets.entries()].map(([day, v]) => ({ day, req: v.req, tokens: v.tokens }));
 }
 
-/** TOP 排行：按 channel / model / key / account 分组（近 N 日） */
+/** TOP 排行：按 channel / model / key / account 分组（近 N 日）。
+ *  与 statsTopRich 同口径：key/account 按 id 分组——名字可改，按名分组会把改名前后的流水
+ *  拆成两行，用量数值被拆散；名字透出时映射当前名。返回值形状 {name, req, tokens} 保持不变
+ *  （容器形态的只读 RPC 直接吃它） */
 function statsTop(dim, days) {
   open();
-  const col = { channel: "channel", model: "model", key: "key_name", account: "account_name" }[dim] || "channel";
+  const g = TOP_GROUP[dim] || TOP_GROUP.channel;
   const from = dayStartMs() - (Math.min(90, Math.max(1, days || 7)) - 1) * 86400000;
-  return db.prepare(
-    `SELECT ${col} AS name, COUNT(*) AS req, SUM(prompt_tokens + completion_tokens) AS tokens
-     FROM usage_requests WHERE ts >= ? AND ${col} != '' GROUP BY ${col} ORDER BY req DESC LIMIT 10`
+  const rows = db.prepare(
+    `SELECT ${g.col} AS gid, MAX(ts) AS last_ts, ${g.nameCol || g.col} AS name,
+            COUNT(*) AS req, SUM(prompt_tokens + completion_tokens) AS tokens
+     FROM usage_requests WHERE ts >= ? AND ${g.col} != ''
+     GROUP BY ${g.col} ORDER BY req DESC LIMIT 10`
   ).all(from);
+  const names = dimNameMap(g);
+  return rows.map((r) => ({ name: (names && names.get(r.gid)) || r.name || "", req: r.req, tokens: r.tokens }));
 }
 
 // ===== 用量统计增强：区间化聚合（方案《反代网关-用量统计增强方案.md》§5） =====
@@ -1434,6 +1463,14 @@ const TOP_GROUP = {
   account: {col: "account_id", nameCol: "account_name"},
 };
 
+/** 维度的名字映射表：key / account 需要「当前名优先」（实体已删就查不到 → 调用方回退快照名）；
+ *  channel / model 的 name 就是分组值本身，不需要映射 */
+function dimNameMap(g) {
+  if (g.nameCol === "key_name") return currentKeyNames();
+  if (g.nameCol === "account_name") return currentAccountNames();
+  return null;
+}
+
 /** TOP 排行（富字段）：按 dim 分组，请求数倒序取前 N（前端本地切排序口径再截前 10） */
 function statsTopRich(dim, from, to, limit) {
   open();
@@ -1448,9 +1485,7 @@ function statsTopRich(dim, from, to, limit) {
      GROUP BY ${g.col}
      ORDER BY req DESC LIMIT ?`
   ).all(from, to, n);
-  // 名字映射只在 key/account 维度需要（channel/model 的 name 即分组值本身）
-  const names = g.nameCol === "key_name" ? currentKeyNames()
-    : g.nameCol === "account_name" ? currentAccountNames() : null;
+  const names = dimNameMap(g);
   return rows.map((r) => ({id: r.gid, name: (names && names.get(r.gid)) || r.name || "", ...shapeAgg(r)}));
 }
 
@@ -1470,6 +1505,14 @@ function statsKeys(from, to) {
     name: keyNames.get(r.key_id) || r.name || "",
     lastTs: Number(r.last_ts) || 0, ...shapeAgg(r)
   }));
+}
+
+/** 全部 Key 的 id + 当前名（含区间内没用的），供明细筛选下拉选人。
+ *  刻意不走 listKeys()：那个要做当日用量聚合、还要解密 secret，建下拉选项用不着 */
+function statsKeyOptions() {
+  open();
+  return db.prepare("SELECT id, name FROM keys ORDER BY name, created_at").all()
+    .map((r) => ({ id: r.id, name: r.name || "" }));
 }
 
 /** 状态码分桶：2xx / 4xx / 5xx / 无响应（status=0 或 3xx 等归「无响应」桶） */
@@ -1537,6 +1580,9 @@ function statsOverview(opts) {
       account: statsTopRich("account", from, to),
     },
     keys: statsKeys(from, to),
+    // 明细筛选下拉要「全部 Key」，不是区间内用量前 100 把：keys 表才是实体的唯一事实源，
+    // 而且它带当前名（与上面 keys 行的名字映射同口径）。只取 id + name，不解密 secret
+    allKeys: statsKeyOptions(),
     status: statsStatus(from, to),
     tokenMix: statsTokenMix(from, to),
   };

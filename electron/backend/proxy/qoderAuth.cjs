@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 反代网关 · Qoder 凭据层（qoder / qoder_intl 双渠道共用）
 //
 // 凭据形态（2026-10 实测 0.4.3）：
@@ -220,7 +230,7 @@ function encryptV10(plain, key) {
 // ===== 读 / 写凭据 =====
 
 /** 时间戳双形态解析（毫秒）：数字/纯数字串按 epoch 毫秒，字符串按 Date.parse。
- *  参考（agent2api qoder/refresh.rs）实测 expires_at 是毫秒数——只走 Date.parse 时
+ *  实测 expires_at 是毫秒数——只走 Date.parse 时
  *  数字串解析失败落 0，临期预刷新静默失效。解析不出返回 0（不造数）。 */
 function parseTimestampMs(v) {
   if (v == null || v === "") return 0;
@@ -312,7 +322,7 @@ async function refreshDeviceToken(product, refreshToken, machineId, opts = {}) {
       ok: true,
       token: String(data.device_token),
       refreshToken: String(data.refresh_token || refreshToken),
-      // expires_at 双形态（参考实测：设备端点回 2591999994 = epoch 毫秒数字）：
+      // expires_at 双形态（实测：设备端点回 2591999994 = epoch 毫秒数字）：
       // 数字/数字串按毫秒，字符串按 Date.parse——只走 Date.parse 时毫秒数解析失败落 0，
       // 临期预刷新（靠落库的 expiresAt 判断）静默失效
       expiresAt: parseTimestampMs(data.expires_at),

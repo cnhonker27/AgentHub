@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 用量同步模块状态：模块配置、当前数据源、同步状态（原「用量记录同步」stores/app.ts）
 // 主题/页面切换归框架 stores/app.ts，本 store 不再持有 theme/update/activePage
 import { defineStore } from "pinia";
@@ -41,9 +51,10 @@ const defaultConfig: SyncConfig = {
     { source: "trae-solo-cn", enabled: false, dataDir: null },
     { source: "opensquilla", enabled: false, dataDir: null },
     { source: "grok", enabled: false, dataDir: null },
+    { source: "autoclaw", enabled: true, dataDir: null },
   ],
   sourceVisibility: {
-    order: ["zcode", "codex", "dsh", "workbuddy", "workbuddy-ai", "reasonix", "codebuddy", "qoder", "qoder-cn", "antigravity", "antigravity-ide", "antigravity-legacy", "trae", "trae-cn", "trae-solo", "trae-solo-cn", "opensquilla", "grok"],
+    order: ["zcode", "codex", "dsh", "workbuddy", "workbuddy-ai", "reasonix", "codebuddy", "qoder", "qoder-cn", "antigravity", "antigravity-ide", "antigravity-legacy", "trae", "trae-cn", "trae-solo", "trae-solo-cn", "opensquilla", "grok", "autoclaw"],
     hidden: [],
     initialized: false,
   },
@@ -54,11 +65,10 @@ const defaultConfig: SyncConfig = {
     displayCurrency: "CNY" as const,
     usdToCny: 7.2,
     importProxy: "",
-    remotePricing: {
-      enabled: false,
-      url: "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.json",
-      hashUrl: "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.sha256",
-      intervalHours: 24,
+    sources: {
+      official: { enabled: false, intervalHours: 24 },
+      modelsdev: { enabled: false, intervalHours: 24 },
+      remote: { enabled: false, intervalHours: 24 },
     },
   },
 };

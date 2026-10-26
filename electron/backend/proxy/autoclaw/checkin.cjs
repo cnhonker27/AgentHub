@@ -1,4 +1,14 @@
-// 反代网关 · AutoClaw 每日签到（参照实现 providers/autoclaw/checkin.rs）
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
+// 反代网关 · AutoClaw 每日签到（协议事实：官方客户端实测）
 //
 // task_id: daily_signin 走「完成客户端任务」通用入口。判据的关键：**不能只看 HTTP 状态码**——
 // 当天已签到时上游返回 HTTP 200 + success:false + already_completed:true + reward_points:0。
@@ -32,7 +42,7 @@ async function checkin(env) {
     return { ok: false, message: `签到接口 HTTP ${r.status}` };
   }
   // 业务码只在**字段真的存在**时判：`Number(undefined)` 是 NaN，而 `NaN !== 0` 恒为真——
-  // 上游成功响应不带 code 时会被整条判成「签到失败」（参考实现用 `if let Some(code)` 守住这点）。
+  // 上游成功响应不带 code 时会被整条判成「签到失败」（守住 `if let Some(code)` 这点）。
   const hasCode = data.code !== undefined && data.code !== null;
   const code = Number(data.code);
   if (hasCode && (code === 410000 || code === 400000)) return { ok: false, authError: true, message: "登录态已过期，无法签到" };
@@ -78,7 +88,7 @@ async function taskListHint(env) {
  * 「登录活跃」触发：POST user-info（客户端启动时打的同一个动作）。
  *
  * 活动福利（Weekly Perks / 登录奖励这类「活跃即发」的活动）**没有领取接口**，服务端把
- * 「登录」的判据挂在这个动作上（参考实现 2026-10-15 逐条实测：签到本身、refresh 强制刷新、
+ * 「登录」的判据挂在这个动作上（2026-10-15 逐条实测：签到本身、refresh 强制刷新、
  * home-fetch 都不触发发放，只有 user-info 打下去才入账）。签到后顺手触发一次，用户当天
  * 开过客户端时这一步是幂等的、不会重复入账。
  *

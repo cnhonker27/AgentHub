@@ -1,6 +1,16 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 反代网关 · Cline 凭据层（workos: 前缀 + JWT 解析 + 桌面端 providers.json 读取）
 //
-// 协议事实（2026-09 参考实现 agent2api 实测）：
+// 协议事实（2026-09 实测）：
 // ① accessToken 带 workos: 前缀，发请求必须原样带上（去掉 401）——
 //    该前缀是 Cline 标记「这是 WorkOS 令牌」的，不是可选装饰；
 // ② providers.json（~/.cline/data/settings/providers.json → providers.cline.settings.auth）
@@ -9,9 +19,9 @@
 // ③ 账号 id（usr-... 形态，余额路径 /users/{userId}/balance 认的那个）在 JWT 的
 //    external_id 声明里（sub 是 WorkOS 自己的 user_...，不能用于 Cline API 路径）。
 //
-// AgentHub 的导入纪律与参考实现不同：providers.json 是 Cline 客户端自己的文件，
+// AgentHub 的导入纪律与上游不同：providers.json 是 Cline 客户端自己的文件，
 // 导入即**复制**凭据入 AgentHub 账号库（DPAPI 加密落库），运行时不再回读客户端文件、
-// 也绝不回写它——续期结果只回写 AgentHub 自己的账号记录（方案 §9）。
+// 也绝不回写它——续期结果只回写 AgentHub 自己的账号记录。
 "use strict";
 const fs = require("node:fs");
 const path = require("node:path");

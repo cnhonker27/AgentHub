@@ -1,6 +1,16 @@
 <!--
+  ============================================================
+   作者：沐晖
+   日期：2026-10-22
+   版权声明：本代码归沐晖所有。
+     · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+     · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+     此注释为版权与授权声明，禁止删除。
+  ============================================================
+-->
+<!--
   AgentHub · 记忆中枢（Memory Hub）
-  Copyright (c) 2026 沐辉 (HUIdada1)
+  Copyright (c) 2026 沐晖 (HUIdada1)
   https://github.com/HUIdada1/AgentHub
   本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。
 -->
@@ -12,12 +22,15 @@ import { useAppStore } from "../../stores/app";
 import { useMemoryStore } from "../../stores/memory";
 import * as api from "../../api/ipc";
 import { formatInteger, timeAgo } from "../../composables/useFormat";
+import { useAiGuard } from "../../composables/useAiGuard";
 import MemHelp from "../../components/memory/MemHelp.vue";
 import MemProgressDialog from "../../components/memory/MemProgressDialog.vue";
 import MemoryDetailDrawer from "../../components/memory/MemoryDetailDrawer.vue";
 
 const app = useAppStore();
 const mem = useMemoryStore();
+/** AI 引导守卫：未配置模型 / 渠道报错时统一弹窗，一键去「设置 · 模型与网关」 */
+const aiGuard = useAiGuard();
 const active = computed(() => app.activeModule === "memory" && app.activePage === "profile");
 
 /* 4大分区配置：图标、标题、副标题、语义字段 */
@@ -110,6 +123,8 @@ const genStartedAt = ref(0);
 const genResult = ref<{ ok: boolean; message: string; extra?: string[] } | null>(null);
 
 async function generate() {
+  // 前置守卫：三个来源全不可用时直接拦下（不白跑一轮长任务再报错）
+  if (!(await aiGuard.ensureAiReady({ task: "重新生成画像" }))) return;
   generating.value = true;
   genStartedAt.value = Date.now();
   genResult.value = null;
@@ -119,7 +134,9 @@ async function generate() {
     genResult.value = { ok: true, message: r.detail || "画像已更新并持久备份", extra: r.tokens ? [`消耗 ${formatInteger(r.tokens)} token`] : undefined };
     await refresh();
   } catch (e) {
-    genResult.value = { ok: false, message: (e as Error).message || "生成失败：先在「模型与网关」配置可用模型" };
+    // 未配置 / 渠道报错：交给守卫弹「去设置配置」，结果弹窗里仍保留原始原因
+    aiGuard.handleAiError(e, { task: "重新生成画像" });
+    genResult.value = { ok: false, message: (e as Error).message || "生成失败：先在「设置 · 模型与网关」配置可用模型" };
   } finally {
     generating.value = false;
   }

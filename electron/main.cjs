@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // Electron 主进程入口：窗口 / 托盘 / 单实例 / 主题同步 / 全局大小自适应
 // 技能仓库后台能力：定时 WebDAV 同步调度、自动感知收纳、软件自更新
 "use strict";
@@ -68,7 +78,7 @@ app.on("child-process-gone", (_e, d) => __crashLog("child-process-gone", __descr
 app.on("render-process-gone", (_e, _wc, d) => __crashLog("render-process-gone", __describe(d)));
 app.on("gpu-process-gone", (_e, d) => __crashLog("gpu-process-gone", __describe(d)));
 app.on("before-quit", () => { let p = "n/a"; try { p = String(updater.pendingInstall()); } catch { /* updater 尚未就绪 */ } __crashLog("before-quit", `pendingInstall=${p}`); });
-app.on("quit", (_e, code) => __crashLog("quit", `exitCode=${code}`));
+app.on("quit", (_e, code) => { __crashLog("quit", `exitCode=${code}`); try { updater.spawnAtQuit(); } catch { /* 退出不被更新失败阻断 */ } });
 // 渲染进程无响应取证：界面「卡死/未响应」不崩溃、不退出，此前零痕迹（2026-10-05 卡死排查实证——
 // crashpad 25 个 dump 全来自 node 子进程，渲染进程冻结无一字留痕）。unresponsive/responsive 成对
 // 落盘，与同期的 worker/同步日志对齐即可定位因果；Chromium 的挂起检测有去重，不会刷屏。
@@ -125,6 +135,27 @@ const shortcut = require("./backend/shortcut.cjs");
 // 轻量模式：关窗决策（纯逻辑，可自测）+ 窗口几何持久化（销毁窗口后重建要回到原位）
 const windowMode = require("./backend/window-mode.cjs");
 const windowState = require("./backend/window-state.cjs");
+// 外置插件宿主：只提供加载/启停/安装能力，不含任何具体插件逻辑；无插件时全为空操作
+const pluginHost = require("./backend/plugin-host.cjs");
+const pluginBridge = require("./backend/plugin-bridge.cjs");
+
+/**
+ * 提示词库后端（第五板块）：惰性 require + 兜底。
+ * 为什么不做顶层 require：该模块若缺失或初始化抛错（旧安装包残留、开发中途），
+ * 顶层 require 失败会让**整个主进程起不来**；这里降级为「仅提示词库不可用」。
+ * 另外 IPC 注册与板块开关无关（停用只停后台设施），否则停用后再启用会因
+ * ipcMain.handle 重复注册而抛错。
+ */
+function promptsMod() {
+  try {
+    return require("./backend/prompts/index.cjs");
+  } catch (e) {
+    __crashLog("prompts-require-failed", __describe(e));
+    return null;
+  }
+}
+pluginHost.init({ app });
+pluginBridge.init(pluginHost);
 // 顶层 require 链完成：此后的未捕获异常可以降级记录，不再按「启动失败」弹窗退出
 bootPhase = "ready";
 
@@ -245,6 +276,10 @@ function createWindow() {
     minHeight: 640,
     title: "AgentHub",
     icon: iconPath("icon.png"),
+    // 无边框：原生标题栏（「AgentHub · Agent中控台」+ 最小化/最大化/关闭）整条去掉，
+    // 改由渲染层自绘 —— 左上角品牌卡 + 右上角横条卡最右侧的窗口按钮（见 TopBarActions.vue）。
+    // 拖拽靠 CSS 的 -webkit-app-region: drag；缩放仍由系统边缘热区负责（resizable 默认 true）
+    frame: false,
     autoHideMenuBar: true,
     // 窗口画布底色随当前主题：写死深色时，浅色主题下窗口重建会先铺黑底再被首帧覆盖 → 闪黑 ✗
     // （轻量模式会销毁窗口，唤回即重建，故这里必须按主题取色）
@@ -291,6 +326,15 @@ function createWindow() {
   mainWindow.on("move", schedulePersistBounds);
   mainWindow.on("maximize", schedulePersistBounds);
   mainWindow.on("unmaximize", schedulePersistBounds);
+
+  // 自绘标题栏要跟着切换「全屏 / 还原」图标：状态一变就广播，渲染层据此换图标。
+  // 窗口还没加载完时 send 会打到空页面，无害；加载完由前端再查一次 window_is_maximized 对齐
+  const pushMaximized = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send("app:event", { event: "window-maximized", maximized: mainWindow.isMaximized() });
+  };
+  mainWindow.on("maximize", pushMaximized);
+  mainWindow.on("unmaximize", pushMaximized);
 
   // 关闭 → 按三态决策：真退出 / 缩到托盘（保留渲染进程）/ 轻量模式（销毁窗口释放渲染进程）
   mainWindow.on("close", (e) => {
@@ -445,31 +489,17 @@ function formatNum(n) {
 
 // ===== 托盘 =====
 
-function fmtTime(iso) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-/** 托盘菜单（动态构建：技能同步状态 + 今日用量 + 更新提示 + 暂停/恢复定时同步） */
+/** 托盘菜单（动态构建：今日用量 + 更新提示 + 暂停/恢复定时同步） */
 function buildTrayMenu() {
   const cfg = config.loadConfig();
   const running = remotesync.isRunning();
-  const p = remotesync.progress();
   // 板块开关（issue #91）：关闭板块的托盘入口一并隐藏，避免绕过 UI 触发已停用模块
   const on = (k) => {
     const m = (cfg.modules || {})[k];
     return !m || m.enabled !== false;
   };
-  const statusText = running
-    ? `同步中…（${p.stageLabel}）`
-    : remotesync.configured(cfg)
-      ? `上次同步 ${fmtTime(remotesync.loadRemoteState().lastSyncAt) || "—"}`
-      : "未配置 WebDAV";
   const usageToday = on("sync") ? usageTodaySummary() : null;
   const items = [];
-  if (on("skills")) items.push({ label: `技能仓库：${statusText}`, enabled: false });
   if (on("sync")) items.push({ label: usageToday != null ? `今日用量 ${formatNum(usageToday)} token` : "今日用量 —", enabled: false });
   if (items.length) items.push({ type: "separator" });
   const st = updater.getStatus();
@@ -532,7 +562,8 @@ function registerModuleToggle() {
     try {
       const m = String((args && args.module) || "");
       const enabled = !!(args && args.enabled);
-      if (!["skills", "sync", "proxy", "memory"].includes(m)) return { ok: false, message: "未知板块" };
+      // 板块 key 白名单：**新增板块必须补进来**，否则开关报「未知板块」
+      if (!["skills", "sync", "proxy", "memory", "prompts"].includes(m)) return { ok: false, message: "未知板块" };
       const cfg = config.loadConfig();
       const next = { ...cfg.modules, [m]: { ...((cfg.modules || {})[m] || {}), enabled } };
       if (!enabled && Object.values(next).every((x) => !x || x.enabled === false)) {
@@ -571,6 +602,17 @@ function registerModuleToggle() {
         } catch { /* 双写失败时迁移仍以旧字段为准，行为退化为旧版一致 */ }
         if (enabled) await memory.boot().catch((e) => __crashLog("memory-boot-failed", __describe(e)));
         else await memory.shutdown().catch(() => {});
+      } else if (m === "prompts") {
+        // 提示词库：启停只影响后台设施（定时同步调度）；IPC 常驻注册，
+        // 停用后前端仍能读取本地库（与「停用后后台完全不运行」的语义不冲突）
+        const pm = promptsMod();
+        if (pm) {
+          if (enabled) {
+            try { await pm.boot(); } catch (e) { __crashLog("prompts-boot-failed", __describe(e)); }
+          } else {
+            try { await pm.shutdown(); } catch { /* 停用失败无碍，下次启动会重新收口 */ }
+          }
+        }
       }
       // 渲染层各页订阅该事件刷新（左栏灰态即时生效、统计数字停止轮询）
       try {
@@ -774,6 +816,17 @@ if (!gotLock) {
 
     ipc.register({ ipcMain, app, shell, nativeTheme });
     registerModuleToggle();
+    // 提示词库（第五板块）：IPC 无条件注册（停用只停后台调度），后台设施按板块开关启停
+    {
+      const pm = promptsMod();
+      if (pm) {
+        try { pm.register({ ipcMain, app, shell }); } catch (e) { __crashLog("prompts-register-failed", __describe(e)); }
+        // 注意：prompts.boot() 是**同步**函数（只做调度启动与台账对账），不能像下面 proxy.boot()
+        // 那样挂 .catch —— 对同步函数调 .catch 会抛 TypeError，而此处不在 try 内，
+        // 会变成未捕获异常（对照 L611 的 await 写法：await 一个非 Promise 值是安全的）
+        if (on("prompts")) { try { pm.boot(); } catch (e) { __crashLog("prompts-boot-failed", __describe(e)); } }
+      }
+    }
     remotesync.setOnFinish(notifySync);
     usagesync.setOnFinish(notifyUsageSync);
     // 反代网关：规则热加载 + 额度定时刷新 + 按配置自启网关服务（服务独立于窗口存续）
@@ -781,6 +834,8 @@ if (!gotLock) {
     // 都是裸调用，抛错会变成 rejected promise。原先这里没有任何 catch，
     // 未处理的 rejection 会让主进程直接退出——症状是「窗口凭空消失、无崩溃事件、无 dump、无日志」。
     if (on("proxy")) proxy.boot().catch((e) => __crashLog("proxy-boot-failed", __describe(e)));
+    // 外置插件：恢复上次启用的插件（无插件时是空操作，不产生任何进程）
+    pluginHost.resumeEnabled().catch((e) => __crashLog("plugin-resume-failed", __describe(e)));
     // 记忆中枢：仓库初始化 + 本地 HTTP API（供 MCP 桥转发）+ 目录监听；失败只影响本模块
     //（boot 内部有 modules.memory.enabled 短路，无需在此判断）
     memory.boot().catch((e) => __crashLog("memory-boot-failed", __describe(e)));
@@ -818,7 +873,7 @@ if (!gotLock) {
     if (!mainWindow) app.exit(1);
   });
 
-  app.on("before-quit", (e) => {
+  app.on("before-quit", () => {
     // 统一收尾：原先两条分支各自重复一遍 stop 调用，新增模块时极易漏改一处
     const cleanup = () => {
       scheduler.stop();
@@ -829,15 +884,16 @@ if (!gotLock) {
       try { if (shortcutRegistrar) shortcutRegistrar.stop(); else shortcut.unregisterAll(globalShortcut); } catch { /* 忽略 */ }
       proxy.shutdown();
       memory.shutdown();
+      // 提示词库：停掉定时同步调度（模块缺失时是空操作，不拦退出）
+      try { const pm = promptsMod(); if (pm) pm.shutdown(); } catch { /* 未加载时无操作 */ }
+      // 插件进程必须显式回收：Windows 下父进程退出不会带走子进程，会留孤儿占端口
+      try { pluginBridge.stop(); } catch { /* 无桥接时是空操作 */ }
+      try { pluginHost.killAll(); } catch { /* 无插件时是空操作 */ }
     };
-    // 下载完的更新：拦下这次退出，静默装完自动重启
-    if (updater.pendingInstall()) {
-      e.preventDefault();
-      quitting = true;
-      cleanup();
-      updater.triggerInstall();
-      return;
-    }
+    // 下载完的更新：武装安装器，退出序列照常走完。安装器的 spawn 推迟到 quit 事件
+    // （窗口/渲染/GPU/托盘全销毁之后）——应用活着时启动安装器会踩它的杀进程竞态，
+    // 详见 updater.cjs 顶部取证注释
+    if (updater.pendingInstall()) updater.triggerInstall({ quitAfter: false });
     quitting = true;
     cleanup();
   });

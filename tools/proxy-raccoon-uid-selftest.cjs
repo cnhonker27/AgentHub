@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 小浣熊账号 ID（uid）解析自测：JWT 里到底该取哪个 claim
 //
 // 背景（2026-10-14 用**真实 token** 解出 claim 核实）：
@@ -35,7 +45,7 @@ const jwt = (payload) => [b64u({ alg: "RS256", typ: "JWT" }), b64u(payload), "si
 const RACCOON_ISS = "xiaohuanxiong.com/iam";
 const tokenFor = (sub, sid) => jwt({ sid, ver: 0, iss: RACCOON_ISS, sub, aud: ["xiaohuanxiong.com"], exp: 1794578621, nbf: 1791986616, iat: 1791986621, jti: "ak-" + sid.slice(4) });
 
-// 旧实现（照抄改前的代码），用于反向对照：证明旧行为确实是坏的
+// 旧实现（沿用改前的代码），用于反向对照：证明旧行为确实是坏的
 const oldTokenUid = (token) => {
   const p = String(token || "").trim().split(".");
   if (p.length < 2) return "";

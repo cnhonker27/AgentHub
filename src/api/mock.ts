@@ -1,6 +1,19 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-21
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 浏览器 mock：dev:web 纯前端预览用；配置落 localStorage，语义与主进程 config.cjs 对齐
 // 技能仓库命令返回贴真实的样例数据（打包产物走不到这里）；未覆盖的命令返回 null 让页面降级
-import type { AppConfig, UpdateStatus } from "../types";
+import type {
+  AppConfig, UpdateStatus,
+  PromptItem, PromptStyle, PromptHistoryItem, PromptConflict, PromptSyncStatus, PromptStats,
+} from "../types";
 import { MODULES } from "../types";
 
 const KEY = "agenthub-config";
@@ -17,7 +30,7 @@ const TODAY = (() => {
 function defaultConfig(): AppConfig {
   return {
     theme: "dark",
-    modules: { skills: { enabled: true }, sync: { enabled: true }, proxy: { enabled: true }, memory: { enabled: true } },
+    modules: { skills: { enabled: true }, sync: { enabled: true }, proxy: { enabled: true }, memory: { enabled: true }, prompts: { enabled: true } },
     fx: true,
     fxParticles: false,
     fxPools: false,
@@ -78,6 +91,28 @@ function defaultConfig(): AppConfig {
       channelEnabled: {},
       checkinAutoRules: {},
     },
+    // 提示词库（契约 §2 字段）：预览里也必须有这一段，
+    // 否则配置页首帧读 app.config.prompts.syncIntervalHours 就是 undefined，输入框会显示成空
+    prompts: {
+      syncAuto: true,
+      syncIntervalHours: 4,
+      mergeStrategy: "newer-wins",
+      onDeleteConflict: "tombstone",
+      syncVersions: true,
+      rootDir: "",
+      versionKeep: 20,
+      trashDays: 30,
+      itemMaxKB: 1024,
+      defaultCategory: "未分类",
+      defaultStyleId: "builtin-general",
+      defaultModel: "",
+      maxLength: 800,
+      temperature: 0.7,
+      maxTokens: 4096,
+      timeoutSec: 60,
+      scenario: "通用 AI 助手",
+      historyLimit: 50,
+    },
   };
 }
 
@@ -107,7 +142,7 @@ function previewStatus(state: UpdateStatus["status"]): UpdateStatus {
     percent: state === "downloading" ? 42 : state === "downloaded" ? 100 : 0,
     notes:
       state === "available" || state === "downloaded"
-        ? `新增 反代网关 请求明细页\n· 技能库支持按来源筛选\n· 修复用量同步偶发重复入库\n${PREVIEW_NOTE}`
+        ? `新增 请求明细页\n· 技能库支持按来源筛选\n· 修复用量同步偶发重复入库\n${PREVIEW_NOTE}`
         : "",
     message: PREVIEW_NOTE,
   };
@@ -387,6 +422,47 @@ const PROXY_POOL = [
       { id: "a14", channel: "cline_pass", uid: "usr-01M2VWEDWF", name: "demo@example.com", status: "online", credits: 128.75, creditsAt: ago(6), expiresAt: NOW + 30 * 86400000, coolUntil: 0, coolReason: "", source: "oauth", lastUsed: ago(3), todayReq: 15, todayTokens: 46200, createdAt: NOW - 5 * 86400000, hasToken: true },
     ],
   },
+  {
+    // Accio（阿里）双区：额度是「用量百分比」而非积分（credits 存 0-100 的余量百分比），
+    // 国际版演示有订阅、国内版演示免费账号（无订阅）。无签到活动。
+    id: "accio", display: "Accio", domain: "phoenix-gw.alibaba.com", costTier: "", poolStrategy: "expire_first",
+    health: null as { until: number; reason: string; streak: number } | null,
+    checkinAuto: { enabled: false, time: "09:00", jitterMin: 0 },
+    summary: { channel: "accio", totalCredits: 62, accountCount: 1, onlineCount: 1, earliestExpire: 0, expiringSoon: false, todayReq: 18, todayTokens: 40200, lastCreditsAt: ago(2) },
+    accounts: [
+      { id: "a15", channel: "accio", uid: "acc_55001", name: "accio-work 主号", status: "online", credits: 62, creditsAt: ago(2), expiresAt: NOW + 20 * 86400000, coolUntil: 0, coolReason: "", source: "oauth", lastUsed: ago(1), todayReq: 18, todayTokens: 40200, createdAt: NOW - 12 * 86400000, hasToken: true },
+    ],
+  },
+  {
+    id: "accio_cn", display: "Accio 国内版", domain: "phoenix-gw.alibaba.com", costTier: "", poolStrategy: "expire_first",
+    health: null as { until: number; reason: string; streak: number } | null,
+    checkinAuto: { enabled: false, time: "09:00", jitterMin: 0 },
+    summary: { channel: "accio_cn", totalCredits: 35, accountCount: 1, onlineCount: 1, earliestExpire: 0, expiringSoon: false, todayReq: 6, todayTokens: 12800, lastCreditsAt: ago(5) },
+    accounts: [
+      { id: "a16", channel: "accio_cn", uid: "acc_77002", name: "accio 国内号", status: "online", credits: 35, creditsAt: ago(5), expiresAt: 0, coolUntil: 0, coolReason: "", source: "oauth", lastUsed: ago(2), todayReq: 6, todayTokens: 12800, createdAt: NOW - 9 * 86400000, hasToken: true },
+    ],
+  },
+  {
+    // CodeArts（华为云）：临时凭据（AK/SK/STS）1 小时级到期、提前 15 分钟续；福利是独立「领取」入口，
+    // 不进每日签到。演示账号临期（expiringSoon）。
+    id: "codearts", display: "CodeArts（华为云）", domain: "snap-access.cn-north-4.myhuaweicloud.com", costTier: "", poolStrategy: "expire_first",
+    health: null as { until: number; reason: string; streak: number } | null,
+    checkinAuto: { enabled: false, time: "09:00", jitterMin: 0 },
+    summary: { channel: "codearts", totalCredits: 4800, accountCount: 1, onlineCount: 1, earliestExpire: NOW + 14 * 60000, expiringSoon: true, todayReq: 11, todayTokens: 27600, lastCreditsAt: ago(1) },
+    accounts: [
+      { id: "a17", channel: "codearts", uid: "ca_domain:user_88", name: "华为云主账号", status: "online", credits: 4800, creditsAt: ago(1), expiresAt: NOW + 14 * 60000, coolUntil: 0, coolReason: "", source: "oauth", lastUsed: ago(1), todayReq: 11, todayTokens: 27600, createdAt: NOW - 7 * 86400000, hasToken: true },
+    ],
+  },
+  {
+    // Loomy（讯飞）：积分口径（永久 + 每日赠送），每日「签到」= 每日首次登录刷新赠送积分（按天幂等报成功）。
+    id: "loomy", display: "Loomy（讯飞）", domain: "loomyad.xunfei.cn", costTier: "low", poolStrategy: "expire_first",
+    health: null as { until: number; reason: string; streak: number } | null,
+    checkinAuto: { enabled: true, time: "09:00", jitterMin: 0 },
+    summary: { channel: "loomy", totalCredits: 10000, accountCount: 1, onlineCount: 1, earliestExpire: NOW + 6 * 86400000, expiringSoon: false, todayReq: 21, todayTokens: 51800, lastCreditsAt: ago(0) },
+    accounts: [
+      { id: "a18", channel: "loomy", uid: "lm_139****8000", name: "手机 139****8000", status: "online", credits: 10000, creditsAt: ago(0), expiresAt: NOW + 6 * 86400000, coolUntil: 0, coolReason: "", source: "oauth", lastUsed: ago(1), todayReq: 21, todayTokens: 51800, createdAt: NOW - 6 * 86400000, hasToken: true, checkin: { day: TODAY, at: NOW - 1800000, action: "checkin", ok: true, already: false, credit: 5000, message: "每日赠送积分已刷新" } },
+    ],
+  },
 ];
 
 // 自定义提供商：一启用一停用，列表两态 + Key 管理弹窗的 online/cooling 两态都能在预览里看到
@@ -520,8 +596,38 @@ const PROXY_MODELS = [
   { id: "cline-pass/glm-5.3", object: "model", created: 0, owned_by: "cline_pass", sources: ["cline_pass"], name: "GLM-5.3（ClinePass）", rate: null, capabilities: { images: true, reasoning: true, tools: true }, contextLength: 200000, maxOutputTokens: 0, enabled: true, override: "", fallback: "" },
 ];
 
-const PROXY_RULES = [
-  { file: "model_map.json", desc: "Trae 模型映射（显示名 → config_name/model_name）", size: 642, mtimeMs: NOW - 86400000, ok: true, error: "" },
+/** 网络代理（出口池）预览数据：结构对齐后端 netproxy.json，增删改只在内存里生效 */
+const NETPROXY_MOCK: {
+  mode: "off" | "fixed" | "rotate";
+  fixedId: string;
+  settings: { testUrl: string; timeoutMs: number; defaultTestUrl: string; defaultTimeoutMs: number };
+  items: {
+    id: string; name: string; protocol: "http" | "socks5"; host: string; port: number;
+    username: string; hasPassword: boolean; enabled: boolean;
+    lastTest: { success: boolean; status: number | null; ip: string; durationMs: number; error: string; at: number } | null;
+    createdAt: number; updatedAt: number;
+  }[];
+} = {
+  mode: "off",
+  fixedId: "",
+  settings: { testUrl: "", timeoutMs: 15000, defaultTestUrl: "https://api.deepseek.com/", defaultTimeoutMs: 15000 },
+  items: [
+    {
+      id: "np-demo-1", name: "本机 Clash（混合端口）", protocol: "http", host: "127.0.0.1", port: 7890,
+      username: "", hasPassword: false, enabled: true,
+      lastTest: { success: true, status: 200, ip: "23.106.44.177", durationMs: 318, error: "", at: NOW - 600000 },
+      createdAt: NOW - 86400000, updatedAt: NOW - 600000,
+    },
+    {
+      id: "np-demo-2", name: "公司出口（需认证）", protocol: "socks5", host: "10.0.0.8", port: 1080,
+      username: "demo", hasPassword: true, enabled: false,
+      lastTest: { success: false, status: null, ip: "", durationMs: 15012, error: "连接超时（15 秒）", at: NOW - 3600000 },
+      createdAt: NOW - 172800000, updatedAt: NOW - 3600000,
+    },
+  ],
+};
+
+const PROXY_RULES = [  { file: "model_map.json", desc: "Trae 模型映射（显示名 → config_name/model_name）", size: 642, mtimeMs: NOW - 86400000, ok: true, error: "" },
   { file: "wb_models.json", desc: "WorkBuddy 双区模型目录（兜底，catalog.json 优先）", size: 318, mtimeMs: NOW - 86400000, ok: true, error: "" },
   { file: "catalog.json", desc: "模型权威目录（拉取模型写回：倍率/能力/上下文，可手编）", size: 2048, mtimeMs: NOW - 3600000, ok: true, error: "" },
   { file: "wb_template_map.json", desc: "WorkBuddy 审核模板最小改写表", size: 274, mtimeMs: NOW - 2 * 86400000, ok: true, error: "" },
@@ -544,7 +650,9 @@ const MOCK_CFG: Record<string, unknown> = {
   import: { dryRunFirst: true, batchSize: 200, maxBatchBytes: 8388608, sensitiveSkip: true, md: { observationMarkers: true, extractTags: true }, sources: [] },
   privacy: { redact: false, pause: false, localOnlyProjects: [] },
   sync: { enabled: true, auto: true, intervalMin: 60, packSizeLimitMB: 50, excludeIndex: true },
-  ui: { pageSize: 50, defaultTab: "dashboard", tabs: ["dashboard", "browse", "projects", "auto", "sync"], realtimeRefresh: true },
+  // 模型与网关：预览态也要有这两个数（设置 · 模型与网关的「请求超时 / 失败重试」直接读它）
+  models: { timeout: 60, maxRetries: 3 },
+  ui: { pageSize: 50, defaultTab: "dashboard", tabs: ["dashboard", "browse", "projects", "profile", "agents", "auto", "import", "sync"], realtimeRefresh: true },
 };
 
 /** 点路径写进 mock 配置树（中间层级缺失就补对象）：与前端 save(entries) 的点路径口径一致 */
@@ -615,7 +723,7 @@ const MOCK_TIMELINE: Record<string, unknown>[] = [
   { task: "extract", name: "抽取结构化信息", at: NOW - 720000, ok: true, ms: 3200, tokens: 812, detail: "处理 20 条，更新 18 条" },
   { task: "index-scan", name: "索引自愈扫描", at: NOW - 3600000, ok: true, ms: 400, tokens: 0, detail: "扫描 42 个文件，补索引 0 条" },
   { task: "classify", name: "项目归类建议", at: NOW - 1800000, ok: true, ms: 200, tokens: 0, detail: "扫描 12 条未归类，产出 3 条建议" },
-  { task: "distill", name: "L2 蒸馏", at: NOW - 86400000, ok: false, ms: 1200, tokens: 0, detail: "没有可用于「L2 蒸馏」的模型：请到「模型与网关」添加供应商与模型" },
+  { task: "distill", name: "L2 蒸馏", at: NOW - 86400000, ok: false, ms: 1200, tokens: 0, detail: "没有可用于「L2 蒸馏」的模型：请到「设置 · 模型与网关」添加供应商与模型", errorCode: "no_model" },
 ];
 
 function mockRunning() {
@@ -671,6 +779,214 @@ const MEM_AGENTS = [
   { id: "trae", name: "Trae", enabled: true, note: "", configPath: "C:\\Users\\demo\\.trae\\mcp.json", configExists: true, format: "json-mcpServers", snippetHint: "写入 ~/.trae/mcp.json 的 mcpServers", instructionPath: "C:\\Users\\demo\\.trae\\AGENTS.md", instructionExists: true, injected: false, verifyConfig: { ok: false, message: "配置文件中没有 agenthub-memory 条目" }, beat: null, pathReady: true },
   { id: "qoder", name: "Qoder", enabled: true, note: "", configPath: "C:\\Users\\demo\\.qoder\\mcp.json", configExists: true, format: "json-mcpServers", snippetHint: "写入 ~/.qoder/mcp.json 的 mcpServers", instructionPath: "C:\\Users\\demo\\.qoder\\AGENTS.md", instructionExists: true, injected: false, verifyConfig: { ok: false, message: "配置文件中没有 agenthub-memory 条目" }, beat: null, pathReady: true },
 ];
+
+// ===== 提示词库：浏览器预览样例（结构对齐 electron/backend/prompts 的真实返回） =====
+// 为什么预览也要造全套：dev:web 下没有 Electron 桥，call() 直接落到本文件的 mock。
+// 页面拿到 null 或缺字段，就会在 res.items.map / res.stats.total 这类地方抛错白屏——
+// 「无桥接也能把界面点一遍」是这一层存在的唯一意义，所以 34 个 prompts 通道一个都不能落空。
+
+/** 预览用的假哈希：只为让乐观锁与冲突对比有值可显示，不做任何真实摘要计算 */
+const pHash = (seed: string) => `mock${seed.replace(/[^a-z0-9]/gi, "").padEnd(10, "0").slice(0, 10)}`;
+
+const PROMPT_BUILTIN_STYLES: PromptStyle[] = [
+  {
+    id: "builtin-general",
+    name: "通用优化",
+    description: "把口语化输入改写成结构清晰、可直接投喂模型的提示词",
+    systemTemplate: "你是提示词工程师。把用户输入改写为更清晰的提示词；场景：{{scenario}}；不超过 {{maxLength}} 字。",
+    builtin: true,
+    isDefault: true,
+    temperature: 0.7,
+  },
+  {
+    id: "builtin-code",
+    name: "代码任务",
+    description: "强调技术栈、约束条件与验收标准",
+    systemTemplate: "把用户输入改写为编码任务提示词：明确技术栈、约束与验收标准，给出边界条件。",
+    builtin: true,
+    temperature: 0.3,
+  },
+  {
+    id: "custom-review",
+    name: "评审视角",
+    description: "自定义风格：以评审者口吻补充反例与风险点",
+    systemTemplate: "以资深评审者视角重写输入，补充反例、风险与验证方式。",
+    builtin: false,
+    temperature: 0.5,
+  },
+];
+
+// 可变的预览状态：风格 / 条目 / 历史 / 冲突都允许在预览里被增删改，
+// 这样「保存 → 列表刷新 → 删除 → 回收站」整条链路在浏览器里就能点通
+let PROMPT_STYLES: PromptStyle[] = JSON.parse(JSON.stringify(PROMPT_BUILTIN_STYLES));
+
+let PROMPT_ITEMS: PromptItem[] = [
+  {
+    id: "pr_20261020_aa11bb",
+    name: "周报生成器",
+    description: "把零散的工作记录整理成结构清晰的周报",
+    body: "请把下面的工作记录整理成周报，按「本周进展 / 风险 / 下周计划」三段输出。\n\n记录：{{content}}",
+    variables: [{ name: "content", label: "工作记录", def: "", required: true }],
+    category: "办公",
+    tags: ["周报", "总结"],
+    source: "local",
+    version: 2,
+    versions: [
+      { version: 1, body: "请把工作记录整理成周报。", at: NOW - 86400000 * 6, by: "user" },
+      { version: 2, body: "请把下面的工作记录整理成周报，按「本周进展 / 风险 / 下周计划」三段输出。", at: NOW - 86400000 * 2, note: "补上分段要求", by: "user" },
+    ],
+    favorite: true,
+    pinned: true,
+    useCount: 12,
+    lastUsedAt: NOW - 3600000,
+    hash: pHash("weekly"),
+    createdAt: NOW - 86400000 * 6,
+    updatedAt: NOW - 86400000 * 2,
+  },
+  {
+    id: "pr_20261022_cc33dd",
+    name: "代码评审要点",
+    description: "由优化页产出：把「帮我看看代码」扩写成可执行的评审提示词",
+    body: "你是一名资深工程师，请评审以下 {{lang}} 代码：\n1. 先列出潜在缺陷与边界条件；\n2. 给出最小修改建议；\n3. 说明如何验证。\n\n代码：\n{{code}}",
+    variables: [
+      { name: "lang", label: "语言", def: "TypeScript" },
+      { name: "code", label: "代码", required: true },
+    ],
+    category: "研发",
+    tags: ["评审", "代码"],
+    source: "optimized",
+    lineage: { parentHash: pHash("helpme"), styleId: "builtin-code", model: "demo-model", inputText: "帮我看看代码" },
+    version: 1,
+    versions: [{ version: 1, body: "（优化产出）", at: NOW - 86400000, by: "user" }],
+    favorite: false,
+    useCount: 3,
+    lastUsedAt: NOW - 7200000,
+    hash: pHash("review"),
+    createdAt: NOW - 86400000,
+    updatedAt: NOW - 86400000,
+  },
+  {
+    id: "pr_20261018_ee55ff",
+    name: "旧版会议纪要",
+    description: "已删除进回收站：换用了新版模板",
+    body: "把会议记录整理成纪要。",
+    variables: [],
+    category: "办公",
+    tags: ["会议"],
+    source: "imported",
+    originRef: "meeting.md",
+    originMeta: { author: "demo", license: "MIT", version: "1.0" },
+    version: 1,
+    versions: [{ version: 1, body: "把会议记录整理成纪要。", at: NOW - 86400000 * 5, by: "user" }],
+    favorite: false,
+    useCount: 1,
+    lastUsedAt: NOW - 86400000 * 5,
+    hash: pHash("meeting"),
+    createdAt: NOW - 86400000 * 5,
+    updatedAt: NOW - 86400000 * 4,
+    deletedAt: NOW - 86400000 * 3,
+  },
+];
+
+let PROMPT_HISTORY: PromptHistoryItem[] = [
+  {
+    id: "ph_20261022_01",
+    at: NOW - 3600000,
+    styleId: "builtin-code",
+    styleName: "代码任务",
+    model: "demo-model",
+    inputText: "帮我看看代码",
+    outputText: "你是一名资深工程师，请评审以下 TypeScript 代码：…",
+    elapsedMs: 1840,
+    tokens: { in: 42, out: 168 },
+    savedToLibrary: "pr_20261022_cc33dd",
+  },
+  {
+    id: "ph_20261021_02",
+    at: NOW - 86400000,
+    styleId: "builtin-general",
+    styleName: "通用优化",
+    model: "demo-model",
+    inputText: "写个周报",
+    outputText: "请把工作记录整理成周报，按三段输出。",
+    elapsedMs: 960,
+    tokens: { in: 12, out: 64 },
+    error: "model_error",
+  },
+];
+
+let PROMPT_CONFLICTS: PromptConflict[] = [
+  {
+    id: "pc_20261022_01",
+    kind: "content",
+    name: "周报生成器",
+    title: "「周报生成器」在本机与远端都被修改",
+    detail: "本机改了分段要求，远端（DESK-02）补了变量说明；自动合并失败，需要人工裁决。",
+    autoMerged: false,
+    localHash: pHash("weekly"),
+    remoteHash: pHash("weeklyremote"),
+    at: NOW - 1800000,
+  },
+];
+
+let PROMPT_SYNC_STATUS: PromptSyncStatus = {
+  running: false,
+  configured: true,
+  stage: "done",
+  stageLabel: "已完成",
+  detail: "拉取 1 台设备 · 合并 2 条 · 冲突 1 条",
+  pct: 100,
+  lastSyncAt: NOW - 1800000,
+  lastError: "",
+  autoMerged: 2,
+  pendingConflicts: 1,
+};
+
+const PROMPT_DEVICES = [
+  { id: "mock-device-self", name: "这台电脑", appVersion: "0.1.0", lastSyncAt: NOW - 1800000, self: true },
+  { id: "mock-device-02", name: "DESK-02", appVersion: "0.1.0", lastSyncAt: NOW - 86400000, self: false },
+];
+
+const PROMPT_LOGS = [
+  { at: NOW - 1900000, text: "连接 WebDAV：https://dav.example.com/dav/agenthub-prompts" },
+  { at: NOW - 1850000, text: "拉取远端 manifest：3 条，其中 1 条有更新" },
+  { at: NOW - 1820000, text: "三方合并：自动合并 2 条，冲突 1 条（已进裁决队列）" },
+  { at: NOW - 1800000, text: "本轮同步完成" },
+];
+
+const PROMPT_REPORTS = [
+  { name: "prompts-20261022-1830.md", path: "reports/prompts-20261022-1830.md", size: 1284 },
+  { name: "prompts-20261021-0900.md", path: "reports/prompts-20261021-0900.md", size: 986 },
+];
+
+const PROMPT_REPORT_TEXT = [
+  "# 提示词库同步报告",
+  "",
+  "- 设备：这台电脑（DESK-01）",
+  "- 拉取 1 台 · 自动合并 2 条 · 冲突 1 条 · 跳过 0 条",
+  "",
+  "## 冲突明细",
+  "- 「周报生成器」本机与远端都改过，已进裁决队列。",
+  "",
+  PREVIEW_NOTE,
+].join("\n");
+
+/** 预览统计：全部由当前内存态实时算，增删改后侧栏/概况卡的数字立刻跟着变（真实后端也是实时算） */
+function promptStats(): PromptStats {
+  const alive = PROMPT_ITEMS.filter((it) => !it.deletedAt);
+  const dayAgo = NOW - 86400000;
+  const weekAgo = NOW - 86400000 * 7;
+  return {
+    total: alive.length,
+    today: alive.filter((it) => it.createdAt >= dayAgo).length,
+    week: alive.filter((it) => it.createdAt >= weekAgo).length,
+    optimized: alive.filter((it) => it.source === "optimized").length,
+    favorited: alive.filter((it) => it.favorite).length,
+    trash: PROMPT_ITEMS.filter((it) => it.deletedAt).length,
+    conflicts: PROMPT_CONFLICTS.length,
+    lastSyncAt: PROMPT_SYNC_STATUS.lastSyncAt,
+  };
+}
 
 export const mock = {
   async invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
@@ -750,7 +1066,7 @@ export const mock = {
             "sync.excludeIndex": { type: "boolean", def: true, label: "索引库不入同步包", group: "同步", hot: true },
             "ui.pageSize": { type: "number", def: 50, min: 10, max: 500, label: "列表每页条数", group: "界面", hot: true },
             "ui.defaultTab": { type: "enum", def: "dashboard", options: ["dashboard", "browse", "projects", "profile", "agents", "index", "auto", "import", "sync"], label: "默认页签", group: "界面", hot: true },
-            "ui.tabs": { type: "multiselect", options: ["dashboard", "browse", "projects", "profile", "agents", "index", "auto", "import", "sync"], def: ["dashboard", "browse", "projects", "auto", "sync"], label: "显示的页签", group: "界面", hot: true },
+            "ui.tabs": { type: "multiselect", options: ["dashboard", "browse", "projects", "profile", "agents", "index", "auto", "import", "sync"], def: ["dashboard", "browse", "projects", "profile", "agents", "auto", "import", "sync"], label: "显示的页签", group: "界面", hot: true },
             "ui.realtimeRefresh": { type: "boolean", def: true, label: "浏览页实时刷新", group: "界面", hot: true },
           },
           root: "C:\\Users\\demo\\AgentHub\\memory",
@@ -958,7 +1274,8 @@ export const mock = {
       case "memory_model_probe":
         return { ok: true, caps: { vision: true, tools: true, stream: true, jsonMode: true, contextWindow: 128000, lastProbe: { at: NOW, ok: true, sample: "ok" } } };
       case "memory_llm_sources":
-        return { order: ["custom", "gateway", "degrade"], tagDefs: ["light", "heavy", "dedup", "classify", "distill", "extract", "tag", "summarize", "profile", "supersede", "consolidate"], sources: [{ key: "custom", available: true, detail: "1 个已启用供应商" }, { key: "gateway", available: true, detail: "本机网关在线" }, { key: "degrade", available: true, detail: "全部失败时的兜底" }], routing: [{ task: "extract", providerId: "gw-local" }, { task: "distill", providerId: "prov_demo", modelId: "claude-3-5-sonnet" }], taskEffort: { extract: "low", tag: "minimal", classify: "minimal", summarize: "low", distill: "medium", profile: "high", dedup: "low" }, degrade: { enabled: true, providerId: "prov_demo", modelId: "claude-3-5-sonnet", effort: "minimal" } };
+        // 默认序与后端一致：custom → degrade（网关档已下线）
+        return { order: ["custom", "degrade"], tagDefs: ["light", "heavy", "dedup", "classify", "distill", "extract", "tag", "summarize", "profile", "supersede", "consolidate"], sources: [{ key: "custom", available: true, detail: "1 个已启用供应商" }, { key: "degrade", available: true, detail: "降级档：前面几档不可用时接管" }], routing: [{ task: "extract", providerId: "gw-local" }, { task: "distill", providerId: "prov_demo", modelId: "claude-3-5-sonnet" }], taskEffort: { extract: "low", tag: "minimal", classify: "minimal", summarize: "low", distill: "medium", profile: "high", dedup: "low" }, degrade: { enabled: true, providerId: "prov_demo", modelId: "claude-3-5-sonnet", effort: "minimal" } };
       case "memory_llm_sources_save":
       case "memory_llm_routing_save":
         return { ok: true };
@@ -1198,16 +1515,22 @@ export const mock = {
       case "list_conflicts":
         return [];
 
-      // ===== 反代网关（预览数据，语义对齐 backend/proxy） =====
-      case "proxy_status":
+      // ===== 号池管家（预览数据，语义对齐 backend/proxy） =====
+      case "proxy_status": {
+        // 转发服务已下线：只回号池聚合指标（与原 gatewayStatus 的渠道过滤口径一致）
+        const chs = PROXY_POOL.filter((c) => (read().proxy.channelEnabled || {})[c.id] !== false).map((c) => ({
+          id: c.id, display: c.display, ...c.summary,
+        }));
         return {
-          running: true, port: 9527, bind: "127.0.0.1", baseUrl: "http://127.0.0.1:9527/v1",
-          uptime: 3 * 3600000, active: 1,
-          today: { req: 1284, tokens: 312400, successRate: 99.4, ttftAvg: 820 },
-          // 关闭的渠道不出现在网关状态里（语义对齐 backend poolView/gatewayStatus 的过滤）
-          channels: PROXY_POOL.filter((c) => (read().proxy.channelEnabled || {})[c.id] !== false).map((c) => ({ id: c.id, display: c.display, ...c.summary, health: c.health })),
-          keyCount: PROXY_KEYS.length, vaultOk: true, dbDriver: "node:sqlite",
+          channels: chs,
+          channelCount: chs.length,
+          accountCount: chs.reduce((s, c) => s + (c.accountCount || 0), 0),
+          onlineCount: chs.reduce((s, c) => s + (c.onlineCount || 0), 0),
+          expiringSoonCount: chs.filter((c) => c.expiringSoon).length,
+          vaultOk: true,
+          dbDriver: "node:sqlite",
         };
+      }
       case "proxy_start":
         return { ok: true, port: 9527 };
       case "proxy_stop":
@@ -1538,6 +1861,70 @@ export const mock = {
         return { ok: true };
       case "proxy_vault_status":
         return { encrypted: true, driver: "node:sqlite", dataDir: "(浏览器预览)" };
+      case "proxy_netproxy_list":
+        return JSON.parse(JSON.stringify(NETPROXY_MOCK));
+      case "proxy_netproxy_save": {
+        const d = args || {};
+        const port = Number(d.port);
+        if (!String(d.name || "").trim()) throw new Error("请填写代理名称");
+        if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("代理端口必须是 1-65535 的整数");
+        if (d.id) {
+          const hit = NETPROXY_MOCK.items.find((i) => i.id === d.id);
+          if (!hit) throw new Error("代理不存在（可能已被删除）");
+          Object.assign(hit, {
+            name: String(d.name), protocol: d.protocol === "socks5" ? "socks5" : "http",
+            host: String(d.host || ""), port, username: String(d.username || ""),
+            hasPassword: d.clearPassword ? false : hit.hasPassword || !!d.password,
+            enabled: d.enabled !== false, updatedAt: Date.now(),
+          });
+          return { ok: true, item: JSON.parse(JSON.stringify(hit)) };
+        }
+        const item = {
+          id: `np-demo-${Date.now()}`, name: String(d.name), protocol: (d.protocol === "socks5" ? "socks5" : "http") as "http" | "socks5",
+          host: String(d.host || ""), port, username: String(d.username || ""), hasPassword: !!d.password,
+          enabled: d.enabled !== false, lastTest: null, createdAt: Date.now(), updatedAt: Date.now(),
+        };
+        NETPROXY_MOCK.items.push(item);
+        return { ok: true, item: JSON.parse(JSON.stringify(item)) };
+      }
+      case "proxy_netproxy_remove": {
+        const idx = NETPROXY_MOCK.items.findIndex((i) => i.id === args?.id);
+        if (idx < 0) throw new Error("代理不存在（可能已被删除）");
+        NETPROXY_MOCK.items.splice(idx, 1);
+        if (NETPROXY_MOCK.fixedId === args?.id) {
+          NETPROXY_MOCK.fixedId = "";
+          if (NETPROXY_MOCK.mode === "fixed") NETPROXY_MOCK.mode = "off";
+        }
+        return { ok: true };
+      }
+      case "proxy_netproxy_toggle": {
+        const hit = NETPROXY_MOCK.items.find((i) => i.id === args?.id);
+        if (!hit) throw new Error("代理不存在（可能已被删除）");
+        hit.enabled = args?.enabled !== false;
+        hit.updatedAt = Date.now();
+        return { ok: true, item: JSON.parse(JSON.stringify(hit)) };
+      }
+      case "proxy_netproxy_test": {
+        const target = args?.id ? NETPROXY_MOCK.items.find((i) => i.id === args.id) : args?.draft;
+        if (!target) throw new Error("缺少要测试的代理");
+        const result = {
+          ok: true, success: true, status: 200, ip: "23.106.44.177",
+          durationMs: 260 + Math.round(Math.random() * 180), error: "",
+        };
+        if (args?.id) {
+          const hit = NETPROXY_MOCK.items.find((i) => i.id === args.id);
+          if (hit) hit.lastTest = { ...result, at: Date.now() };
+        }
+        return result;
+      }
+      case "proxy_netproxy_settings": {
+        if (args?.mode) NETPROXY_MOCK.mode = args.mode as "off" | "fixed" | "rotate";
+        if (args?.fixedId != null) NETPROXY_MOCK.fixedId = String(args.fixedId);
+        if (args?.mode === "fixed" && !NETPROXY_MOCK.fixedId) throw new Error("选择「固定出口」时必须指定一条出口");
+        if (args?.testUrl != null) NETPROXY_MOCK.settings.testUrl = String(args.testUrl);
+        if (args?.timeoutMs != null) NETPROXY_MOCK.settings.timeoutMs = Math.max(1000, Math.min(120000, Number(args.timeoutMs) || 15000));
+        return JSON.parse(JSON.stringify(NETPROXY_MOCK));
+      }
       case "webdav_shared_get":
         return {
           type: "webdav",
@@ -1546,7 +1933,7 @@ export const mock = {
           password: "••••••••",
           encryptionPassphrase: "",
           s3: { bucket: "", region: "", pathStyle: false },
-          roots: { skills: "/agent-skills", usage: "/dosage-sync", proxy: "/agenthub-proxy", memory: "/agenthub-memory" },
+          roots: { skills: "/agent-skills", usage: "/dosage-sync", proxy: "/agenthub-proxy", memory: "/agenthub-memory", prompts: "/agenthub-prompts" },
         };
       case "webdav_shared_save":
         return { ok: true, message: "已保存" };
@@ -1567,9 +1954,212 @@ export const mock = {
         return { ok: true, summary: "拉取 1 台设备 · 新增 2 · 刷新 3 · 移除 0 · 已上传", pulled: 1, added: 2, updated: 3, removed: 0, uploaded: true };
       case "proxy_poolsync_cancel":
         return { ok: true };
+      // ===== 提示词库（浏览器预览：内存态样例，增删改在本次会话内即时生效） =====
+      // 逐条对齐契约 §4 的入参/返回：预览里点得动的按钮，真机上必须也是同一条通道，
+      // 所以这里刻意不「简化」——少一个分支，页面就在浏览器里静默失灵，回归时看不出来
+      case "prompts_list": {
+        const includeTrash = !!args?.includeTrash;
+        return { ok: true, items: PROMPT_ITEMS.filter((it) => includeTrash || !it.deletedAt) };
+      }
+      case "prompts_get": {
+        const it = PROMPT_ITEMS.find((x) => x.id === args?.id);
+        if (!it) throw new Error("提示词不存在或已彻底删除（浏览器预览数据）");
+        return { ok: true, item: it };
+      }
+      case "prompts_save": {
+        const incoming = args?.item as PromptItem;
+        const expected = args?.expectedHash as string | undefined;
+        const idx = PROMPT_ITEMS.findIndex((x) => x.id === incoming.id);
+        // 乐观锁分支：真实后端在 expectedHash 与当前 hash 不符时回 { ok:false, code:"conflict" }。
+        // 预览里也要能走到，否则「这条已被其它设备改过」的提示在浏览器里永远验不到
+        if (idx >= 0 && expected && expected !== PROMPT_ITEMS[idx].hash) {
+          return { ok: false, code: "conflict", message: "该提示词已被其它设备修改，请刷新后重试" };
+        }
+        const hash = pHash(`${incoming.name}${incoming.updatedAt}`);
+        const saved: PromptItem = { ...incoming, hash };
+        if (idx >= 0) PROMPT_ITEMS[idx] = saved;
+        else PROMPT_ITEMS.push(saved);
+        return { ok: true, id: saved.id, hash };
+      }
+      case "prompts_delete": {
+        const it = PROMPT_ITEMS.find((x) => x.id === args?.id);
+        if (!it) throw new Error("提示词不存在（浏览器预览数据）");
+        // 进回收站而非真删：与后端一致，purge 才是彻底删除
+        it.deletedAt = Date.now();
+        return { ok: true };
+      }
+      case "prompts_restore": {
+        const it = PROMPT_ITEMS.find((x) => x.id === args?.id);
+        if (!it) throw new Error("提示词不存在（浏览器预览数据）");
+        delete it.deletedAt;
+        return { ok: true };
+      }
+      case "prompts_purge": {
+        PROMPT_ITEMS = PROMPT_ITEMS.filter((x) => x.id !== args?.id);
+        return { ok: true };
+      }
+      case "prompts_empty_trash": {
+        const before = PROMPT_ITEMS.length;
+        PROMPT_ITEMS = PROMPT_ITEMS.filter((x) => !x.deletedAt);
+        return { ok: true, count: before - PROMPT_ITEMS.length };
+      }
+      case "prompts_stats":
+        return { ok: true, stats: promptStats() };
+      case "prompts_meta": {
+        const alive = PROMPT_ITEMS.filter((it) => !it.deletedAt);
+        return {
+          ok: true,
+          categories: Array.from(new Set(alive.map((it) => it.category).filter(Boolean))),
+          tags: Array.from(new Set(alive.flatMap((it) => it.tags))),
+        };
+      }
+      case "prompts_export":
+        return {
+          ok: true,
+          path: `C:\\Users\\demo\\AgentHub\\prompts\\export-prompts.${args?.format === "json" ? "json" : "md"}`,
+          count: (Array.isArray(args?.ids) && args.ids.length ? (args.ids as string[]) : PROMPT_ITEMS.filter((it) => !it.deletedAt).map((it) => it.id)).length,
+        };
+      case "prompts_import":
+        // 导入结果按 onConflict 给不同分布，方便在预览里看「新增/覆盖/跳过」三种计数
+        return args?.onConflict === "overwrite"
+          ? { ok: true, imported: 0, overwritten: 2, skipped: 1 }
+          : args?.onConflict === "skip"
+            ? { ok: true, imported: 2, overwritten: 0, skipped: 3 }
+            : { ok: true, imported: 3, overwritten: 0, skipped: 0 };
+      case "prompts_open_dir":
+        return { ok: true };
+      case "prompts_set_dir":
+        return { ok: true, dir: String(args?.dir || "") };
+      case "prompts_rebuild":
+        return { ok: true, count: PROMPT_ITEMS.filter((it) => !it.deletedAt).length };
+
+      // ---- 4.2 优化 ----
+      case "prompts_styles_list":
+        return { ok: true, styles: PROMPT_STYLES, defaultId: PROMPT_STYLES.find((s) => s.isDefault)?.id || "builtin-general" };
+      case "prompts_styles_save": {
+        const style = args?.style as PromptStyle;
+        const idx = PROMPT_STYLES.findIndex((s) => s.id === style.id);
+        if (idx >= 0) PROMPT_STYLES[idx] = { ...style };
+        else PROMPT_STYLES.push({ ...style });
+        return { ok: true, id: style.id };
+      }
+      case "prompts_styles_delete": {
+        const hit = PROMPT_STYLES.find((s) => s.id === args?.id);
+        // 内置风格不可删（契约 §3：只能改，靠「恢复内置默认」重置）——预览也照这个边界回错误，
+        // 否则页面上的删除按钮在浏览器里「能删」，真机上却报错，属于假绿灯
+        if (hit?.builtin) return { ok: false, message: "内置风格不可删除，可改为「恢复内置默认」" };
+        PROMPT_STYLES = PROMPT_STYLES.filter((s) => s.id !== args?.id);
+        return { ok: true };
+      }
+      case "prompts_styles_reset":
+        PROMPT_STYLES = JSON.parse(JSON.stringify(PROMPT_BUILTIN_STYLES));
+        return { ok: true };
+      case "prompts_optimize": {
+        const text = String(args?.text ?? "");
+        const styleId = String(args?.styleId ?? "");
+        const style = PROMPT_STYLES.find((s) => s.id === styleId);
+        // 错误码按契约 §4.2 的冻结值返回，页面的按 code 分支在预览里就能逐条验
+        if (!text.trim()) return { ok: false, code: "empty_input", message: "请先输入要优化的内容" };
+        const maxLength = Number(args?.maxLength) || 800;
+        if (text.length > maxLength * 4) return { ok: false, code: "too_long", message: `输入过长：上限约 ${maxLength * 4} 字` };
+        const out = `【${style?.name || "通用优化"}】${text.trim()}\n\n要求：1) 明确目标与约束；2) 指定输出格式；3) 必要时给出示例。`;
+        const rec: PromptHistoryItem = {
+          id: `ph_${Date.now()}`,
+          at: Date.now(),
+          styleId,
+          styleName: style?.name || "通用优化",
+          model: String(args?.model || "demo-model"),
+          inputText: text.slice(0, 500),
+          outputText: out.slice(0, 500),
+          elapsedMs: 1240,
+          tokens: { in: Math.ceil(text.length / 2), out: Math.ceil(out.length / 2) },
+        };
+        PROMPT_HISTORY.unshift(rec);
+        // 历史上限 50 条（契约 §2 historyLimit），预览同样截断，免得列表越点越长看不出真实形态
+        if (PROMPT_HISTORY.length > 50) PROMPT_HISTORY = PROMPT_HISTORY.slice(0, 50);
+        return { ok: true, text: out, styleName: rec.styleName, model: rec.model, elapsedMs: rec.elapsedMs, tokens: rec.tokens };
+      }
+      case "prompts_optimize_cancel":
+        return { ok: true };
+      case "prompts_history_list":
+        return { ok: true, items: PROMPT_HISTORY };
+      case "prompts_history_delete":
+        PROMPT_HISTORY = PROMPT_HISTORY.filter((h) => h.id !== args?.id);
+        return { ok: true };
+      case "prompts_history_clear":
+        PROMPT_HISTORY = [];
+        return { ok: true };
+
+      // ---- 4.3 同步 ----
+      case "prompts_sync_status":
+        return { ok: true, status: { ...PROMPT_SYNC_STATUS, pendingConflicts: PROMPT_CONFLICTS.length } };
+      case "prompts_sync_run":
+        PROMPT_SYNC_STATUS = {
+          ...PROMPT_SYNC_STATUS,
+          running: false,
+          stage: "done",
+          stageLabel: "已完成",
+          detail: "预览：已按策略合并",
+          pct: 100,
+          lastSyncAt: Date.now(),
+          lastError: "",
+          autoMerged: 2,
+          pendingConflicts: PROMPT_CONFLICTS.length,
+        };
+        PROMPT_LOGS.push({ at: Date.now(), text: "（预览）本轮同步完成" });
+        return { ok: true, message: `同步完成：自动合并 2 条 · 冲突 ${PROMPT_CONFLICTS.length} 条` };
+      case "prompts_sync_cancel":
+        PROMPT_SYNC_STATUS = { ...PROMPT_SYNC_STATUS, running: false, stage: "cancelled", stageLabel: "已取消" };
+        return { ok: true };
+      case "prompts_sync_logs":
+        return { ok: true, logs: PROMPT_LOGS };
+      case "prompts_sync_devices":
+        return { ok: true, devices: PROMPT_DEVICES };
+      case "prompts_conflicts_list":
+        return { ok: true, items: PROMPT_CONFLICTS };
+      case "prompts_conflict_diff": {
+        const c = PROMPT_CONFLICTS.find((x) => x.id === args?.id) || PROMPT_CONFLICTS[0];
+        if (!c) throw new Error("冲突不存在或已被裁决（浏览器预览数据）");
+        const local = PROMPT_ITEMS.find((x) => x.name === c.name);
+        return {
+          ok: true,
+          diff: {
+            item: c,
+            left: { label: "本机版本", body: local?.body || "（本机副本已被移除）", updatedAt: local?.updatedAt || c.at },
+            right: {
+              label: "远端版本（DESK-02）",
+              body: `${local?.body || ""}\n\n（远端补充）变量说明：{{content}} = 你的工作记录，留空时按空串处理。`,
+              updatedAt: c.at - 60000,
+            },
+          },
+        };
+      }
+      case "prompts_conflict_resolve":
+        PROMPT_CONFLICTS = PROMPT_CONFLICTS.filter((x) => x.id !== args?.id);
+        return { ok: true };
+      case "prompts_conflicts_auto": {
+        const merged = PROMPT_CONFLICTS.length;
+        PROMPT_CONFLICTS = [];
+        PROMPT_SYNC_STATUS = { ...PROMPT_SYNC_STATUS, autoMerged: PROMPT_SYNC_STATUS.autoMerged + merged, pendingConflicts: 0 };
+        return { ok: true, merged, remaining: 0 };
+      }
+
+      // ---- 4.5 报告历史 ----
+      case "prompts_reports_list":
+        return { ok: true, reports: PROMPT_REPORTS };
+      case "prompts_report_read": {
+        const hit = PROMPT_REPORTS.find((r) => r.name === args?.name);
+        if (!hit) throw new Error("报告不存在（浏览器预览数据）");
+        return { ok: true, text: PROMPT_REPORT_TEXT };
+      }
       default:
         if (String(cmd).startsWith("memory_")) {
           throw new Error(`记忆中枢命令 ${cmd} 在浏览器预览下未实现`);
+        }
+        // 提示词库同理：明确报错而不是回 null —— 回 null 会让页面在 .items 上抛 TypeError，
+        // 报错信息里看不出是「预览未实现」还是「真 bug」
+        if (String(cmd).startsWith("prompts_")) {
+          throw new Error(`提示词库命令 ${cmd} 在浏览器预览下未实现`);
         }
         // 未造的命令走 null 降级（页面按“未检测到后端”处理）
         return null;

@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 反代网关跨渠道故障转移自测（v1.40.0）：503 耗尽 → 渠道降级 → 请求内跳备选 → 降级避让 →
 // 半开回切 → 指数退避翻倍 → failover 开关 → 全渠道耗尽带轨迹报错 → 上限归一化/每模型预算边界（T0）
 // 用法：ELECTRON_RUN_AS_NODE=1 electron tools/proxy-failover-selftest.cjs <临时数据目录>
@@ -218,26 +228,30 @@ async function main() {
   pool.noteSuccess(t1);
   store.updateAccount(t1, { status: "online", coolUntil: 0, coolReason: "" });
   await sleep(1600); // 等 T2 的 1500ms 降级过期（半开窗口）
+  const t4aStart = Date.now(); // 从请求起点计时测退避总长（until − 起点 ≈ 3000 + 单请求往返）：
+                               // 原测法 until − 断言时刻要求断言在 200ms 内跑到，慢 CI 上余量被
+                               // 请求往返吃掉会随机挂（Gateway CI 实测 5541/2659 两连挂），改确定口径
   rr = await call({ model: "glm-5.3", stream: false, messages: bodyMsg });
   assert(rr.status === 200, "T4a 半开探测失败仍跳备选成功: " + rr.status);
   await rr.text();
   assert(hits.trae === 3, "T4a 半开真实探测了主渠道: " + JSON.stringify(hits));
   snap = server.channelHealthSnapshot();
   assert(snap.trae && snap.trae.streak === 1, "T4a 半开再失败 streak=1: " + JSON.stringify(snap.trae));
-  const left1 = snap.trae.until - Date.now();
-  assert(left1 > 2800 && left1 <= 3000, "T4a 指数退避 2×base(1500ms)=3000ms: " + left1);
+  const total1 = snap.trae.until - t4aStart;
+  assert(total1 > 2800 && total1 < 3400, "T4a 指数退避 2×base(1500ms)=3000ms: " + total1);
 
   pool.noteSuccess(t1); // 清 T4a 的一连 5xx，防 T4b 的 500 触发账号级 3 连熔断
   store.updateAccount(t1, { status: "online", coolUntil: 0, coolReason: "" });
   await sleep(3100); // 等 streak=1 的 3000ms 过期
+  const t4bStart = Date.now(); // 同 T4a：从请求起点计时，断言口径与 runner 快慢无关
   rr = await call({ model: "glm-5.3", stream: false, messages: bodyMsg });
   assert(rr.status === 200, "T4b 二次半开失败仍跳备选成功: " + rr.status);
   await rr.text();
   assert(hits.trae === 4, "T4b 半开真实探测了主渠道: " + JSON.stringify(hits));
   snap = server.channelHealthSnapshot();
   assert(snap.trae && snap.trae.streak === 2, "T4b 三连失败 streak=2: " + JSON.stringify(snap.trae));
-  const left2 = snap.trae.until - Date.now();
-  assert(left2 > 5800 && left2 <= 6000, "T4b 指数退避 4×base=6000ms（封顶）: " + left2);
+  const total2 = snap.trae.until - t4bStart;
+  assert(total2 > 5800 && total2 < 6400, "T4b 指数退避 4×base=6000ms（封顶）: " + total2);
 
   // ===== T4c 成功回切清零：恢复后 auto 打分回到余额最充足的主渠道 =====
   mode.trae = "ok";

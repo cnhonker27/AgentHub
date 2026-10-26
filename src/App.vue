@@ -1,4 +1,14 @@
-<!-- 沐辉制作：AgentHub Agent中控台入口 -->
+<!--
+  ============================================================
+   作者：沐晖
+   日期：2026-10-22
+   版权声明：本代码归沐晖所有。
+     · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+     · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+     此注释为版权与授权声明，禁止删除。
+  ============================================================
+-->
+<!-- 沐晖制作：AgentHub Agent中控台入口 -->
 <script setup lang="ts">
 import zhCn from "element-plus/es/locale/lang/zh-cn";
 import { ElConfigProvider } from "element-plus";
@@ -10,6 +20,7 @@ import { useSyncStore } from "./stores/sync";
 import { useUsageStore } from "./stores/usage";
 import { setCursorFX } from "./motion/cursor";
 import Sidebar from "./components/Sidebar.vue";
+import AppTopBar from "./components/AppTopBar.vue";
 import PageTabs from "./components/PageTabs.vue";
 import SettingsDialog from "./components/config/SettingsDialog.vue";
 import ConfigSkillsSection from "./components/config/ConfigSkillsSection.vue";
@@ -32,14 +43,9 @@ import SyncCostsView from "./views/sync/CostsView.vue";
 import SyncBillingRulesView from "./views/sync/BillingRulesView.vue";
 import SyncLogView from "./views/sync/LogView.vue";
 import ProxyHomeView from "./views/proxy/ProxyHomeView.vue";
-import ProxyKeysView from "./views/proxy/ProxyKeysView.vue";
-import ProxyProvidersView from "./views/proxy/ProxyProvidersView.vue";
 import ProxyAgentsView from "./views/proxy/ProxyAgentsView.vue";
 import ProxyExpiryView from "./views/proxy/ProxyExpiryView.vue";
-import ProxyModelsView from "./views/proxy/ProxyModelsView.vue";
-import ProxyStatsView from "./views/proxy/ProxyStatsView.vue";
 import ProxyPoolSyncView from "./views/proxy/ProxyPoolSyncView.vue";
-import ProxyCcSwitchView from "./views/proxy/ProxyCcSwitchView.vue";
 import ProxyLogView from "./views/proxy/ProxyLogView.vue";
 // 记忆中枢模块：9 个页面 + 隐藏配置页（模块级 .memory-scope 样式作用域，可整体剥离）
 // 「待确认」收件箱不再是独立页签，已并入记忆浏览的第三个视图（components/memory/MemReviewPanel）
@@ -54,6 +60,15 @@ import MemoryImportView from "./views/memory/ImportView.vue";
 import MemorySyncView from "./views/memory/SyncView.vue";
 import MemoryDetailDrawer from "./components/memory/MemoryDetailDrawer.vue";
 import ConfigMemorySection from "./components/config/ConfigMemorySection.vue";
+// 提示词库模块：优化 / 优化历史 / 个人库 / 同步 四页 + 隐藏的详情编辑器（页 id 见方案总纲：prompt-detail）。
+// 「线上提示词库」是二期占位页（MODULES 里 disabled），刻意不挂任何组件——
+// 挂一个空组件等于为一个还没实现的页面白付一次懒挂载开销
+import PromptsOptimizeView from "./views/prompts/OptimizeView.vue";
+import PromptsHistoryView from "./views/prompts/HistoryView.vue";
+import PromptsLibraryView from "./views/prompts/LibraryView.vue";
+import PromptsSyncView from "./views/prompts/SyncView.vue";
+import PromptsPromptDetailView from "./views/prompts/PromptDetailView.vue";
+import ConfigPromptsSection from "./components/config/ConfigPromptsSection.vue";
 import { useMemoryStore } from "./stores/memory";
 import * as api from "./api/ipc";
 import type { UpdateEvent } from "./types";
@@ -538,6 +553,7 @@ onMounted(() => {
   usage.load(); // 用量同步：配置/数据源清单/同步进度轮询（与原应用一致）
   usageData.startDayWatcher(); // 跨天换日守护：过 0 点自动把「今日/本月」口径的数据换到新一天
   app.refreshUpdateStatus(); // 启动拉一次更新状态，维护设置齿轮红点
+  app.refreshPlugins(); // 外置插件清单：侧栏入口据此显隐（无插件时为空数组）
   // 更新事件全局唯一监听：focus-update 打开设置弹窗 · 通用并自增信号（滚动高亮由
   // ConfigGeneralSection 据 configFocusUpdate 执行）；state 回流顺带维护红点（浏览器预览无桥接返回 undefined）
   const offFocusUpdate = api.onUpdateEvent((e) => {
@@ -653,12 +669,13 @@ const seen = (mod: string, page: string) => !!visited.value[`${mod}/${page}`];
   <div class="orb" aria-hidden="true"><i></i></div>
   <div class="grain" aria-hidden="true"></div>
   <div class="app">
+    <AppTopBar />
     <Sidebar />
     <PageTabs />
     <main class="main glass">
       <!-- 用量统计模块的数据源顶栏（原应用 AppBar）：仅「用量统计 · 总览」页显示；样式作用域在组件根上 -->
       <SyncTopBar v-if="on('sync', 'overview')" />
-      <div class="pages">
+      <div class="pages" v-show="!app.pluginView">
         <SkillsDashboardView v-if="seen('skills', 'dashboard')" v-show="on('skills', 'dashboard')" :class="{ 'page-anim': on('skills', 'dashboard') }" />
         <SkillsLibraryView v-if="seen('skills', 'library')" v-show="on('skills', 'library')" :class="{ 'page-anim': on('skills', 'library') }" />
         <SkillsDedupView v-if="seen('skills', 'dedup')" v-show="on('skills', 'dedup')" :class="{ 'page-anim': on('skills', 'dedup') }" />
@@ -672,17 +689,12 @@ const seen = (mod: string, page: string) => !!visited.value[`${mod}/${page}`];
         <SyncBillingRulesView v-if="seen('sync', 'billing')" v-show="on('sync', 'billing')" class="sync-scope" :class="{ 'page-anim': on('sync', 'billing') }" />
         <SyncLogView v-if="seen('sync', 'log')" v-show="on('sync', 'log')" class="sync-scope" :class="{ 'page-anim': on('sync', 'log') }" />
         <ProxyHomeView v-if="seen('proxy', 'home')" v-show="on('proxy', 'home')" :class="{ 'page-anim': on('proxy', 'home') }" />
-        <ProxyKeysView v-if="seen('proxy', 'keys')" v-show="on('proxy', 'keys')" :class="{ 'page-anim': on('proxy', 'keys') }" />
-        <ProxyProvidersView v-if="seen('proxy', 'providers')" v-show="on('proxy', 'providers')" :class="{ 'page-anim': on('proxy', 'providers') }" />
         <ProxyAgentsView v-if="seen('proxy', 'agents')" v-show="on('proxy', 'agents')" :class="{ 'page-anim': on('proxy', 'agents') }" />
         <ProxyExpiryView v-if="seen('proxy', 'expiry')" v-show="on('proxy', 'expiry')" :class="{ 'page-anim': on('proxy', 'expiry') }" />
-        <ProxyModelsView v-if="seen('proxy', 'models')" v-show="on('proxy', 'models')" :class="{ 'page-anim': on('proxy', 'models') }" />
-        <ProxyStatsView v-if="seen('proxy', 'stats')" v-show="on('proxy', 'stats')" :class="{ 'page-anim': on('proxy', 'stats') }" />
         <ProxyPoolSyncView v-if="seen('proxy', 'poolsync')" v-show="on('proxy', 'poolsync')" :class="{ 'page-anim': on('proxy', 'poolsync') }" />
-        <ProxyCcSwitchView v-if="seen('proxy', 'ccswitch')" v-show="on('proxy', 'ccswitch')" :class="{ 'page-anim': on('proxy', 'ccswitch') }" />
         <ProxyLogView v-if="seen('proxy', 'proxylog')" v-show="on('proxy', 'proxylog')" :class="{ 'page-anim': on('proxy', 'proxylog') }" />
         <!-- 记忆中枢九页：各页自带 .memory-scope 容器（样式作用域见 styles/memory.css）；
-             模型与网关已并入配置页子板块，调用统计并入仪表盘；待确认并入记忆浏览 -->
+             模型与网关已上移到「设置」弹窗（平台级配置），调用统计并入仪表盘；待确认并入记忆浏览 -->
         <MemoryDashboardView v-if="seen('memory', 'dashboard')" v-show="on('memory', 'dashboard')" class="page" :class="{ 'page-anim': on('memory', 'dashboard') }" />
         <MemoryBrowseView v-if="seen('memory', 'browse')" v-show="on('memory', 'browse')" class="page" :class="{ 'page-anim': on('memory', 'browse') }" />
         <MemoryProjectsView v-if="seen('memory', 'projects')" v-show="on('memory', 'projects')" class="page" :class="{ 'page-anim': on('memory', 'projects') }" />
@@ -692,6 +704,14 @@ const seen = (mod: string, page: string) => !!visited.value[`${mod}/${page}`];
         <MemoryAutoView v-if="seen('memory', 'auto')" v-show="on('memory', 'auto')" class="page" :class="{ 'page-anim': on('memory', 'auto') }" />
         <MemoryImportView v-if="seen('memory', 'import')" v-show="on('memory', 'import')" class="page" :class="{ 'page-anim': on('memory', 'import') }" />
         <MemorySyncView v-if="seen('memory', 'sync')" v-show="on('memory', 'sync')" class="page" :class="{ 'page-anim': on('memory', 'sync') }" />
+        <!-- 提示词库五页：各页自带 .page.prompts-scope 容器（样式作用域见 styles/prompts.css）；
+             页 id 与 MODULES 一一对应；prompt-detail 是隐藏页（从库/优化结果点卡片进入），不进横条菜单；
+             MODULES 里的「线上提示词库」为禁用占位页，此处不挂组件 -->
+        <PromptsOptimizeView v-if="seen('prompts', 'optimize')" v-show="on('prompts', 'optimize')" :class="{ 'page-anim': on('prompts', 'optimize') }" />
+        <PromptsHistoryView v-if="seen('prompts', 'history')" v-show="on('prompts', 'history')" :class="{ 'page-anim': on('prompts', 'history') }" />
+        <PromptsLibraryView v-if="seen('prompts', 'library')" v-show="on('prompts', 'library')" :class="{ 'page-anim': on('prompts', 'library') }" />
+        <PromptsSyncView v-if="seen('prompts', 'sync')" v-show="on('prompts', 'sync')" :class="{ 'page-anim': on('prompts', 'sync') }" />
+        <PromptsPromptDetailView v-if="seen('prompts', 'prompt-detail')" v-show="on('prompts', 'prompt-detail')" :class="{ 'page-anim': on('prompts', 'prompt-detail') }" />
         <!-- 各模块的配置页：右上「配置」按钮切换到这里的页面（page + cfg-body 组合出页壳与留白）；
              配置页内部的二级子板块 tab 由各 section 自己渲染 -->
         <div v-if="seen('skills', 'config')" v-show="on('skills', 'config')" class="page cfg-body" :class="{ 'page-anim': on('skills', 'config') }">
@@ -706,7 +726,19 @@ const seen = (mod: string, page: string) => !!visited.value[`${mod}/${page}`];
         <div v-if="seen('memory', 'config')" v-show="on('memory', 'config')" class="page cfg-body" :class="{ 'page-anim': on('memory', 'config') }">
           <ConfigMemorySection />
         </div>
+        <div v-if="seen('prompts', 'config')" v-show="on('prompts', 'config')" class="page cfg-body" :class="{ 'page-anim': on('prompts', 'config') }">
+          <ConfigPromptsSection />
+        </div>
       </div>
+      <!-- 外置插件页面：内嵌在主区域，切模块或停用插件即销毁（顺带释放插件页面里的长连接）。
+           地址与标题全部来自插件 manifest，主程序不认识具体插件。 -->
+      <iframe
+        v-if="app.pluginView"
+        class="plugin-frame"
+        :src="app.pluginView.url"
+        :title="app.pluginView.title"
+        allow="clipboard-read; clipboard-write"
+      ></iframe>
     </main>
     <!-- 常驻挂载：显隐交给 el-dialog 自己管，进场动画才不会在 v-if 挂载时被跳过 -->
     <SyncDialog />

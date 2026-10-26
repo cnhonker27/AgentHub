@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 预加载脚本：通过 contextBridge 暴露安全的 IPC 调用桥给渲染进程
 // 白名单机制：只放行后端 ipc.cjs 已注册的命令，防止渲染进程被注入后调用任意通道（纵深防御）
 "use strict";
@@ -13,6 +23,11 @@ const ALLOWED_COMMANDS = new Set([
   "get_hub_dir",
   "open_hub_dir",
   "browse_dir",
+  // ===== 无边框窗口：自绘标题栏的窗口控制 =====
+  "window_minimize",
+  "window_toggle_maximize",
+  "window_close",
+  "window_is_maximized",
   // ===== 软件更新 =====
   "get_is_portable",
   "get_update_status",
@@ -21,6 +36,8 @@ const ALLOWED_COMMANDS = new Set([
   "install_update",
   "open_release_page",
   "open_repo_page",
+  // 设置 · 反馈与需求：系统浏览器打开本仓库的 issue 表单
+  "open_external_url",
   // ===== 技能仓库：WebDAV =====
   "webdav_test",
   "webdav_sync",
@@ -98,8 +115,8 @@ const ALLOWED_COMMANDS = new Set([
   "list_aliases",
   "add_alias",
   "remove_alias",
-  "pull_remote_pricing",
-  "get_remote_pricing_status",
+  "pull_pricing_source",
+  "get_pricing_sources_status",
   // 数据目录与缓存（用量模块自己的数据目录，与框架 get_data_dir 区分开）
   "sync_get_data_dir",
   "sync_open_data_dir",
@@ -109,16 +126,8 @@ const ALLOWED_COMMANDS = new Set([
   "reset_data_dir",
   "reset_local_cache",
   "set_autostart",
-  // ===== 反代网关 =====
+  // ===== 号池管家 =====
   "proxy_status",
-  "proxy_start",
-  "proxy_stop",
-  "proxy_restart",
-  "proxy_keys_list",
-  "proxy_key_create",
-  "proxy_key_update",
-  "proxy_key_delete",
-  "proxy_keys_delete",
   "proxy_pool",
   "proxy_channel_list",
   "proxy_channel_toggle",
@@ -146,20 +155,11 @@ const ALLOWED_COMMANDS = new Set([
   "proxy_autoclaw_sms_send",
   "proxy_autoclaw_sms_login",
   "proxy_autoclaw_captcha_config",
+  "proxy_loomy_sms_send",
+  "proxy_loomy_sms_login",
+  "proxy_codearts_welfare_preview",
   "proxy_account_import_json",
   "proxy_account_import_file",
-  "proxy_models",
-  "proxy_models_sync",
-  // 自定义提供商（中转站 / 自建 OpenAI 兼容端点）：命令名必须与 backend/proxy/index.cjs 的
-  // handle() 注册面一一对应，漏登记的表现是渲染层收到「未授权的 IPC 命令」并卡在假死态
-  "proxy_provider_list",
-  "proxy_provider_create",
-  "proxy_provider_update",
-  "proxy_provider_delete",
-  "proxy_provider_add_key",
-  "proxy_provider_remove_key",
-  "proxy_provider_test",
-  "proxy_provider_fetch_models",
   "proxy_ide_switch",
   "proxy_ide_status",
   "proxy_zcode_switch_rollback",
@@ -168,25 +168,15 @@ const ALLOWED_COMMANDS = new Set([
   "proxy_zcode_device_repair",
   "proxy_zcode_claim_mode",
   "proxy_zcode_restore_mid",
-  "proxy_stats_overview",
-  "proxy_stats_top",
-  "proxy_stats_detail",
-  "proxy_stats_cleanup",
-  "proxy_recent",
   "proxy_oplog_list",
   "proxy_oplog_ops",
   "proxy_oplog_export",
-  "proxy_rules_list",
-  "proxy_open_rules_dir",
   "proxy_open_data_dir",
   "proxy_vault_status",
-  // ===== 反代网关：号池 WebDAV 同步 =====
+  // ===== 号池管家：号池 WebDAV 同步 =====
   "proxy_poolsync_status",
   "proxy_poolsync_run",
   "proxy_poolsync_cancel",
-  // ===== 反代网关：生态接入（CC Switch） =====
-  "proxy_ccswitch_status",
-  "proxy_ccswitch_register",
   // ===== 统一 WebDAV（设置 · 数据存储：共享服务器 + 三模块根目录） =====
   "webdav_shared_get",
   "webdav_shared_save",
@@ -330,13 +320,54 @@ const ALLOWED_COMMANDS = new Set([
   "memory_import_cursors_get",
   "memory_import_cursors_reset",
   "memory_import_map_save",
+  // ===== 外置插件（命令名固定，具体能力由插件包的 manifest 决定）=====
+  "plugin_list",
+  "plugin_install",
+  "plugin_uninstall",
+  "plugin_toggle",
+  "plugin_open",
+  "plugin_embed",
+  "plugin_sync_now",
+  // ===== 提示词库（契约 docs/提示词板块/02-实施契约.md §4；未登记的通道会被下面 invoke 静默拒绝） =====
+  // 4.1 库
+  "prompts_list",
+  "prompts_get",
+  "prompts_save",
+  "prompts_delete",
+  "prompts_restore",
+  "prompts_purge",
+  "prompts_empty_trash",
+  "prompts_stats",
+  "prompts_meta",
+  "prompts_export",
+  "prompts_import",
+  "prompts_open_dir",
+  "prompts_set_dir",
+  "prompts_rebuild",
+  // 4.2 优化
+  "prompts_styles_list",
+  "prompts_styles_save",
+  "prompts_styles_delete",
+  "prompts_styles_reset",
+  "prompts_optimize",
+  "prompts_optimize_cancel",
+  "prompts_history_list",
+  "prompts_history_delete",
+  "prompts_history_clear",
+  // 4.3 同步
+  "prompts_sync_status",
+  "prompts_sync_run",
+  "prompts_sync_cancel",
+  "prompts_sync_logs",
+  "prompts_sync_devices",
+  "prompts_conflicts_list",
+  "prompts_conflict_diff",
+  "prompts_conflict_resolve",
+  "prompts_conflicts_auto",
+  // 4.5 报告历史（提示词库自己的 reports 目录，与技能仓库的 list_reports 不是同一套）
+  "prompts_reports_list",
+  "prompts_report_read",
   // ===== 远程网关（桌面连远程 Docker 版）=====
-  "remote_targets_list",
-  "remote_targets_save",
-  "remote_targets_delete",
-  "remote_targets_activate",
-  "remote_test",
-  "remote_invoke",
 ]);
 
 contextBridge.exposeInMainWorld("agenthub", {

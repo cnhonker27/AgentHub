@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 4 阶段同步引擎：抽取 → 上传 → 拉取 → 合并
 // 本地模式（未配置 WebDAV 或强制备份 mode=backup）：抽取 → 打包备份（本机 zip 快照），跳过全部远程阶段
 // WebDAV 布局：usage-tracker/devices/<deviceId>.json（设备元数据）
@@ -435,21 +445,34 @@ async function pushRemote(cfg, deviceId, deviceName, deviceSources) {
       } catch (e) {
         log("upload", "warn", "价格表同步失败（不影响数据同步）", e.message);
       }
-      // 远程价格源自动拉取（来源 remote）：按配置间隔检查，拉取失败仅记日志
+      // 在线定价源自动拉取：三套价格表各按自己的间隔检查，互不影响（一套挂了其余照用）。
+      // 拉取即应用；失败落到 meta，配置页三张卡片据此显示原因，而不是只有一行同步日志。
       try {
-        const rp = cfg.billing && cfg.billing.remotePricing;
-        if (rp && rp.enabled && rp.url) {
-          const intervalMs = Math.max(1, Number(rp.intervalHours) || 24) * 3600000;
-          const lastAt = Number(db.getMeta("remote_pricing_at") || 0);
-          if (Date.now() - lastAt > intervalMs) {
-            const r = await billing.pullRemotePricing({ ...rp, proxy: cfg.billing.importProxy || "" });
+        const srcCfg = (cfg.billing && cfg.billing.sources) || {};
+        for (const src of billing.PRICING_SOURCES) {
+          const c = srcCfg[src.id] || {};
+          if (!c.enabled) continue;
+          const intervalMs = Math.max(1, Number(c.intervalHours) || 24) * 3600000;
+          const lastAt = Number(db.getMeta(`pricing_${src.id}_at`) || 0);
+          if (Date.now() - lastAt <= intervalMs) continue;
+          try {
+            const r = await billing.pullPricingSource(src.id, { proxy: cfg.billing.importProxy || "" });
             if (r.action === "updated") {
-              log("merge", "info", `远程价格源已更新：新增 ${r.added} · 调价 ${r.updated} · 未变 ${r.skipped}（本地 ${r.models} 个模型命中）`);
+              log("merge", "info", `${src.name}已更新：新增 ${r.added} · 调价 ${r.updated} · 未变 ${r.same}（命中 ${r.models}/${r.total} 个模型）`
+                + (r.shadowed ? `；${r.shadowed} 个已有手动价，本表暂不生效` : ""));
+            } else if (r.action === "empty") {
+              log("upload", "warn", `${src.name}未匹配到本地模型（远端 ${r.total} 个），已保留原价格`);
             }
+          } catch (e) {
+            try {
+              db.setMeta(`pricing_${src.id}_error`, e.message);
+              db.setMeta(`pricing_${src.id}_error_at`, String(Date.now()));
+            } catch { /* 记账失败不影响同步 */ }
+            log("upload", "warn", `${src.name}拉取失败（不影响数据同步，下轮重试）`, e.message);
           }
         }
       } catch (e) {
-        log("upload", "warn", "远程价格源拉取失败（不影响数据同步，下轮重试）", e.message);
+        log("upload", "warn", "在线定价源拉取异常（不影响数据同步）", e.message);
       }
       // 设备元数据。上传前做设备 ID 碰撞探测：远端设备文件的写入实例既不是本次进程、
       // 也不是本机上次上传的进程时，说明同一设备 ID 有多台电脑在写（克隆/复制数据目录），
