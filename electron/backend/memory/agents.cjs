@@ -1,6 +1,16 @@
 /**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
+/**
  * AgentHub · 记忆中枢（Memory Hub）
- * Copyright (c) 2026 沐辉 (HUIdada1)
+ * Copyright (c) 2026 沐晖 (HUIdada1)
  * https://github.com/HUIdada1/AgentHub
  * 本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。
  */
@@ -62,18 +72,22 @@ const ADAPTERS = [
   {
     id: "dsh",
     name: "DeepSeek Harness",
+    // DSH 不读取任何 mcp.json（官方 app.asar 全文检索 "mcp.json" 0 命中，issue #170 取证）。
+    // 官方 MCP 接入走 profile 的 cordis.patch.yml patch 层：insert @deepseek-ai/dsh-mcp-client
+    // （本机 profiles/desktop 实样与 asar 内 218 处 cordis.patch 引用交叉验证）。
+    // 候选按桌面端优先排序；注入/校验实际覆盖 ~/.dsh/profiles/ 下全部已存在 profile
     configCandidates: [
-      path.join(HOME, ".dsh", "mcp.json"),
-      path.join(HOME, ".dsh", "config.json"),
-      path.join(HOME, ".dsh", "cli", "config.json"),
+      path.join(HOME, ".dsh", "profiles", "desktop", "cordis.patch.yml"),
+      path.join(HOME, ".dsh", "profiles", "web", "cordis.patch.yml"),
+      path.join(HOME, ".dsh", "profiles", "headless", "cordis.patch.yml"),
     ],
-    format: "json-mcpServers",
-    container: ["mcpServers"],
+    format: "yml-cordis-patch",
     instructionCandidates: [
       path.join(HOME, ".dsh", "AGENTS.md"),
       path.join(HOME, ".dsh", "CLAUDE.md"),
     ],
-    snippetHint: "写入 ~/.dsh/mcp.json 的 mcpServers",
+    snippetHint: "写入 ~/.dsh/profiles/<profile>/cordis.patch.yml 的 agenthub-memory 受控块",
+    note: "DSH 不读取 mcp.json，经 cordis.patch.yml 接入（issue #170）",
   },
   {
     id: "trae-solo",
@@ -179,6 +193,19 @@ function resolveInstruction(adapter) {
   return { path: existing || adapter.instructionCandidates[0], exists: !!existing };
 }
 
+/** cordis 格式：profiles 下任一 cordis.patch.yml 存在即「有配置文件可注入」 */
+function anyCordisPatchExists(adapter) {
+  const first = adapter.configCandidates && adapter.configCandidates[0];
+  if (!first) return false;
+  const profilesDir = path.dirname(path.dirname(first));
+  try {
+    for (const d of require("fs").readdirSync(profilesDir, { withFileTypes: true })) {
+      if (d.isDirectory() && existsSync(path.join(profilesDir, d.name, "cordis.patch.yml"))) return true;
+    }
+  } catch { /* profiles 目录不存在 */ }
+  return false;
+}
+
 function list(cfg) {
   const enabled = new Set((cfg && cfg.enabled) || ADAPTERS.map((a) => a.id));
   const custom = (cfg && cfg.custom) || [];
@@ -186,7 +213,10 @@ function list(cfg) {
     ...a,
     enabled: enabled.has(a.id),
     configPath: resolveConfig(a),
-    configExists: existsSync(resolveConfig(a)),
+    // cordis 格式的「已配置」判定不绑定单一候选：profiles 下任一 patch 文件存在即算
+    configExists: a.format === "yml-cordis-patch"
+      ? anyCordisPatchExists(a)
+      : existsSync(resolveConfig(a)),
     instruction: resolveInstruction(a),
   })).concat(custom.map((c) => {
     // 容器按 format 推导，不再硬编码 ["mcpServers"]：自定义 toml 适配器若沿用 JSON 容器

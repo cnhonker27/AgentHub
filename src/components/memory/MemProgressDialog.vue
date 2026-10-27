@@ -1,6 +1,16 @@
 <!--
+  ============================================================
+   作者：沐晖
+   日期：2026-10-22
+   版权声明：本代码归沐晖所有。
+     · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+     · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+     此注释为版权与授权声明，禁止删除。
+  ============================================================
+-->
+<!--
   AgentHub · 记忆中枢（Memory Hub）
-  Copyright (c) 2026 沐辉 (HUIdada1)
+  Copyright (c) 2026 沐晖 (HUIdada1)
   https://github.com/HUIdada1/AgentHub
   本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。
 -->
@@ -33,6 +43,8 @@ const props = withDefaults(
     startedAt?: number;
     /** 结束后展示的结果 */
     result?: { ok: boolean; message: string; extra?: string[] } | null;
+    /** 结果态的确认按钮文案：给了才显示（如导入「干跑→确认写入」同弹窗动线），点击 emit confirm */
+    confirmText?: string;
     /** 中断按钮文案：给了才显示（不给＝不可中断） */
     cancelText?: string;
     /** 耗时异常阈值（毫秒）：running 超过它就显示兜底提示（0 = 不提示）。
@@ -40,12 +52,13 @@ const props = withDefaults(
         给用户一句"该怎么办"的指引，而不是无限转圈 */
     staleMs?: number;
   }>(),
-  { sub: "", phase: "", detail: "", done: 0, total: 0, startedAt: 0, result: null, cancelText: "", staleMs: 120_000 },
+  { sub: "", phase: "", detail: "", done: 0, total: 0, startedAt: 0, result: null, confirmText: "", cancelText: "", staleMs: 120_000 },
 );
 
 const emit = defineEmits<{
   (e: "update:open", v: boolean): void;
   (e: "cancel"): void;
+  (e: "confirm"): void;
 }>();
 
 /** 已用时长：跑动时每秒自增，跑完定格在最终值（不随结果里的毫秒再算一遍） */
@@ -136,7 +149,8 @@ const stale = computed(() => props.running && props.staleMs > 0 && elapsed.value
 
     <template #foot>
       <button v-if="running && cancelText" class="btn btn-ghost" @click="emit('cancel')">{{ cancelText }}</button>
-      <button class="btn btn-ghost" @click="emit('update:open', false)">{{ running ? "后台继续（关闭）" : "关闭" }}</button>
+      <button v-if="!running && confirmText && result?.ok" class="btn btn-cta" @click="emit('confirm')">{{ confirmText }}</button>
+      <button class="btn btn-ghost" @click="emit('update:open', false)">{{ running ? "后台继续（关闭）" : confirmText && result?.ok ? "暂不写入" : "关闭" }}</button>
     </template>
   </MemDialog>
 </template>

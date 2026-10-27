@@ -1,5 +1,5 @@
 /* ===== AgentHub · 记忆中枢（Memory Hub） =====
-   Copyright (c) 2026 沐辉 (HUIdada1)
+   Copyright (c) 2026 沐晖 (HUIdada1)
    https://github.com/HUIdada1/AgentHub
    本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。 */
 /* ===== 记忆中枢模块样式（命名空间即 mem- 前缀：规则为全局裸类，靠前缀约定与其它模块隔离；
@@ -1031,4 +1031,28 @@ html.fx-off .memory-scope .mem-switch .sw-thumb { transition: none; }
   overflow: hidden;
   text-overflow: ellipsis;
   vertical-align: middle;
+}
+
+/* ---- 重要度星级（详情抽屉/新建表单共用：点星即改，1~5） ---- */
+.mem-stars {
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+}
+.mem-star {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0 2px;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: color 0.15s var(--ease), transform 0.1s var(--ease);
+}
+.mem-star:hover {
+  transform: scale(1.15);
+}
+.mem-star.on {
+  color: #f5b301;
 }

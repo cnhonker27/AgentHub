@@ -1,8 +1,18 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 反代网关 · 本地 IDE 快捷切换账号：把号池账号一键应用为本地桌面客户端的当前登录态
 //
 // WorkBuddy 双区：登录文件在同目录下按文件名区分（中国区 workbuddy-desktop.info /
 //   国际版 workbuddy-desktop-ai.info），明文 JSON 是登录驱动源 —— 合并式写回，只动凭据字段。
-//   三道安全闸（对齐参考项目，均为"失败即停"，绝不在拿不准的时候覆盖官方登录态）：
+//   三道安全闸（对齐上游，均为"失败即停"，绝不在拿不准的时候覆盖官方登录态）：
 //     ① 官方已启用 $wbEncrypted 加密包装 → 直接拒绝（我们没有官方密钥，写进去就是破坏登录）
 //     ② 写前记哈希、写时校验：期间官方客户端若回写过，本次切换作废，让用户重试
 //     ③ 写后回读校验：token 必须与写入值一致，根键（account/auth/accounts/allAccounts）必须齐
@@ -323,10 +333,15 @@ async function switchRaccoonAccount(acc, opts) {
   const targetDeviceId = getRaccoonDeviceIdentity(acc);
   writeRaccoonDeviceIdentity(targetDeviceId);
 
-  // 切入客户端前，确保该账号在服务端已完成可信设备绑定，杜绝客户端心跳报 200811 device_bind_required
+  // 切入客户端前，确保该账号在服务端已完成可信设备绑定，杜绝客户端心跳报 200811 device_bind_required。
+  // 绑定失败不再全静默：后果是客户端侧报错，用户无从知道与切号有关——在结果里如实带回
+  let bindWarn = "";
   try {
     if (typeof discovery.bindRaccoonDevice === "function") {
-      await discovery.bindRaccoonDevice(secrets.token, targetDeviceId).catch(() => {});
+      const b = await discovery.bindRaccoonDevice(secrets.token, targetDeviceId).catch(() => null);
+      if (!b || !b.ok) {
+        bindWarn = "（提示：本次可信设备绑定未完成，客户端首次心跳可能提示需要绑定设备；再执行一次切换即可重试。）";
+      }
     }
   } catch {}
 
@@ -349,7 +364,7 @@ async function switchRaccoonAccount(acc, opts) {
     file,
     backup,
     relaunched: !!rel.ok,
-    message: `已把「${label}」写为「商汤小浣熊」本地登录态${rebuilt}。${restart}${warn}${backup ? `原文件已备份：${path.basename(backup)}` : ""}`,
+    message: `已把「${label}」写为「商汤小浣熊」本地登录态${rebuilt}。${restart}${warn}${bindWarn}${backup ? `原文件已备份：${path.basename(backup)}` : ""}`,
   };
 }
 
@@ -383,7 +398,7 @@ function hasEncryptedWrapper(node, depth = 0) {
 const sha256 = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
 
 /**
- * 合并式写回 auth 文件：只动凭据相关字段，其余配置原样保留（参考项目是整快照替换，这里更温和）。
+ * 合并式写回 auth 文件：只动凭据相关字段，其余配置原样保留（上游是整快照替换，这里更温和）。
  * 官方文件的结构是 { account, accounts, allAccounts, auth }，凭据的真身在 auth 节点；
  * 但历史/简化格式会把凭据平铺在根上，所以两种位置都写：根键存在才改（不存在就不凭空造），
  * auth / account 节点按官方结构补齐。

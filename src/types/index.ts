@@ -1,6 +1,16 @@
-// 全局类型与常量：四大模块 / 子页面 / 应用配置 / 技能仓库数据结构
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-21
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
+// 全局类型与常量：五大模块 / 子页面 / 应用配置 / 技能仓库数据结构
 // MODULES 是左栏导航的唯一事实源，App.vue 据此装配各模块视图组件
-export type ModuleKey = "skills" | "sync" | "proxy" | "memory";
+export type ModuleKey = "skills" | "sync" | "proxy" | "memory" | "prompts";
 export type Theme = "dark" | "light";
 
 export interface PageDef {
@@ -8,6 +18,12 @@ export interface PageDef {
   name: string;
   /** 右侧计数徽标：静态兜底值，技能仓库的待裁决徽标由 store 实时计算覆盖 */
   badge?: string;
+  /** 禁用页签（提示词库的「线上提示词库」）：置灰不可点、点击只提示不切页。
+   *  为什么用声明式字段而不是在 PageTabs 里按 id 特判：以后任何模块要挂占位页都能直接复用，
+   *  且「这个页现在不可用」这一事实留在 MODULES 这个唯一事实源里，不会散落在组件里 */
+  disabled?: boolean;
+  /** 禁用原因文案（禁用页签点击时的提示语）；未填时组件回落到「待版本更新」 */
+  disabledTip?: string;
 }
 
 export interface ModuleDef {
@@ -209,15 +225,19 @@ export type WebDavLog = { at: string; text: string };
 
 export type WebDavEvent = { event: "webdav"; stage: string; detail: string; pct?: number; running: boolean };
 
-// ===== 全局设置弹窗：左下角设置按钮打开的三个模块（弹窗左列按钮切换） =====
+// ===== 全局设置弹窗：左下角设置按钮打开的模块（弹窗左列按钮切换） =====
 
-export type SettingsTab = "general" | "webdav" | "data" | "timing";
+export type SettingsTab = "general" | "webdav" | "data" | "models" | "timing" | "feedback" | "plugins";
 
 export const SETTINGS_TABS: { key: SettingsTab; name: string; icon: string; desc: string }[] = [
   { key: "general", name: "通用", icon: "ph-sliders-horizontal", desc: "外观 · 模块顺序 · 更新" },
   { key: "webdav", name: "WebDAV 同步", icon: "ph-cloud", desc: "统一服务器 · 号池同步" },
   { key: "timing", name: "同步时间", icon: "ph-clock-countdown", desc: "各板块自动同步 / 刷新周期" },
   { key: "data", name: "数据与备份", icon: "ph-database", desc: "备份压缩包 · 缓存目录" },
+  // 模型与网关：平台级配置（供应商 / 模型池 / 来源优先级 / 网关），
+  // 记忆中枢只是当前消费方之一，未来新增板块统一复用这里
+  { key: "models", name: "模型与网关", icon: "ph-cpu", desc: "供应商 · 模型池 · 来源优先级" },
+  { key: "feedback", name: "反馈与需求", icon: "ph-chat-circle-dots", desc: "问题反馈 · 功能建议" },
 ];
 
 // ===== 应用配置：框架（主题 / 模块顺序）+ 技能仓库 + 更新 =====
@@ -275,7 +295,81 @@ export interface AppConfig {
   proxy: ProxyConfig;
   /** 记忆中枢：框架侧只管启用开关与根目录指针，其余配置在 <仓库>/config/memory.config.json */
   memory: MemoryPointerConfig;
+  /** 提示词库：内置板块，配置与技能/号池同源（走 app.save() 落 framework config.json）。
+   *  字段与 electron/backend/config.cjs 的 defaultConfig().prompts 一一对应 */
+  prompts: PromptsConfig;
 }
+
+/** 提示词库配置段（契约 §2 冻结字段；新增键由后端 mergeConfig 深合并补默认，缺字段也不炸） */
+export interface PromptsConfig {
+  // ===== 同步 =====
+  /** 自动同步（WebDAV）总开关，默认 true */
+  syncAuto: boolean;
+  /** 自动同步周期（小时，1~24，默认 4）；「设置 · 同步时间 · 提示词库」里的数字输入框读写它 */
+  syncIntervalHours: number;
+  /** 三方合并策略 */
+  mergeStrategy: "newer-wins" | "local-wins" | "remote-wins" | "longer-wins" | "manual";
+  /** 删除冲突处理：tombstone=以墓碑为准（删除胜）；keep-modified=本地改过的保留 */
+  onDeleteConflict: "tombstone" | "keep-modified";
+  /** 是否同步版本历史，默认 true */
+  syncVersions: boolean;
+  // ===== 库 =====
+  /** 库根目录；空 = 默认 ~/AgentHub/prompts（由后端 promptsLibDir() 解析） */
+  rootDir: string;
+  /** 每条提示词保留的历史版本数，默认 20 */
+  versionKeep: number;
+  /** 回收站保留天数，默认 30 */
+  trashDays: number;
+  /** 单条提示词大小上限（KB），默认 1024 */
+  itemMaxKB: number;
+  /** 新建提示词的默认分类 */
+  defaultCategory: string;
+  // ===== 优化 =====
+  /** 默认风格 id（内置风格见 styles.cjs），默认 builtin-general */
+  defaultStyleId: string;
+  /** 默认模型；空 = 跟随模型与网关默认 */
+  defaultModel: string;
+  /** 输出长度上限（字符），默认 800 */
+  maxLength: number;
+  /** 采样温度，默认 0.7 */
+  temperature: number;
+  /** 最大输出 token，默认 4096 */
+  maxTokens: number;
+  /** 单次优化超时（秒），默认 60 */
+  timeoutSec: number;
+  /** 目标场景描述（渲染进系统模板） */
+  scenario: string;
+  /** 优化历史上限（条），默认 50 */
+  historyLimit: number;
+  /** 流式输出，默认 true；上游不支持时后端自动回退非流式 */
+  stream: boolean;
+}
+
+/** 提示词库配置的默认值（契约 §2 冻结值）。
+ *  单一事实源放这里而不是页面层：stores/app.ts 的深合并基线与配置页首帧渲染都要用它，
+ *  让 store 反向依赖 views 会把分层搞乱；页面层由 promptTypes.ts re-export 出去。
+ *  权威默认值仍以 electron/backend/config.cjs 的 defaultConfig().prompts 为准（后端负责补键）。 */
+export const PROMPTS_CONFIG_DEFAULTS: PromptsConfig = {
+  syncAuto: true,
+  syncIntervalHours: 4,
+  mergeStrategy: "newer-wins",
+  onDeleteConflict: "tombstone",
+  syncVersions: true,
+  rootDir: "",
+  versionKeep: 20,
+  trashDays: 30,
+  itemMaxKB: 1024,
+  defaultCategory: "未分类",
+  defaultStyleId: "builtin-general",
+  defaultModel: "",
+  maxLength: 800,
+  temperature: 0.7,
+  maxTokens: 4096,
+  timeoutSec: 60,
+  scenario: "通用 AI 助手",
+  historyLimit: 50,
+  stream: true,
+};
 
 export interface MemoryPointerConfig {
   enabled: boolean;
@@ -357,7 +451,7 @@ export interface ProxyCheckinAutoRule {
 
 // ===== 反代网关：数据结构（跟 electron/backend/proxy/* 返回一一对应） =====
 
-export type ProxyChannelId = "trae" | "workbuddy" | "workbuddy_ai" | "raccoon" | "modelscope" | "lobster" | "zcode" | "catpaw" | "qoder" | "qoder_intl" | "autoclaw" | "autoclaw_intl" | "cline_free" | "cline_pass";
+export type ProxyChannelId = "trae" | "workbuddy" | "workbuddy_ai" | "raccoon" | "modelscope" | "lobster" | "zcode" | "catpaw" | "qoder" | "qoder_intl" | "autoclaw" | "autoclaw_intl" | "cline_free" | "cline_pass" | "accio" | "accio_cn" | "codearts" | "loomy";
 /** Key 路由：auto 或任一渠道 id（渠道后续扩充即为普通字符串，保留字面量仅为补全提示） */
 export type ProxyRoute = "auto" | ProxyChannelId | (string & {});
 export type ProxyAccountStatus = "online" | "cooling" | "exhausted" | "relogin" | "disabled";
@@ -586,35 +680,15 @@ export interface ProxyProviderTestResult {
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 }
 
+/** 号池总览（原反代网关运行状态）：转发服务下线后只保留号池聚合指标与各渠道余额 */
 export interface ProxyGatewayStatus {
-  running: boolean;
-  port: number;
-  bind: string;
-  baseUrl: string;
-  uptime: number;
-  active: number;
-  today: { req: number; tokens: number; successRate: number; ttftAvg: number };
-  channels: (ProxyPoolSummary & { id: ProxyChannelId; display: string; health: ProxyChannelHealth | null })[];
-  keyCount: number;
+  channels: (ProxyPoolSummary & { id: ProxyChannelId; display: string })[];
+  channelCount: number;
+  accountCount: number;
+  onlineCount: number;
+  expiringSoonCount: number;
   vaultOk: boolean;
   dbDriver: string;
-}
-
-/** 远程网关实例（桌面连远程 Docker 版）：令牌只在主进程存在，前端只见 hasToken */
-export interface RemoteTarget {
-  id: string;
-  alias: string;
-  baseUrl: string;
-  hasToken: boolean;
-  createdAt: number;
-}
-
-export interface RemoteTestResult {
-  ok: boolean;
-  message?: string;
-  version?: string;
-  platform?: string;
-  gatewayRunning?: boolean;
 }
 
 export interface ProxyUsageRow {
@@ -746,6 +820,54 @@ export interface ProxyOpLogRow {
 export interface ProxyOpLogList {
   rows: ProxyOpLogRow[];
   total: number;
+}
+
+// ===== 反代网关 · 网络代理（出口池；netproxy.json）=====
+
+/** 一次连通性测试的结果（落进条目 lastTest，也在测试接口直接返回） */
+export interface ProxyNetProxyTest {
+  success: boolean;
+  /** 目标站点返回的状态码（连不上为 null） */
+  status: number | null;
+  /** 出口 IP（附加信息，拿不到为空串） */
+  ip: string;
+  durationMs: number;
+  /** 失败原因（成功为空串） */
+  error: string;
+  /** 测试时刻（仅落盘的 lastTest 有） */
+  at?: number;
+}
+
+export interface ProxyNetProxyItem {
+  id: string;
+  name: string;
+  protocol: "http" | "socks5";
+  host: string;
+  port: number;
+  username: string;
+  /** 密码只回「有没有」，明文永不出后端 */
+  hasPassword: boolean;
+  enabled: boolean;
+  lastTest: ProxyNetProxyTest | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** 出口策略：off 直连 · fixed 固定一条 · rotate 轮询启用条目 */
+export type ProxyNetProxyMode = "off" | "fixed" | "rotate";
+
+export interface ProxyNetProxyList {
+  ok: boolean;
+  mode: ProxyNetProxyMode;
+  fixedId: string;
+  settings: {
+    testUrl: string;
+    timeoutMs: number;
+    /** 默认值（「恢复默认」回填用） */
+    defaultTestUrl: string;
+    defaultTimeoutMs: number;
+  };
+  items: ProxyNetProxyItem[];
 }
 
 export interface ModelCustomEntry {
@@ -959,7 +1081,7 @@ export interface UpdateEvent extends UpdateStatus {
   event: "state" | "focus-update" | "usage-local-synced";
 }
 
-/** 四大模块 → 子页面映射（内置顺序即默认导航顺序，可在「设置 · 通用」中调整）
+/** 五大模块 → 子页面映射（内置顺序即默认导航顺序，可在「设置 · 通用」中调整）
  *  skills 的 skill-detail 为技能详情页：从技能库点卡片进入，不在横条菜单中展示；
  *  各模块的「配置」是隐藏页面（id=config，不走横条菜单），由横条右侧「配置」按钮切换 */
 export const MODULES: ModuleDef[] = [
@@ -987,17 +1109,14 @@ export const MODULES: ModuleDef[] = [
   },
   {
     key: "proxy",
-    name: "反代网关",
+    name: "号池管家",
+    // 原「反代网关」已停止维护，转发链路（API Keys / 模型目录 / 用量统计 / 自定义提供商 /
+    // 生态接入 / 网络代理）随之上线归档，只保留号池管理相关的五个页面。
     pages: [
       { id: "home", name: "总览" },
-      { id: "providers", name: "自定义提供商" },
       { id: "agents", name: "号池" },
       { id: "expiry", name: "积分日历" },
-      { id: "keys", name: "API Keys" },
-      { id: "models", name: "模型目录" },
-      { id: "stats", name: "用量统计" },
       { id: "poolsync", name: "号池同步" },
-      { id: "ccswitch", name: "生态接入" },
       { id: "proxylog", name: "日志" },
     ],
   },
@@ -1011,11 +1130,28 @@ export const MODULES: ModuleDef[] = [
       { id: "browse", name: "记忆浏览" },
       { id: "projects", name: "项目归档" },
       { id: "profile", name: "深层画像" },
+      // 接入与迁移：Agent 接入 + 导入历史 + 多机同步三段合一（原来三个独立页签）
+      { id: "hub", name: "接入与迁移" },
+      // 旧三段页签保留定义：老配置的 ui.tabs 显式勾选过它们的用户仍能打开（默认白名单已切到 hub）
       { id: "agents", name: "Agent 接入" },
       { id: "index", name: "检索与索引" },
       { id: "auto", name: "自动化" },
       { id: "import", name: "导入与去重" },
       { id: "sync", name: "WebDAV同步" },
+    ],
+  },
+  {
+    key: "prompts",
+    name: "提示词库",
+    pages: [
+      { id: "optimize", name: "优化提示词" },
+      // 优化历史独立成页：主优化视图不再塞右侧抽屉，历史留痕有整页空间浏览与筛选
+      { id: "history", name: "优化历史" },
+      { id: "library", name: "个人提示词库" },
+      // 线上提示词库：纯客户端精选目录（内置基线 + 远程分片增量 + 用户导入）。
+      // 不做账号/云端收藏/投稿——没有服务端，任何要「用户身份」的能力都得先建后端。
+      { id: "online", name: "线上提示词库" },
+      { id: "sync", name: "WebDAV 同步" },
     ],
   },
 ];
@@ -1050,6 +1186,8 @@ export type MemoryRow = {
   superseded?: boolean;
   validTo?: number | null;
   supersededBy?: string | null;
+  /** 「被谁取代」的目标标题（详情接口带出，目标被清理时后端回落为 id） */
+  supersededByTitle?: string | null;
   /** 检索得分（仅搜索接口返回） */
   score?: number;
   scoreParts?: Record<string, number>;
@@ -1199,4 +1337,217 @@ export interface MemoryEvent {
   event: "memory";
   type: string;
   [key: string]: unknown;
+}
+
+// ===== 提示词库：数据结构（与 electron/backend/prompts 的返回一一对应，字段名逐字照契约 §3） =====
+
+/** 提示词里的变量占位（正文中写 {{name}}，渲染时按 def 兜底填充） */
+export type PromptVariable = { name: string; label?: string; def?: string; required?: boolean };
+
+/** 单条历史版本快照；by 区分人工保存与同步自动合并，便于在详情页标注来源 */
+export type PromptVersion = { version: number; body: string; at: number; note?: string; by?: "user" | "sync-merge" };
+
+export type PromptItem = {
+  id: string;
+  name: string;
+  description: string;
+  /** 正文（不含 frontmatter；落盘时由后端拼装） */
+  body: string;
+  variables: PromptVariable[];
+  category: string;
+  tags: string[];
+  /** local=本机新建；optimized=优化产出；online=线上库（二期）；imported=导入 */
+  source: "local" | "optimized" | "online" | "imported";
+  /** 来源引用（线上库 id / 导入文件名等） */
+  originRef?: string;
+  originMeta?: { author?: string; license?: string; url?: string; version?: string };
+  /** 血缘：优化产出时记录父版本 hash / 风格 / 模型 / 原始输入，用于回溯「这条从哪来」 */
+  lineage?: { parentHash?: string; styleId?: string; model?: string; inputText?: string };
+  /** 当前版本号（与 versions 的最后一项对应） */
+  version: number;
+  /** 历史版本（按 version 升序；上限由 config.prompts.versionKeep 控制） */
+  versions: PromptVersion[];
+  favorite: boolean;
+  pinned?: boolean;
+  useCount: number;
+  lastUsedAt: number;
+  /** 内容哈希：乐观锁与三方合并的判定依据（后端算，前端只回传） */
+  hash: string;
+  createdAt: number;
+  updatedAt: number;
+  /** 软删除时间戳（进回收站）；未删除为 undefined */
+  deletedAt?: number;
+};
+
+export type PromptStyle = {
+  id: string;
+  name: string;
+  description: string;
+  /** 系统提示词模板（可含 {{scenario}} / {{maxLength}} 等占位） */
+  systemTemplate: string;
+  userTemplate?: string;
+  maxLength?: number;
+  temperature?: number;
+  /** 内置风格：不可删除，只能改（「恢复内置默认」会重置它们） */
+  builtin: boolean;
+  isDefault?: boolean;
+};
+
+export type PromptHistoryItem = {
+  id: string;
+  at: number;
+  styleId: string;
+  styleName: string;
+  model: string;
+  inputText: string;
+  outputText: string;
+  /** 输入/输出被截断标记（历史只留前 16KB，截断后详情页要提示） */
+  inputTruncated?: boolean;
+  outputTruncated?: boolean;
+  elapsedMs: number;
+  tokens?: { in: number; out: number };
+  /** 已保存进库时记录新条目 id（详情页「已入库」据此判定） */
+  savedToLibrary?: string;
+  applied?: boolean;
+  /** 多角度补全的假设清单（正文里已剥离，这里留档以便回溯「当时模型替用户猜了什么」） */
+  assumptions?: string[];
+  /** 失败时留存的错误码/文案，成功为 undefined */
+  error?: string;
+};
+
+// ===== 线上提示词库（精选目录）=====
+// 与个人库的 PromptItem 是两套结构：目录条目是「只读内容」，收录时才转成 PromptItem。
+
+/** 目录卡片（列表用；不含正文——60 条正文约 19KB，没必要每屏都传） */
+export type CatalogItem = {
+  id: string;
+  title: string;
+  summary: string;
+  category: string;
+  subcategory?: string;
+  tags: string[];
+  templateId?: string;
+  lang: "zh" | "en" | "multi";
+  license: string;
+  version: number;
+  updatedAt: number;
+  variableCount: number;
+  /** 卡片上只展示前 3 个变量名 */
+  variableNames: string[];
+};
+
+/** 目录详情（抽屉用；带正文与完整变量表） */
+export type CatalogItemDetail = Omit<CatalogItem, "variableCount" | "variableNames"> & {
+  body: string;
+  variables: PromptVariable[];
+  author?: string;
+  sourceUrl?: string;
+  models?: string[];
+};
+
+/** 模板：给方法论，不只给文本（抄 awesome-gpt-image-2 的四件套） */
+export type CatalogTemplate = {
+  id: string;
+  title: string;
+  description: string;
+  categoryId: string;
+  useWhen: string;
+  guidance: string[];
+  pitfalls: string[];
+  itemIds: string[];
+};
+
+export type CatalogCategory = {
+  id: string;
+  name: string;
+  description?: string;
+  subs: { id: string; name: string }[];
+};
+
+export type CatalogStats = {
+  version: number;
+  updatedAt: number;
+  count: number;
+  /** 用户导入的条数（单独计数：来源不同，责任也不同） */
+  imported: number;
+  categories: number;
+  templates: number;
+  /** builtin=内置基线；cache=已拉过远程；none=目录缺失 */
+  source: "builtin" | "cache" | "none";
+  lastCheckAt: number;
+  lastError: string;
+  remote: string;
+};
+
+export type PromptSyncStatus = {
+  running: boolean;
+  configured: boolean;
+  stage: "idle" | "connect" | "pull" | "merge" | "push" | "done" | "cancelled" | "error";
+  stageLabel: string;
+  detail: string;
+  pct?: number;
+  lastSyncAt: number;
+  lastError: string;
+  /** 本轮自动合并条数（概况卡「已自动合并 N 条」的数据源） */
+  autoMerged: number;
+  /** 待人工裁决的冲突数（页签红点数据源） */
+  pendingConflicts: number;
+};
+
+export type PromptConflict = {
+  id: string;
+  /** content=正文冲突；delete=删除冲突；remote=远端新增同名 */
+  kind: "content" | "delete" | "remote";
+  name: string;
+  title: string;
+  detail: string;
+  /** 已按策略自动合并（无需人工）；false 时留在裁决队列 */
+  autoMerged: boolean;
+  strategy?: string;
+  kept?: "local" | "remote";
+  discardedAt?: number;
+  localHash?: string;
+  remoteHash?: string;
+  at: number;
+  resolved?: { at: number; choice: string };
+};
+
+export type PromptConflictDiff = {
+  item: PromptConflict;
+  left: { label: string; body: string; updatedAt: number };
+  right: { label: string; body: string; updatedAt: number };
+};
+
+export type PromptStats = {
+  total: number;
+  today: number;
+  week: number;
+  optimized: number;
+  favorited: number;
+  trash: number;
+  conflicts: number;
+  lastSyncAt: number;
+};
+
+/** 提示词库事件（event="prompts"；走既有 app:event 通道，字段按契约 §4.4） */
+export interface PromptsEvent {
+  event: "prompts";
+  type: "sync-stage" | "sync-done" | "sync-error" | "library-changed" | "history-changed"
+    | "optimize-start" | "optimize-delta" | "optimize-done" | "catalog-updated";
+  stage?: PromptSyncStatus["stage"];
+  stageLabel?: string;
+  detail?: string;
+  pct?: number;
+  running?: boolean;
+  autoMerged?: number;
+  pendingConflicts?: number;
+  message?: string;
+  /** 一次优化请求的 id（start / delta / done 三态共用，前端据此过滤别人的流） */
+  runId?: string;
+  /** 增量正文（仅 optimize-delta；后端已节流 60ms / 120 字符） */
+  delta?: string;
+  /** 收尾是否成功（仅 optimize-done） */
+  ok?: boolean;
+  /** 收尾错误码（仅 optimize-done） */
+  code?: string;
 }

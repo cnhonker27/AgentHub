@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // Cline 双池专项自测：离线协议断言 + 本地假上游端到端链路。
 // 运行：ELECTRON_RUN_AS_NODE=1 electron tools/proxy-cline-selftest.cjs
 // 离线：workos: 前缀幂等 / JWT 解析（exp/external_id/identity）/ expiresAt 双形态 /
@@ -122,7 +132,7 @@ function offline() {
     assert(parseTryAgainMs("no wait text") === 0, "无文案归 0");
   }
 
-  // ⑦ 上游请求头唯一实现（对话/登录/续期三处共用，方案 §3 契约）
+  // ⑦ 上游请求头唯一实现（对话/登录/续期三处共用，契约）
   {
     const h = clineHeaders.buildUpstreamHeaders(
       { upstreamHeaders: { "User-Agent": "Cline/9.9", "X-Custom": "", "Content-Type": "text/plain", Authorization: "Bearer hack", "X-Task-ID": "hack" } },

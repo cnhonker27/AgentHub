@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 配置与数据目录管理（Node 主进程侧）
 "use strict";
 const fs = require("node:fs");
@@ -259,11 +269,12 @@ function defaultConfig() {
       { source: "trae-solo-cn", enabled: false, dataDir: null },
       { source: "opensquilla", enabled: false, dataDir: null },
       { source: "grok", enabled: false, dataDir: null },
+      { source: "autoclaw", enabled: true, dataDir: null },
     ],
     // 工具栏切换项显隐与排序：默认全部显示，顺序即下方 order。
     // initialized=false 表示首次启动尚未自动探测，loadConfig 会据本机数据源自动开启。
     sourceVisibility: {
-      order: ["zcode", "raccoon", "mimo", "codex", "dsh", "workbuddy", "workbuddy-ai", "reasonix", "codebuddy", "qoder", "qoder-cn", "antigravity", "antigravity-ide", "antigravity-legacy", "trae", "trae-cn", "trae-solo", "trae-solo-cn", "opensquilla", "grok"],
+      order: ["zcode", "raccoon", "mimo", "codex", "dsh", "workbuddy", "workbuddy-ai", "reasonix", "codebuddy", "qoder", "qoder-cn", "antigravity", "antigravity-ide", "antigravity-legacy", "trae", "trae-cn", "trae-solo", "trae-solo-cn", "opensquilla", "grok", "autoclaw"],
       hidden: [],
       initialized: false,
     },
@@ -289,12 +300,12 @@ function defaultConfig() {
       displayCurrency: "CNY",
       usdToCny: 7.2,
       importProxy: "", // 价格源导入代理（留空=系统代理/直连）
-      // 远程价格源自动拉取（来源 remote，参考 sub2api 的 pricing.remote_url/hash_url）
-      remotePricing: {
-        enabled: false,
-        url: "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.json",
-        hashUrl: "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.sha256",
-        intervalHours: 24,
+      // 在线定价源：三套内置价格表，各自开关与检查间隔（链接内置，用户不用填地址）。
+      // 优先级 = 这里的顺序：官方倍率预设 > models.dev > 远程价格表（手动价永远最高）
+      sources: {
+        official: { enabled: false, intervalHours: 24 },
+        modelsdev: { enabled: false, intervalHours: 24 },
+        remote: { enabled: false, intervalHours: 24 },
       },
     },
   };
@@ -453,16 +464,29 @@ function loadConfig() {
       merged.billing.usdToCny = isFinite(rate) && rate > 0 ? rate : 7.2;
       if (typeof merged.billing.importProxy !== "string") merged.billing.importProxy = "";
       merged.billing.enabled = !!merged.billing.enabled;
-      const rp = merged.billing.remotePricing;
-      if (rp && typeof rp === "object") {
-        rp.enabled = !!rp.enabled;
-        rp.url = typeof rp.url === "string" && rp.url.trim() ? rp.url.trim() : defaultConfig().billing.remotePricing.url;
-        rp.hashUrl = typeof rp.hashUrl === "string" ? rp.hashUrl.trim() : "";
-        const hours = Number(rp.intervalHours);
-        rp.intervalHours = isFinite(hours) && hours >= 1 ? hours : 24;
-      } else {
-        merged.billing.remotePricing = defaultConfig().billing.remotePricing;
-      }
+      // 在线定价源归一化。v1.84 及更早是 newApi（两个预设共用一个开关）+ remotePricing（可填网址），
+      // 这里做一次性迁移：老 newApi 的开关/间隔同时落到 official 与 modelsdev，老 remotePricing 落到 remote；
+      // 老配置里的 baseUrl / token / group / url 一律丢弃（链接已内置）
+      const savedBilling = (parsed && parsed.billing) || {};
+      const legacyNa = savedBilling.newApi && typeof savedBilling.newApi === "object" ? savedBilling.newApi : null;
+      const legacyRp = savedBilling.remotePricing && typeof savedBilling.remotePricing === "object" ? savedBilling.remotePricing : null;
+      const savedSrc = savedBilling.sources && typeof savedBilling.sources === "object" ? savedBilling.sources : null;
+      const normSrc = (id, legacy) => {
+        const cur = savedSrc && savedSrc[id] && typeof savedSrc[id] === "object" ? savedSrc[id] : null;
+        const legacyHours = Number(legacy && legacy.intervalHours);
+        const hours = Number(cur && cur.intervalHours);
+        return {
+          enabled: cur && typeof cur.enabled === "boolean" ? cur.enabled : !!(legacy && legacy.enabled),
+          intervalHours: isFinite(hours) && hours >= 1
+            ? hours
+            : (isFinite(legacyHours) && legacyHours >= 1 ? legacyHours : 24),
+        };
+      };
+      merged.billing.sources = {
+        official: normSrc("official", legacyNa),
+        modelsdev: normSrc("modelsdev", legacyNa),
+        remote: normSrc("remote", legacyRp),
+      };
     }
     // 工具栏切换项显隐与排序：归一化 + 首次启动自动探测
     normalizeSourceVisibility(merged);

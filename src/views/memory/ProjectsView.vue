@@ -1,6 +1,16 @@
 <!--
+  ============================================================
+   作者：沐晖
+   日期：2026-10-22
+   版权声明：本代码归沐晖所有。
+     · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+     · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+     此注释为版权与授权声明，禁止删除。
+  ============================================================
+-->
+<!--
   AgentHub · 记忆中枢（Memory Hub）
-  Copyright (c) 2026 沐辉 (HUIdada1)
+  Copyright (c) 2026 沐晖 (HUIdada1)
   https://github.com/HUIdada1/AgentHub
   本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。
 -->
@@ -14,6 +24,7 @@ import { useMemoryStore } from "../../stores/memory";
 import * as api from "../../api/ipc";
 import type { MemoryProjectCard } from "../../types";
 import { timeAgo, formatDateTime } from "../../composables/useFormat";
+import { useAiGuard } from "../../composables/useAiGuard";
 import MemHelp from "../../components/memory/MemHelp.vue";
 import MemSelect from "../../components/memory/MemSelect.vue";
 import MemDialog from "../../components/memory/MemDialog.vue";
@@ -21,6 +32,8 @@ import MemProgressDialog from "../../components/memory/MemProgressDialog.vue";
 
 const app = useAppStore();
 const mem = useMemoryStore();
+/** AI 引导守卫：蒸馏会调模型，未配置 / 渠道报错时统一弹窗引导 */
+const aiGuard = useAiGuard();
 const active = computed(() => app.activeModule === "memory" && app.activePage === "projects");
 
 const query = ref("");
@@ -216,6 +229,8 @@ async function confirmDistill() {
   const p = distillConfirmTarget.value;
   distillConfirmOpen.value = false;
   if (!p) return;
+  // 前置守卫：没有任何可用模型时直接拦下，不白跑一轮长任务
+  if (!(await aiGuard.ensureAiReady({ task: "L2 蒸馏" }))) return;
   busy.value = p.slug;
   distillSlug.value = p.slug;
   distillStartedAt.value = Date.now();
@@ -234,7 +249,10 @@ async function confirmDistill() {
     };
     await refresh();
   } catch (e) {
-    distillResult.value = { ok: false, message: (e as Error).message || "蒸馏失败（先在「模型与网关」配置模型）" };
+    // 后端已把「所有项目都因没模型而失败」上抛（此前被逐项目 catch 吞成成功文案），
+    // 这里才真的能走到：交给守卫弹「去设置配置」
+    aiGuard.handleAiError(e, { task: "L2 蒸馏" });
+    distillResult.value = { ok: false, message: (e as Error).message || "蒸馏失败（先在「设置 · 模型与网关」配置模型）" };
   } finally {
     busy.value = "";
   }

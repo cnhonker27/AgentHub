@@ -1,6 +1,16 @@
 /**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
+/**
  * AgentHub · 记忆中枢（Memory Hub）
- * Copyright (c) 2026 沐辉 (HUIdada1)
+ * Copyright (c) 2026 沐晖 (HUIdada1)
  * https://github.com/HUIdada1/AgentHub
  * 本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。
  */
@@ -86,6 +96,8 @@ class AgentAccess {
     const steps = [];
     if (adapter.format === "toml-mcp_servers") {
       steps.push(inject.injectTomlConfig(adapter, cmd.command, cmd.args, cmd.env));
+    } else if (adapter.format === "yml-cordis-patch") {
+      steps.push(inject.injectCordisPatch(adapter, cmd.command, cmd.args, cmd.env));
     } else {
       steps.push(inject.injectJsonConfig(adapter, cmd.command, cmd.args, cmd.env));
     }
@@ -109,6 +121,7 @@ class AgentAccess {
     if (!adapter) return { ok: false, message: `未知 Agent：${id}` };
     const steps = [];
     if (adapter.format === "toml-mcp_servers") steps.push(inject.uninjectTomlConfig(adapter));
+    else if (adapter.format === "yml-cordis-patch") steps.push(inject.uninjectCordisPatch(adapter));
     else steps.push(inject.uninjectJsonConfig(adapter));
     if (adapter.instruction && adapter.instruction.path) steps.push(inject.removeBlock(adapter.instruction.path));
     // 与 injectOne 同口径：!s.ok（s.ok === false 会漏掉 ok 为 undefined 的步骤）
@@ -159,10 +172,43 @@ class AgentAccess {
     };
   }
 
+  /**
+   * 保存前的内容-格式一致性探测：能读到文件时，校验所选格式与文件实际形态是否一致——
+   * 不一致直接拦住（注入会按所选格式写文件，选错会写坏配置）；读不到（文件还不存在/无权限）
+   * 不阻断，允许「先配路径、后建文件」。判别要区分 TOML 表头 [xxx] 与 JSON 数组 [{/["
+   */
+  probeFormatMismatch(file, format) {
+    let head = "";
+    try {
+      const fd = fs.openSync(file, "r");
+      const buf = Buffer.alloc(4096);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      fs.closeSync(fd);
+      head = buf.toString("utf8", 0, n);
+    } catch {
+      return null;
+    }
+    const trimmed = head.replace(/^\uFEFF/, "").trimStart();
+    if (!trimmed) return null;
+    const looksJson = trimmed.startsWith("{") || /^\[\s*[{["]/.test(trimmed);
+    const looksToml = /^(\[[^\]]*\]|[A-Za-z0-9_.\-"']+\s*=)/.test(trimmed);
+    const wantJson = String(format || "").startsWith("json");
+    const wantToml = String(format || "").startsWith("toml");
+    if (wantJson && looksToml && !looksJson) {
+      return "这个文件看起来是 TOML 格式（以 [ 表头或 key = 开头），但所选格式是 JSON——请改选格式，否则注入会写坏配置文件";
+    }
+    if (wantToml && looksJson && !looksToml) {
+      return "这个文件看起来是 JSON 格式（以 { 开头），但所选格式是 TOML——请改选格式，否则注入会写坏配置文件";
+    }
+    return null;
+  }
+
   saveCustom(list, entry, cfgAgents) {
     if (!entry || !entry.name || !entry.path) return { ok: false, message: "自定义 Agent 需要名称与配置文件路径" };
     if (!inHome(entry.path)) return { ok: false, message: "配置文件路径必须位于用户主目录内" };
     if (entry.instructionPath && !inHome(entry.instructionPath)) return { ok: false, message: "指令文件路径必须位于用户主目录内" };
+    const mismatch = this.probeFormatMismatch(entry.path, entry.format);
+    if (mismatch) return { ok: false, message: mismatch };
     // 同毫秒连点保存会撞 id（第二个覆盖第一个）：加随机后缀保证唯一
     const id = entry.id || `custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     const next = (Array.isArray(list) ? list : []).filter((x) => x.id !== id).concat([{

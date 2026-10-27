@@ -1,6 +1,16 @@
 /**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
+/**
  * AgentHub · 记忆中枢（Memory Hub）
- * Copyright (c) 2026 沐辉 (HUIdada1)
+ * Copyright (c) 2026 沐晖 (HUIdada1)
  * https://github.com/HUIdada1/AgentHub
  * 本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除声明。
  */
@@ -70,9 +80,11 @@ function tryMergeDailyFiles(localPath, remotePath) {
 }
 
 const PACK_NAME = "memory-latest.tar.gz";
-// 同步包绝对体积兜底（MB）：sync.packSizeLimitMB 未配置时生效。上传整包 readFileSync +
-// 下载 webdav.get 都是整体入内存，无上限的大包会把主进程 OOM（远端侧同样无大小回调）
-const HARD_LIMIT_MB = 512;
+// 同步包绝对体积兜底（MB）：sync.packSizeLimitMB 未配置时生效。
+// 上传（readFileSync + fetch body）与下载（arrayBuffer）都是整体入内存，内存峰值约为包体的 2~3 倍，
+// 故上限按「普通机器可承受」取值：256MB 包对应峰值约 0.5~0.8GB。超过即中止并给出可操作提示；
+// 下载侧另有响应头护栏（webdav.cjs / s3.cjs 的 getDav/get，同值 512MB 为最后一道）。
+const HARD_LIMIT_MB = 256;
 const STAGE_LABEL = {
   idle: "空闲",
   connect: "连接服务器",

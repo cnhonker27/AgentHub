@@ -1,6 +1,16 @@
-<!-- 左栏双卡片：上 = 品牌 + 四大模块切换；下 = 当前模块的总览概况
+<!--
+  ============================================================
+   作者：沐晖
+   日期：2026-10-22
+   版权声明：本代码归沐晖所有。
+     · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+     · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+     此注释为版权与授权声明，禁止删除。
+  ============================================================
+-->
+<!-- 左栏三卡片：上 = 品牌；中 = 四大模块切换（独立卡片，可纵向滚动）；下 = 当前模块的总览概况
      概况数据全部来自真实统计：skills 走轻量 IPC（skills_side_stats）、sync 走 usage store、
-     proxy 走号池/Keys/网关状态、memory 走记忆中枢统计 IPC；模块顺序自定义在「设置 · 通用」
+     proxy 走号池账号与余额统计、memory 走记忆中枢统计 IPC；模块顺序自定义在「设置 · 通用」
      版本 / 署名 / GitHub / 亮暗 / 设置入口统一收在最左下角 -->
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
@@ -18,20 +28,39 @@ import type { ModuleKey } from "../types";
 import * as api from "../api/ipc";
 import { coalesceAsync } from "../utils/timing";
 import ProxyUpstreamDialog from "./ProxyUpstreamDialog.vue";
-import logoUrl from "../assets/logo.png";
 
 const app = useAppStore();
 const memStore = useMemoryStore();
 const usageApp = useSyncStore();
 const usage = useUsageStore();
 
+// ===== 外置插件入口 =====
+/** 插件卡统一排在所有内置大板块之后（新装插件只会往下加，不插进大板块中间）；
+ *  只要 manifest 声明了 sidebar（label 用作显示名）就出卡片，与安装先后无关 */
+const pluginsTail = computed(() => app.plugins.filter((p) => p.installed && !p.invalid && p.sidebar));
+
+/** 打开插件：优先内嵌到主区域；插件声明不内嵌或取地址失败时回落独立窗口 */
+async function openPlugin(id: string) {
+  const e = await app.openPluginView(id);
+  if (e && e.ok) return;
+  try {
+    const r = await api.pluginOpen(id);
+    if (!r || !r.ok) {
+      ElMessageBox.alert((r && r.message) || (e && e.message) || "插件启动失败", "外置插件");
+      return;
+    }
+  } finally {
+    app.refreshPlugins();
+  }
+}
+
 // 事件合流：poolsync/credits、memory 写入/索引等事件密集到达时，
 // 侧栏卡片的刷新被合并成有节制的几次，不再逐事件打 IPC（事件风暴 → IPC 风暴）
 const scheduleProxyRefresh = coalesceAsync(() => Promise.all([refreshProxyMeta(), refreshChannels()]), 800);
 const scheduleMemoryRefresh = coalesceAsync(refreshMemoryStats, 800);
+// 提示词库的库变更 / 同步进度事件同样密集（一次同步会连发多条 sync-stage），与记忆中枢同款合流
+const schedulePromptsRefresh = coalesceAsync(refreshPromptsStats, 800);
 
-// 版本号从主进程取（浏览器预览时 mock 返回 0.1.0）
-const version = ref("v0.1.0");
 // 板块启用态（issue #91）：停用板块的统计 IPC 一律不打（后台已停，打了也没意义）
 function modOn(k: string) {
   const mods = app.config.modules as Partial<Record<string, { enabled: boolean }>> | undefined;
@@ -43,19 +72,11 @@ function refreshStatsForEnabled(only?: string) {
   if (want("proxy") && modOn("proxy")) { refreshProxyMeta(); refreshChannels(); }
   if (want("skills") && modOn("skills")) refreshSkillsStats();
   if (want("memory") && modOn("memory")) refreshMemoryStats();
+  if (want("prompts") && modOn("prompts")) refreshPromptsStats();
   if (want("usage") && modOn("usage")) ensureUsageSummary();
-}
-/** 侧栏 GitHub 入口：交由主进程 shell.openExternal 用默认浏览器打开仓库 */
-function openRepo() {
-  api.openRepoPage().catch(() => {});
 }
 onMounted(async () => {
   refreshStatsForEnabled();
-  try {
-    version.value = "v" + (await api.getAppVersion());
-  } catch {
-    /* 取不到就用默认 */
-  }
   // 网关启停/号池同步都经 app:event 广播：侧栏卡片只订阅不轮询。
   // 原来只在切模块时刷一次，本模块内点「启动服务」后卡片会一直停在「网关未启动」
   offProxyEvent = api.onUpdateEvent((e) => {
@@ -71,6 +92,8 @@ onMounted(async () => {
     }
     // 记忆中枢：写入 / 索引 / 桥状态变化时刷新侧栏卡片（实时条数）
     if (p.event === "memory") scheduleMemoryRefresh();
+    // 提示词库：库变更（增删改）与同步阶段事件都刷概况卡
+    if (p.event === "prompts") schedulePromptsRefresh();
   });
 });
 let offProxyEvent: (() => void) | undefined;
@@ -78,6 +101,7 @@ onUnmounted(() => {
   if (offProxyEvent) offProxyEvent();
   scheduleProxyRefresh.cancel();
   scheduleMemoryRefresh.cancel();
+  schedulePromptsRefresh.cancel();
 });
 // 切模块时刷新对应板块的实时统计（号池可能刚被同步 / 技能刚被收纳 / 用量刚落库）
 watch(
@@ -92,6 +116,8 @@ watch(
       ensureUsageSummary(true);
     } else if (m === "memory") {
       refreshMemoryStats();
+    } else if (m === "prompts") {
+      refreshPromptsStats();
     }
   }
 );
@@ -106,14 +132,16 @@ async function refreshSkillsStats() {
   }
 }
 
-// ===== 反代网关 · 网关状态 + Key 数（真实） =====
-const proxyRunning = ref(false);
-const proxyKeyCount = ref(0);
+// ===== 号池管家 · 号池概况（账号数 / 在线可用 / 即将到期） =====
+const poolAccountCount = ref(0);
+const poolOnlineCount = ref(0);
+const poolExpiringCount = ref(0);
 async function refreshProxyMeta() {
   try {
     const st = await api.proxyStatus();
-    proxyRunning.value = !!st.running;
-    proxyKeyCount.value = st.keyCount ?? 0;
+    poolAccountCount.value = st.accountCount ?? 0;
+    poolOnlineCount.value = st.onlineCount ?? 0;
+    poolExpiringCount.value = st.expiringSoonCount ?? 0;
   } catch {
     /* 保留旧值 */
   }
@@ -164,6 +192,44 @@ function gotoMemory(page: string) {
   app.activePage = page;
 }
 
+// ===== 提示词库 · 真实概况（总量 / 本周新增 / 优化产出 / 冲突 / 同步状态） =====
+// 两个查询互不依赖，并发取回；同步状态失败只降级「同步」那一行，不影响条数行。
+// 冲突数取 stats.conflicts（后端按冲突队列实时算），与 syncStatus.pendingConflicts 同源，
+// 这里只认 stats 一份，避免两处数据不同步时卡片与页签红点对不上。
+const promptsStats = ref<api.PromptStats | null>(null);
+const promptsSync = ref<api.PromptSyncStatus | null>(null);
+async function refreshPromptsStats() {
+  try {
+    const [st, sync] = await Promise.all([
+      api.promptsStats(),
+      api.promptsSyncStatus().catch(() => null),
+    ]);
+    promptsStats.value = st?.stats ?? null;
+    promptsSync.value = sync?.status ?? null;
+  } catch {
+    /* 模块未启用 / 后端未注册 prompts 通道时保留旧值静默降级 */
+  }
+}
+
+/** 提示词库概况行点击：跳到对应页面（与记忆中枢 gotoMemory 同口径） */
+function gotoPrompts(page: string) {
+  if (app.activeModule !== "prompts" || app.settingsOpen) {
+    app.selectModule("prompts");
+    app.settingsOpen = false;
+  }
+  app.setPage(page);
+}
+
+/** 同步状态行文案：未配置 > 同步中 > 上次结果，三态互斥，避免同屏出现互相矛盾的两句话 */
+const promptsSyncText = computed(() => {
+  const s = promptsSync.value;
+  if (!s) return "同步状态未知";
+  if (!s.configured) return "未配置 WebDAV";
+  if (s.running) return s.stageLabel || "同步中";
+  if (s.lastError) return `上次失败：${s.lastError}`;
+  return s.lastSyncAt ? `上次同步 ${timeAgo(s.lastSyncAt)}` : "尚未同步过";
+});
+
 // ===== 用量统计 · 今日费用 / tokens（真实；summary 已由总览页加载过则直接复用） =====
 async function ensureUsageSummary(force = false) {
   if (!force && usage.summary) return;
@@ -201,12 +267,12 @@ const MODULE_META = computed<Record<ModuleKey, { state: string; level: "ok" | "w
       stats: syncStats,
     },
     proxy: {
-      state: proxyRunning.value ? "网关运行中" : "网关未启动",
-      level: proxyRunning.value ? "ok" : "warn",
+      state: poolAccountCount.value ? `${poolOnlineCount.value}/${poolAccountCount.value} 个账号可用` : "尚未接入账号",
+      level: poolOnlineCount.value > 0 ? "ok" : "warn",
       stats: [
-        { v: String(app.config.proxy.port), label: "端口" },
-        { v: String(proxyKeyCount.value), label: "Key", unit: "个" },
-        { v: channels.value.length ? String(channels.value.length) : "-", label: "已启用上游", unit: "个" },
+        { v: String(poolAccountCount.value), label: "账号", unit: "个" },
+        { v: String(poolOnlineCount.value), label: "在线", unit: "个" },
+        { v: String(poolExpiringCount.value), label: "即将到期", unit: "个" },
       ],
     },
     memory: {
@@ -224,10 +290,24 @@ const MODULE_META = computed<Record<ModuleKey, { state: string; level: "ok" | "w
         { v: memoryOverview.value ? String(memoryOverview.value.l2) : "-", label: "深层记忆", unit: "条" },
       ],
     },
+    prompts: {
+      // 有冲突待裁决时优先把它顶到状态位（和技能仓库的「N 冲突待裁决」同款口径）
+      state: !promptsStats.value
+        ? "未就绪"
+        : promptsStats.value.conflicts > 0
+          ? `${promptsStats.value.conflicts} 冲突待裁决`
+          : "运行中",
+      level: promptsStats.value && promptsStats.value.conflicts > 0 ? "warn" : "ok",
+      stats: [
+        { v: promptsStats.value ? String(promptsStats.value.total) : "-", label: "总量", unit: "条" },
+        { v: promptsStats.value ? String(promptsStats.value.week) : "-", label: "本周新增", unit: "条" },
+        { v: promptsStats.value ? String(promptsStats.value.conflicts) : "-", label: "冲突", unit: "个" },
+      ],
+    },
   };
 });
 
-// 反代网关 · 渠道额度（真实数据：号池各渠道的积分余量与可用账号；渠道增减自动跟进）
+// 号池管家 · 渠道额度（真实数据：号池各渠道的积分余量与可用账号；渠道增减自动跟进）
 type ProxyChannelRow = {
   id: string;
   display: string;
@@ -250,7 +330,7 @@ const fmtDay = (ts: number) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 };
 
-// 上游启闭弹窗（渠道级开关：关闭的渠道在反代网关全部页面动态隐藏）
+// 上游启闭弹窗（渠道级开关：关闭的渠道在号池管家全部页面动态隐藏）
 const upOpen = ref(false);
 
 // 模块图标（线稿 path，复刻 design.html）
@@ -260,6 +340,8 @@ const MODULE_ICONS: Record<ModuleKey, string> = {
   proxy: '<path d="M4 17l6-6-6-6"/><path d="M12 19h8"/>',
   // 记忆中枢：脑/记忆背包（同款线稿：外轮廓 + 内部层线）
   memory: '<path d="M12 3a6 6 0 0 0-6 6v9a3 3 0 0 0 3 3h9a3 3 0 0 0 3-3V9a6 6 0 0 0-6-6z"/><path d="M9 10h6M9 14h6"/>',
+  // 提示词库：对话气泡 + 光标（线稿风格与其余四个一致，笔画粗细由外层 svg 的 stroke-width 统一给）
+  prompts: '<path d="M20 12a7 7 0 0 1-7 7H8l-4 3v-5.5A7 7 0 0 1 11 5h2a7 7 0 0 1 7 7z"/><path d="M9 11h6M9 14.5h3.5"/>',
 };
 
 // ===== 下卡片：模块总览概况（标题 / 提示全部接真实统计） =====
@@ -273,6 +355,10 @@ const OVERVIEW = computed<Record<ModuleKey, { title: string; hint: string }>>(()
   memory: {
     title: "记忆概况",
     hint: memoryOverview.value ? `${memoryOverview.value.total} 条记忆` : "记忆中枢",
+  },
+  prompts: {
+    title: "提示词概况",
+    hint: promptsStats.value ? `${promptsStats.value.total} 条提示词` : "提示词库",
   },
 }));
 
@@ -362,62 +448,69 @@ const TOOLS = computed<{ name: string; meta: string; label: string; ok: boolean 
 
 <template>
   <aside class="side-col">
-    <!-- 上卡片：品牌 + 模块切换 -->
+    <!-- 卡片 1：板块切换（模块/插件变多时卡内纵向滚动，滚动条走主题绿） -->
     <div class="side glass">
-      <div class="brand">
-        <img class="brand-mark" :src="logoUrl" alt="AgentHub" />
-        <div class="brand-txt">
-          <div class="brand-name">AgentHub</div>
-          <div class="brand-sub">Agent中控台</div>
-        </div>
-      </div>
-
       <nav class="modules">
+        <template v-for="mod in app.orderedModules" :key="mod.key">
+          <div
+            class="module-card"
+            :class="{ active: app.activeModule === mod.key, disabled: !mod.enabled }"
+            :aria-disabled="!mod.enabled"
+            @click="app.selectModule(mod.key)"
+          >
+            <span v-if="!mod.enabled" class="mc-off">已停用</span>
+            <span class="mc-state" :class="MODULE_META[mod.key].level === 'warn' ? 'st-warn' : 'st-ok'">
+              <i class="mc-dot"></i>{{ MODULE_META[mod.key].state }}
+            </span>
+            <div class="mc-top">
+              <div class="mc-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" v-html="MODULE_ICONS[mod.key]"></svg>
+              </div>
+              <div class="mc-name">{{ mod.name }}</div>
+            </div>
+            <div class="mc-stats">
+              <div v-for="s in MODULE_META[mod.key].stats" :key="s.label" class="mc-stat">
+                <b>{{ s.v }}<span v-if="s.unit" class="mc-unit">{{ s.unit }}</span></b><span>{{ s.label }}</span>
+              </div>
+              <!-- 上游启闭（仅号池管家卡）：渠道级开关入口，弹窗内各渠道图标 + 名称 + 开关 -->
+              <el-tooltip v-if="mod.key === 'proxy'" content="上游启闭：控制各渠道在号池管家中的启用与可见" placement="top">
+                <button class="mc-up-btn" @click.stop="upOpen = true">
+                  <i class="ph ph-plugs-connected"></i>上游启闭
+                </button>
+              </el-tooltip>
+            </div>
+          </div>
+
+        </template>
+
+        <!-- 外置插件入口：统一排在所有内置大板块之后（往下排），新装插件只往下加，不插进大板块中间 -->
         <div
-          v-for="mod in app.orderedModules"
-          :key="mod.key"
-          class="module-card"
-          :class="{ active: app.activeModule === mod.key, disabled: !mod.enabled }"
-          :aria-disabled="!mod.enabled"
-          @click="app.selectModule(mod.key)"
+          v-for="p in pluginsTail"
+          :key="p.id"
+          class="module-card plugin-card"
+          :class="{ active: app.pluginView && app.pluginView.id === p.id }"
+          @click="openPlugin(p.id)"
         >
-          <span v-if="!mod.enabled" class="mc-off">已停用</span>
-          <span class="mc-state" :class="MODULE_META[mod.key].level === 'warn' ? 'st-warn' : 'st-ok'">
-            <i class="mc-dot"></i>{{ MODULE_META[mod.key].state }}
+          <span class="mc-state" :class="p.running ? 'st-ok' : 'st-warn'">
+            <i class="mc-dot"></i>{{ p.running ? "运行中" : "已停止" }}
           </span>
           <div class="mc-top">
             <div class="mc-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" v-html="MODULE_ICONS[mod.key]"></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9 3v4M15 3v4M5 7h14v6a7 7 0 0 1-7 7 7 7 0 0 1-7-7V7Z" />
+              </svg>
             </div>
-            <div class="mc-name">{{ mod.name }}</div>
-            <el-tooltip
-              v-if="mod.key === 'proxy'"
-              placement="right-start"
-              :show-after="120"
-              popper-class="glass-popper qa-tip"
-            >
-              <template #content>
-                本反向代理网关仅作技术测试用途。上游站点监控策略严格，服务存在更新滞后、随时失效、访问不稳定等情况，不保证持续可用，请谨慎使用，请勿用于违规场景。
-              </template>
-              <i class="mc-qa ph ph-question" @click.stop></i>
-            </el-tooltip>
+            <div class="mc-name">{{ p.sidebar?.label || p.name }}</div>
           </div>
-          <div class="mc-stats">
-            <div v-for="s in MODULE_META[mod.key].stats" :key="s.label" class="mc-stat">
-              <b>{{ s.v }}<span v-if="s.unit" class="mc-unit">{{ s.unit }}</span></b><span>{{ s.label }}</span>
-            </div>
-            <!-- 上游启闭（仅反代网关卡）：渠道级开关入口，弹窗内各渠道图标 + 名称 + 开关 -->
-            <el-tooltip v-if="mod.key === 'proxy'" content="上游启闭：控制各渠道在反代网关中的启用与可见" placement="top">
-              <button class="mc-up-btn" @click.stop="upOpen = true">
-                <i class="ph ph-plugs-connected"></i>上游启闭
-              </button>
-            </el-tooltip>
+          <div class="pc-meta">
+            <span class="pc-tag">插件</span>
+            <span class="pc-ver">v{{ p.version }}</span>
           </div>
         </div>
       </nav>
     </div>
 
-    <!-- 下卡片：当前模块的总览概况 + 左下角全局操作 -->
+    <!-- 卡片 3：当前模块的总览概况 + 左下角全局操作 -->
     <div class="side-overview glass">
       <div class="ov-head">
         <span class="ov-title">{{ OVERVIEW[app.activeModule].title }}</span>
@@ -561,7 +654,53 @@ const TOOLS = computed<{ name: string; meta: string; label: string; ok: boolean 
           </div>
         </template>
 
-        <!-- 反代网关：渠道额度（号池实时数据，渠道增减自动跟进） -->
+        <!-- 提示词库：概况（总量 / 本周新增与优化产出 / 同步状态；三行都可点跳对应页面） -->
+        <template v-else-if="app.activeModule === 'prompts'">
+          <template v-if="promptsStats">
+            <el-tooltip content="点击查看个人提示词库" placement="right">
+              <div class="ov-row ov-pick" @click="gotoPrompts('library')">
+                <span class="ov-dot"></span>
+                <div class="grow">
+                  <div class="ov-name">提示词总量<span class="ov-tag">收藏 {{ formatInteger(promptsStats.favorited) }} 条</span></div>
+                  <div class="ov-meta">今日新增 {{ formatInteger(promptsStats.today) }} 条 · 回收站 {{ formatInteger(promptsStats.trash) }} 条</div>
+                </div>
+                <b class="ov-num">{{ formatInteger(promptsStats.total) }}<span class="ov-unit">条</span></b>
+              </div>
+            </el-tooltip>
+
+            <el-tooltip content="点击去优化提示词" placement="right">
+              <div class="ov-row ov-pick" @click="gotoPrompts('optimize')">
+                <span class="ov-dot"></span>
+                <div class="grow">
+                  <div class="ov-name">本周新增</div>
+                  <div class="ov-meta">其中优化产出 {{ formatInteger(promptsStats.optimized) }} 条</div>
+                </div>
+                <b class="ov-num">{{ formatInteger(promptsStats.week) }}<span class="ov-unit">条</span></b>
+              </div>
+            </el-tooltip>
+
+            <el-tooltip content="点击进入 WebDAV 同步与冲突裁决" placement="right">
+              <div class="ov-row ov-pick" @click="gotoPrompts('sync')">
+                <span class="ov-dot" :class="promptsStats.conflicts ? 'warn-dot' : promptsSync && !promptsSync.configured ? 'off' : ''"></span>
+                <div class="grow">
+                  <div class="ov-name">
+                    WebDAV 同步
+                    <span v-if="promptsStats.conflicts" class="ov-tag warn">需裁决</span>
+                  </div>
+                  <div class="ov-meta">{{ promptsSyncText }}</div>
+                </div>
+                <el-tag :type="promptsStats.conflicts ? 'warning' : promptsSync?.configured ? 'success' : 'info'">
+                  {{ promptsStats.conflicts ? `${formatInteger(promptsStats.conflicts)} 冲突` : promptsSync?.configured ? "已就绪" : "未配置" }}
+                </el-tag>
+              </div>
+            </el-tooltip>
+          </template>
+          <div v-else class="ov-row">
+            <div class="grow"><div class="ov-meta">提示词库加载中…（未启用时可在「设置 · 通用」或配置页开启）</div></div>
+          </div>
+        </template>
+
+        <!-- 号池管家：渠道额度（号池实时数据，渠道增减自动跟进） -->
         <template v-else>
           <div v-for="c in visibleChannels" :key="c.id" class="ov-row">
             <div class="grow">
@@ -579,44 +718,16 @@ const TOOLS = computed<{ name: string; meta: string; label: string; ok: boolean 
           </div>
         </template>
       </div>
-
-      <!-- 左下角全局操作：版本 / 署名 / GitHub / 亮暗 / 设置 -->
-      <div class="side-foot">
-        <div class="foot-meta">
-          <div class="foot-ver">{{ version }}</div>
-          <el-tooltip content="作者" placement="top">
-            <div class="foot-author"><i class="ph ph-user"></i><b>沐辉</b></div>
-          </el-tooltip>
-        </div>
-        <el-tooltip content="Star 支持" placement="top">
-          <button class="btn btn-ghost" @click="openRepo()">
-            <i class="ph ph-github-logo"></i>
-          </button>
-        </el-tooltip>
-        <el-tooltip content="切换亮暗主题" placement="top">
-          <button class="btn btn-ghost" @click="app.toggleTheme()">
-            <i class="ph" :class="app.isDark ? 'ph-moon' : 'ph-sun'"></i>
-          </button>
-        </el-tooltip>
-        <!-- 红点用 .dot-host 承载定位，避免按钮溢出裁剪 -->
-        <span class="dot-host">
-          <el-tooltip content="设置" placement="top">
-            <button class="btn btn-ghost settings-btn" @click="app.openSettings('general')">
-              <i class="ph ph-gear-six"></i>
-            </button>
-          </el-tooltip>
-          <span v-if="app.updateAvailable" class="dot-ping"></span>
-        </span>
-      </div>
     </div>
 
-    <!-- 上游启闭弹窗（渠道级开关）：关闭的渠道在反代网关全部页面动态隐藏，重新打开立即恢复 -->
+    <!-- 上游启闭弹窗（渠道级开关）：关闭的渠道在号池管家全部页面动态隐藏，重新打开立即恢复 -->
     <ProxyUpstreamDialog :open="upOpen" @close="upOpen = false" />
   </aside>
 </template>
 
 <style scoped>
-/* 左栏外层：上下双卡片列。极矮窗口（浏览器预览等无缩放兜底时）整体可滚 */
+/* 左栏外层：品牌已上移到顶部通栏（AppTopBar.vue），这里只剩「板块切换 + 概况」两张卡。
+   极矮窗口（浏览器预览等无缩放兜底时）整列可滚 */
 .side-col {
   grid-area: side;
   display: flex;
@@ -624,56 +735,29 @@ const TOOLS = computed<{ name: string; meta: string; label: string; ok: boolean 
   gap: var(--gap-shell);
   min-height: 0;
   overflow-y: auto;
+  /* 只允许纵向滚：任何横向溢出都直接裁掉，别出现横向滚动条 */
+  overflow-x: hidden;
 }
 .side-col::-webkit-scrollbar {
   width: 4px;
 }
 
-/* ===== 上卡片：品牌 + 模块切换 ===== */
+/* ===== 卡片 1：板块切换（内容自然高度；超出「五板块」才卡内纵向滚动） ===== */
 .side {
   border-radius: var(--r-panel);
   display: flex;
   flex-direction: column;
-  padding: 18px 12px 12px;
+  padding: 10px;
   overflow: hidden;
-  flex-shrink: 0;
-}
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 8px 16px;
-}
-.brand-mark {
-  width: 33px;
-  height: 33px;
-  border-radius: var(--r-sm);
-  flex-shrink: 0;
-  object-fit: cover;
-  display: block;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
-}
-.brand-txt {
-  flex: 1;
-  line-height: 1.2;
-}
-.brand-name {
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: -0.2px;
-}
-.brand-sub {
-  font-size: 10.5px;
-  color: var(--text-3);
-  margin-top: 1px;
-}
-/* 左下角的图标按钮用项目统一按钮（.btn.btn-ghost），这里只管图标字号与呼吸间距 */
-.side-foot .ph {
-  font-size: 15px;
-}
-/* 设置齿轮：承载「有更新」红点的定位上下文（红点样式见 global.css 的 .dot-ping） */
-.side-foot .settings-btn {
-  position: relative;
+  /* 高度不写死：5 个板块时取内容自然高度——整倍缩放下的亚像素取整、字体渲染差都会让
+     实际高度比 5×88 的精确算式多出 1~2px，写死高度正好放不下就冒滚动条。
+     这里只设上限（按单卡 90 留足余量）：内容超出（装插件后追加插件卡、窄栏下
+     「上游启闭」按钮换行把卡片涨到 117）才限高，交给 .modules 自己滚 */
+  height: auto;
+  max-height: calc(5 * 90px + 4 * 6px + 20px);
+  /* 窗口太矮时允许被压缩，压缩后同样交给 .modules 滚，不把下面的概况卡挤没 */
+  flex: 0 1 auto;
+  min-height: 104px;
 }
 
 /* 模块卡片（顺序自定义入口在「设置 · 通用」，支持拖拽排序） */
@@ -681,7 +765,28 @@ const TOOLS = computed<{ name: string; meta: string; label: string; ok: boolean 
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin-top: 6px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* 只纵向滚：模块卡里任何横向溢出都不许变成横向滚动条 */
+  overflow-x: hidden;
+  /* 滚到底不再带动外层左栏一起滚，卡片内滚动更稳 */
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
+/* 卡内滚动条：主题绿（滑块 accent-line，悬停点亮为 accent），宽度收窄贴合卡片 */
+.modules::-webkit-scrollbar {
+  width: 5px;
+}
+.modules::-webkit-scrollbar-track {
+  background: transparent;
+}
+.modules::-webkit-scrollbar-thumb {
+  background: var(--accent-line);
+  border-radius: var(--r-pill);
+}
+.modules::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
 }
 .module-card {
   border-radius: var(--r-ctl);
@@ -701,6 +806,37 @@ const TOOLS = computed<{ name: string; meta: string; label: string; ok: boolean 
 .module-card.disabled:hover { background: rgba(255, 255, 255, 0.025); }
 .module-card.disabled:active { transform: none; }
 .module-card.disabled::after { display: none; }
+/* 外置插件卡：虚线描边与内置模块区分；未安装时整块不存在 */
+.plugin-card {
+  border-style: dashed;
+  border-color: var(--line-strong);
+}
+.plugin-card:hover { border-color: var(--accent); }
+.plugin-card .mc-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pc-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding-left: 35px;
+}
+.pc-tag {
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-3);
+  background: var(--surface-3);
+  border-radius: 4px;
+  padding: 2px 5px;
+}
+.pc-ver {
+  font-size: 9px;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+}
 .mc-off {
   position: absolute;
   top: 6px;
@@ -802,29 +938,6 @@ const TOOLS = computed<{ name: string; meta: string; label: string; ok: boolean 
   font-weight: 600;
   font-size: 12.5px;
 }
-/* 反代网关免责问号：红色的问号小图标，缓慢呼吸式闪动提醒，悬停停住并高亮（弹层样式见 element.css 的 .qa-tip） */
-.mc-qa {
-  font-size: 12px;
-  color: var(--danger, #f26d6d);
-  cursor: help;
-  flex-shrink: 0;
-  margin-left: -3px;
-  animation: mc-qa-blink 2.6s ease-in-out infinite;
-}
-.mc-qa:hover {
-  animation-play-state: paused;
-  opacity: 1;
-  color: #ff4d4f;
-}
-@keyframes mc-qa-blink {
-  0%,
-  100% {
-    opacity: 0.6;
-  }
-  50% {
-    opacity: 1;
-  }
-}
 .mc-stats {
   display: flex;
   flex-wrap: wrap; /* 挤不下时「上游启闭」按钮换行右对齐，数字不被压缩 */
@@ -850,7 +963,7 @@ const TOOLS = computed<{ name: string; meta: string; label: string; ok: boolean 
   font-size: 9px;
   color: var(--text-3);
 }
-/* 上游启闭小按钮（仅反代网关卡）：绿色描边常态，悬停点亮加深，与免责问号同色系 */
+/* 上游启闭小按钮（仅号池管家卡）：绿色描边常态，悬停点亮加深，与免责问号同色系 */
 .mc-up-btn {
   margin-left: auto;
   display: inline-flex;
@@ -929,55 +1042,24 @@ const TOOLS = computed<{ name: string; meta: string; label: string; ok: boolean 
   background: var(--warn-dim);
 }
 
-/* 左下角全局操作条（概况卡底部，常驻可见） */
-.side-foot {
-  margin-top: 8px;
-  border-top: 1px solid var(--line);
-  padding: 10px 4px 2px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-}
-.foot-meta {
-  line-height: 1.4;
-  flex: 1;
-}
-.foot-ver {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-2);
-}
-.foot-author {
-  font-size: 10px;
-  color: var(--text-3);
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.foot-author .ph {
-  font-size: 11px;
-}
-.foot-author b {
-  color: var(--text-2);
-  font-weight: 600;
-}
+/* 左下角全局操作条（版本 / 作者 / Star / 亮暗 / 设置）已整体移到右上横条，
+   见 TopBarActions.vue；这里不再保留对应样式，恢复时从那个组件搬回来即可 */
 
 /* ===== 下卡片：模块总览概况 ===== */
 .side-overview {
   flex: 1;
-  /* 高度下限：保证标题 / 底部操作条常驻，再矮就交给 side-col 滚动 */
-  min-height: 150px;
+  /* 高度下限：保证标题 + 几行概况常驻，再矮就交给 side-col 滚动 */
+  min-height: 128px;
   border-radius: var(--r-panel);
   display: flex;
   flex-direction: column;
-  padding: 12px 12px 10px;
+  padding: 10px 10px 8px;
   overflow: hidden;
 }
 .ov-head {
   display: flex;
   align-items: center;
-  padding: 2px 8px 8px;
+  padding: 2px 6px 6px;
   flex-shrink: 0;
 }
 .ov-title {
@@ -1007,7 +1089,7 @@ const TOOLS = computed<{ name: string; meta: string; label: string; ok: boolean 
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 8px;
+  padding: 7px 8px;
   border-radius: var(--r-sm);
   font-size: 12px;
 }

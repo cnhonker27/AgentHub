@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 反代网关 · 出线侧：OpenAI Chat Completions 协议
 //
 // 本文件只做一件事：把调度核心交出来的一串事件（delta / usage / finish / error）写成客户端听得懂的字节。
@@ -25,7 +35,7 @@ const REASON_BATCH_MS = 120;
  */
 function create(ctx) {
   const { res, reqId, requestedModel, wantStream } = ctx;
-  // 断连只停写、不中止上游：上游继续消费到 EOF 才能把 usage 记全（方案 §2.2）。
+  // 断连只停写、不中止上游：上游继续消费到 EOF 才能把 usage 记全。
   // 判据是 res 的 close 而不是 req 的——Node 18+ 下请求体读完后 req close 就可能先触发
   let clientGone = false;
   res.on("close", () => { clientGone = true; });
@@ -117,7 +127,7 @@ function create(ctx) {
       return true;
     },
 
-    /** 静默期保活字节（防中间层回收，方案 §2.2 联调坑） */
+    /** 静默期保活字节（防中间层回收，联调坑） */
     keepAlive() {
       if (wantStream) write(": keep-alive\n\n");
     },

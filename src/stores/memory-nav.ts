@@ -1,9 +1,19 @@
 /**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
+/**
  * 记忆中枢 · 纯函数导航与跨 Tab 状态推导模块
  * 零 Vue/Pinia 依赖，完全可在纯 Node 环境下单元测试
  */
 
-export type MemPage = "dashboard" | "browse" | "projects" | "profile" | "agents" | "index" | "auto" | "import" | "sync";
+export type MemPage = "dashboard" | "browse" | "projects" | "profile" | "hub" | "agents" | "index" | "auto" | "import" | "sync";
 export type BrowseView = "list" | "heatmap" | "review" | "trash";
 export type ReviewKind = "supersede" | "classify" | "dedup";
 

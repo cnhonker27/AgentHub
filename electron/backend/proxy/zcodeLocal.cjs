@@ -1,6 +1,16 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 反代网关 · ZCode 本机文件与 enc:v1 加密（zcode 渠道的地基模块）
 //
-// 事实基线（本机实测 + 示例项目 zcode-account-switcher / zcode-switch 双重互证）：
+// 事实基线（本机实测 + 官方账号切换实现双重互证）：
 //   · 登录态由 ~/.zcode/v2/credentials.json 承载：平铺 map，值为 enc:v1 密文。
 //     关键键：zcodejwttoken（billing/claim/start-plan 对话的 Bearer，payload 无 exp）、
 //     oauth:active_provider（zai/bigmodel）、oauth:{p}:access_token / refresh_token / user_info、

@@ -326,16 +326,16 @@ const DISCLAIMER: { h: string; p: string[] }[] = [
   {
     h: "一、软件性质与用途",
     p: [
-      "AgentHub（以下简称「本软件」）是由作者「沐辉」开发并免费提供的开源工具，仅供技术交流、学习研究与个人合法使用。本软件不构成任何商业产品、服务或承诺，作者不提供任何形式的担保、技术支持义务或质量保证。",
+      "AgentHub（以下简称「本软件」）是由作者「沐晖」开发并免费提供的开源工具，仅供技术交流、学习研究与个人合法使用。本软件不构成任何商业产品、服务或承诺，作者不提供任何形式的担保、技术支持义务或质量保证。",
       "你在下载、安装、复制、修改或使用的任一时刻，即视为已阅读、理解并自愿接受本声明的全部内容；如不同意，请立即停止使用并删除本软件。",
     ],
   },
   {
     h: "二、账号与第三方平台风险",
     p: [
-      "本软件的「反代网关」等功能涉及将你本机已登录的第三方平台客户端（包括但不限于 Trae、WorkBuddy 等）的凭证用于本地 API 转发。此类使用方式可能违反相关平台的用户协议、服务条款或使用政策。",
-      "因使用本软件（包括反代、共享账号额度、调用第三方接口等）导致的账号被限制、冻结、停用、封禁，额度被清零，或被第三方平台追究任何责任等一切后果，均由使用者本人自行承担，作者概不负责。",
-      "请你务必自行评估风险，并优先使用你自己拥有合法权益的账号与额度；切勿将反代服务开放给不可信的网络环境或他人使用。",
+      "本软件的「号池管家」会读取你本机已登录的第三方平台客户端（包括但不限于 Trae、WorkBuddy 等）的凭证，用于余额查询、签到与号池管理等本地操作。此类使用方式可能违反相关平台的用户协议、服务条款或使用政策。",
+      "因使用本软件（包括共享账号额度、调用第三方接口等）导致的账号被限制、冻结、停用、封禁，额度被清零，或被第三方平台追究任何责任等一切后果，均由使用者本人自行承担，作者概不负责。",
+      "请你务必自行评估风险，并优先使用你自己拥有合法权益的账号与额度；切勿将号池凭据分享给不可信的网络环境或他人使用。",
     ],
   },
   {
@@ -647,7 +647,7 @@ onUnmounted(() => {
           <div class="set-desc">
             {{
               lightweightDisabledReason ||
-              "点关闭按钮时销毁界面进程，托盘与后台服务（反代网关 / 定时同步 / 记忆中枢）照常运行；实测省约 300 MB 内存，唤回时重新加载界面"
+              "点关闭按钮时销毁界面进程，托盘与后台服务（号池管家 / 定时同步 / 记忆中枢）照常运行；实测省约 300 MB 内存，唤回时重新加载界面"
             }}
           </div>
         </div>
@@ -732,7 +732,7 @@ onUnmounted(() => {
     <div class="card">
       <div class="set-row">
         <div class="set-info"><div class="set-name">版本</div></div>
-        <span class="num">{{ version }} · 作者 沐辉</span>
+        <span class="num">{{ version }} · 作者 沐晖</span>
       </div>
       <div class="set-row">
         <div class="set-info">
@@ -751,7 +751,7 @@ onUnmounted(() => {
       <div class="set-row">
         <div class="set-info">
           <div class="set-name">免责声明</div>
-          <div class="set-desc">本平台仅供交流学习使用；使用本平台（含反代网关等功能）产生的一切后果，作者概不负责</div>
+          <div class="set-desc">本平台仅供交流学习使用；使用本平台（含号池管家等功能）产生的一切后果，作者概不负责</div>
         </div>
         <button class="btn btn-ghost" @click="disclaimerOpen = true">查看声明</button>
       </div>
@@ -770,7 +770,7 @@ onUnmounted(() => {
           <h3>{{ sec.h }}</h3>
           <p v-for="(p, i) in sec.p" :key="i">{{ p }}</p>
         </section>
-        <div class="dc-foot">—— 作者：沐辉 · AgentHub</div>
+        <div class="dc-foot">—— 作者：沐晖 · AgentHub</div>
       </div>
       <template #footer>
         <button class="btn btn-cta" @click="disclaimerOpen = false">我已知晓</button>

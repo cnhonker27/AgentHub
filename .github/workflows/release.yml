@@ -1,7 +1,7 @@
 # 发布流水线：手动触发（workflow_dispatch）。
 # 不用 tag 触发的原因：tag 由 electron-builder --publish always 在发版时创建，
 # 本地 tag 与远端 Release 各自独立；手动触发可保证「版本号校验 → 构建 → 发布」顺序可控。
-# 客户端（安装版 electron-updater / 便携版 latest.yml 比对）发布后立即可见，发版不可撤回。
+# 客户端（安装版 electron-updater）发布后立即可见，发版不可撤回。
 name: Release
 
 on:
@@ -86,7 +86,7 @@ jobs:
         shell: bash
         run: |
           PKG_VERSION="$(node -p "require('./package.json').version")"
-          # 用带 tag 的直链（无 latest 路由索引延迟）；安装版与便携版的更新检查都依赖该资产
+          # 用带 tag 的直链（无 latest 路由索引延迟）；安装版的更新检查依赖该资产
           URL="https://github.com/HUIdada1/AgentHub/releases/download/v${PKG_VERSION}/latest.yml"
           for i in 1 2 3 4 5 6; do
             YML="$(curl -fsSL "$URL" 2>/dev/null || true)"

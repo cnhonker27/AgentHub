@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // S3 兼容对象存储传输层（issue #89）：与 webdav.cjs 同一组「按路径的文件级原语」，
 // 供 webdav.cjs 按 cfg.__s3 分派——四个同步引擎（技能/用量/号池/记忆）零改动。
 // 零 npm 依赖：AWS SigV4 手写签名（node:crypto），阿里云 OSS / 腾讯云 COS /
@@ -229,6 +239,12 @@ async function get(url, cfg) {
   if (!res.ok) {
     if (res.status === 403) throw new Error("GET 失败：HTTP 403，请检查 AccessKeyId / SecretKey 与桶权限");
     throw new Error(`GET 失败：HTTP ${res.status}`);
+  }
+  // 与 webdav.cjs getDav 同一道体积护栏（读取前按响应头判断，防远端异常大文件把主进程内存打爆）
+  const len = Number(res.headers.get("content-length") || 0);
+  const maxMB = Number(process.env.AGENTHUB_WEBDAV_MAX_DOWNLOAD_MB || 0) || 512;
+  if (len > maxMB * 1048576) {
+    throw new Error(`远端文件约 ${(len / 1048576).toFixed(1)}MB，超过单次下载上限 ${maxMB}MB，已中止（避免内存耗尽）`);
   }
   return Buffer.from(await res.arrayBuffer());
 }

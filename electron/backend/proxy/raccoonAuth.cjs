@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 反代网关 · 商汤小浣熊本地登录文件（~/.box-agent/config/auth.json）读写
 //
 // 这个文件是 AgentHub 号池与官方桌面客户端共用的凭据真身，双方各自维护一份内存态。
@@ -83,7 +93,7 @@ function writeTokens({ accessToken, refreshToken, officeIdentity } = {}) {
   if (accessToken) next.access_token = String(accessToken);
   if (refreshToken) next.refresh_token = String(refreshToken);
   if (officeIdentity) next.office_identity = String(officeIdentity);
-  // 临时文件带进程号（对齐参考 credentials.rs）：双方同时刷新不互踩
+  // 临时文件带进程号（对齐上游）：双方同时刷新不互踩
   // （固定名会让并发写一方把另一方的半成品 rename 走）
   const tmp = `${file}.agenthub-${process.pid}.tmp`;
   try {

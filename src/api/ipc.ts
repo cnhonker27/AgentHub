@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // IPC 封装：Electron 环境下通过 preload 桥接调用主进程；浏览器环境（npm run dev:web 预览 UI）
 // 回退到本地 mock。命令清单与 electron/preload.cjs 白名单、backend/ipc.cjs 一一对应
 import type {
@@ -10,9 +20,12 @@ import type {
   ProxyCheckinRow, CcSwitchStatus, CcSwitchRegisterResult, CcSwitchAppType, ZcodeDeviceStatusResult, ZcodeClaimModeResult,
   ProxyProvider, ProxyProviderKind, ProxyProviderModel, ProxyProviderTestResult,
   ProxyOpLogList,
+  ProxyNetProxyList, ProxyNetProxyItem, ProxyNetProxyTest, ProxyNetProxyMode,
   MemoryRow, MemoryDetail, MemoryStats, MemoryIndexStatus, MemoryTimelineNode, MemoryProjectCard,
   MemoryAgentCard, MemoryAgentVerify, MemoryBridgeStatus, MemoryConfigEnvelope, MemoryStatusEnvelope,
   MemoryToolRow,
+  PromptItem, PromptStyle, PromptHistoryItem, PromptSyncStatus, PromptConflict, PromptConflictDiff, PromptStats,
+  CatalogItem, CatalogItemDetail, CatalogTemplate, CatalogCategory, CatalogStats,
 } from "../types";
 
 export type {
@@ -24,15 +37,18 @@ export type {
   ProxyUsageRow, ProxyModel, ProxyScanCandidate, ProxyRuleFile, ProxyRoute, ProxyChannelId, ProxyPoolStrategy, ProxyCostTier,
   ProxyAccountStatus, ProxyEvent, ProxyCheckinRow, CcSwitchStatus, CcSwitchRegisterResult,
   ProxyOpLogList, ProxyOpLogRow,
+  ProxyNetProxyList, ProxyNetProxyItem, ProxyNetProxyTest, ProxyNetProxyMode,
   MemoryRow, MemoryDetail, MemoryStats, MemoryIndexStatus, MemoryTimelineNode, MemoryProjectCard,
   MemoryAgentCard, MemoryAgentVerify, MemoryBridgeStatus, MemoryConfigEnvelope, MemoryStatusEnvelope,
   MemoryToolRow, MemoryEvent,
+  PromptItem, PromptStyle, PromptHistoryItem, PromptSyncStatus, PromptConflict, PromptConflictDiff, PromptStats,
+  CatalogItem, CatalogItemDetail, CatalogTemplate, CatalogCategory, CatalogStats,
+  PromptsEvent,
 } from "../types";
 
 import { mock } from "./mock";
 import { denyReason, isWebTransport } from "./caps";
 import { subscribeWebEvents } from "./events";
-import { remoteActive } from "./remote";
 import { webInvoke } from "./web-transport";
 
 type InvokeFn = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -81,35 +97,23 @@ function invokeWithTimeout<T>(p: Promise<T>, cmd: string, timeoutMs: number): Pr
   });
 }
 
-/** 后端错误信封（{ok:false,message}）统一转异常：混进正常数据会把页面打花 */
+/** 后端错误信封（{ok:false,message,code?,tried?}）统一转异常：混进正常数据会把页面打花。
+ *  code / tried 必须挂到 Error 上：`no_model`（未配置模型）与「试过哪些模型」是引导弹窗的
+ *  判定依据——只留一句 message 时前端只能靠文案匹配猜原因，文案一改就失效。 */
 function unwrapResult<T>(cmd: string, res: unknown): T {
   if (res && typeof res === "object" && (res as { ok?: unknown }).ok === false) {
-    const msg = (res as { message?: unknown }).message;
-    throw new Error(typeof msg === "string" && msg ? msg : `命令 ${cmd} 执行失败`);
+    const env = res as { message?: unknown; code?: unknown; tried?: unknown };
+    const msg = env.message;
+    const err = new Error(typeof msg === "string" && msg ? msg : `命令 ${cmd} 执行失败`) as Error & { code?: string; tried?: string[] };
+    if (typeof env.code === "string" && env.code) err.code = env.code;
+    if (Array.isArray(env.tried) && env.tried.length) err.tried = env.tried.map(String);
+    throw err;
   }
   return res as T;
 }
 
-/** 框架级命令永远走本地主进程：远程模式下也不能转发（否则「拉目标列表」会被转发到远程，成环） */
-const LOCAL_ONLY_CMDS = new Set([
-  "remote_targets_list",
-  "remote_targets_save",
-  "remote_targets_delete",
-  "remote_targets_activate",
-  "remote_test",
-]);
-
 async function call<T>(cmd: string, args?: Record<string, unknown>, timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<T> {
   if (isElectron()) {
-    // 远程模式：命令经主进程转发到远程网关（令牌不进渲染进程，地址校验也在主进程）
-    if (remoteActive() && !LOCAL_ONLY_CMDS.has(cmd)) {
-      const res = await invokeWithTimeout(
-        window.agenthub!.invoke("remote_invoke", { cmd, args: toPlain(args) }),
-        cmd,
-        timeoutMs + 5_000, // 远程多一跳网络往返，看门狗同步放宽
-      );
-      return unwrapResult<T>(cmd, res);
-    }
     const res = await invokeWithTimeout(window.agenthub!.invoke(cmd, toPlain(args)), cmd, timeoutMs);
     return unwrapResult<T>(cmd, res);
   }
@@ -138,6 +142,15 @@ export const openHubDir = () => call<void>("open_hub_dir");
 // 等用户操作原生目录选择框，时长不可控，关掉看门狗
 export const browseDir = () => call<{ ok: boolean; canceled?: boolean; path: string | null }>("browse_dir", {}, 0);
 
+// ===== 无边框窗口：自绘标题栏的窗口控制 =====
+// 浏览器预览（dev:web / 静态托管）没有窗口可控制，直接给个已兑现的空结果，免得走 mock 报未知命令
+export const windowMinimize = () => (isElectron() ? call<void>("window_minimize") : Promise.resolve());
+export const windowToggleMaximize = () =>
+  isElectron() ? call<{ maximized: boolean }>("window_toggle_maximize") : Promise.resolve({ maximized: false });
+export const windowClose = () => (isElectron() ? call<void>("window_close") : Promise.resolve());
+export const windowIsMaximized = () =>
+  isElectron() ? call<{ maximized: boolean }>("window_is_maximized") : Promise.resolve({ maximized: false });
+
 // ===== 软件更新 =====
 export const getIsPortable = () => call<boolean>("get_is_portable");
 export const getUpdateStatus = () => call<UpdateStatus>("get_update_status");
@@ -146,6 +159,9 @@ export const downloadUpdate = () => call<UpdateStatus>("download_update");
 export const installUpdate = () => call<UpdateStatus>("install_update");
 export const openReleasePage = () => call<void>("open_release_page");
 export const openRepoPage = () => call<void>("open_repo_page");
+/** 用系统默认浏览器打开本项目仓库的链接（设置 · 反馈与需求；主进程侧有域名白名单） */
+export const openExternalUrl = (url: string) =>
+  call<{ ok: boolean; message?: string }>("open_external_url", { url });
 
 /** 订阅主进程广播（更新状态 / WebDAV 进度 / focus-update 跳转信号），返回退订函数。
  *  Web 托管形态走 SSE（信封同形）；纯静态预览（mock）没有事件源 */
@@ -178,7 +194,10 @@ export interface SharedWebdavConfig {
   /** 号池压缩包加密口令（掩码态；空 = 沿用 password） */
   encryptionPassphrase: string;
   s3: { bucket: string; region: string; pathStyle: boolean };
-  roots: { skills: string; usage: string; proxy: string; memory: string };
+  /** 各模块在同一台网盘上的隔离根目录；prompts 为提示词库（契约 §1 默认 /agenthub-prompts）。
+   *  新增键必须在类型上显式声明：设置页直接 v-model 到 shared.roots.prompts，
+   *  漏掉它会让「提示词库根目录」输入框写进一个不存在的字段（保存后被 normalizeShared 丢掉） */
+  roots: { skills: string; usage: string; proxy: string; memory: string; prompts: string };
 }
 export const webdavSharedGet = () => call<SharedWebdavConfig>("webdav_shared_get");
 export const webdavSharedSave = (cfg: SharedWebdavConfig) =>
@@ -191,7 +210,7 @@ export const webdavSharedClear = () => call<{ ok: boolean; message: string }>("w
 export const moduleToggle = (module: string, enabled: boolean) =>
   call<{ ok: boolean; message: string }>("module_toggle", { module, enabled });
 
-// ===== 反代网关：号池 WebDAV 同步（统一服务器 + proxy 根目录；channel 可选 = 只同步某渠道） =====
+// ===== 号池管家：号池 WebDAV 同步（统一服务器 + proxy 根目录；channel 可选 = 只同步某渠道） =====
 export interface ProxyPoolSyncStatus {
   running: boolean;
   stage: string;
@@ -267,24 +286,8 @@ export const removeSkill = (name: string) => call<{ ok: boolean; message?: strin
 export const watchStatus = () => call<WatchStatus>("watch_status");
 export const adoptHubSkill = (name: string) => call<{ ok: boolean; message?: string; name?: string; mounts?: number }>("adopt_hub_skill", { name });
 
-// ===== 反代网关：服务启停 / 状态 =====
 export const proxyStatus = () => call<ProxyGatewayStatus>("proxy_status");
-export const proxyStart = () => call<{ ok: boolean; port?: number; already?: boolean; message?: string }>("proxy_start");
-export const proxyStop = () => call<{ ok: boolean }>("proxy_stop");
-export const proxyRestart = () => call<{ ok: boolean; port?: number; message?: string }>("proxy_restart");
-
-// ===== 反代网关：API Keys =====
-export const proxyKeysList = () => call<ProxyKeyRow[]>("proxy_keys_list");
-export const proxyKeyCreate = (opts: { name: string; route: ProxyRoute; routeOrder?: string; dailyQuota: number; rateLimit?: number }) =>
-  call<ProxyKeyRow & { secret: string }>("proxy_key_create", opts as unknown as Record<string, unknown>);
-export const proxyKeyUpdate = (id: string, patch: Partial<Pick<ProxyKeyRow, "name" | "route" | "routeOrder" | "dailyQuota" | "rateLimit" | "enabled">>) =>
-  call<{ ok: boolean; message?: string }>("proxy_key_update", { id, ...patch });
-export const proxyKeyDelete = (id: string) => call<{ ok: boolean; message?: string }>("proxy_key_delete", { id });
-/** 批量删除（Key 列表多选）：主进程逐个走单删链路（墓碑先行 + WebDAV 传播），removed = 实删条数 */
-export const proxyKeysDeleteBatch = (ids: string[]) =>
-  call<{ ok: boolean; removed?: number; missing?: number; message?: string }>("proxy_keys_delete", { ids });
-
-// ===== 反代网关：号池 / 凭据接入 =====
+// ===== 号池管家：号池 / 凭据接入 =====
 export const proxyPool = () => call<ProxyChannelView[]>("proxy_pool");
 /** 渠道启闭（「上游启闭」弹窗）：list = 全量含已关闭渠道（带 enabled）；toggle = 写配置 + 广播事件即时生效 */
 export const proxyChannelList = () => call<ProxyChannelView[]>("proxy_channel_list");
@@ -301,6 +304,13 @@ export const proxyAccountRemove = (id: string) => call<{ ok: boolean; message?: 
 /** 批量删除（号池列表多选）：主进程逐个走单删链路（墓碑先行 + WebDAV 传播），removed = 实删条数 */
 export const proxyAccountRemoveBatch = (ids: string[]) =>
   call<{ ok: boolean; removed?: number; missing?: number; message?: string }>("proxy_account_remove_batch", { ids });
+/** 明文导出选中账号（号池多选「导出凭据」）：token/refreshToken 为解密后的明文，
+ *  供用户在其它软件里直接使用；落盘由渲染层 Blob 下载完成 */
+export const proxyAccountExportPlain = (ids: string[]) =>
+  call<{ ok: boolean; accounts?: Record<string, unknown>[]; missing?: string[]; exportedAt?: number; message?: string }>(
+    "proxy_account_export_plain",
+    { ids }
+  );
 export const proxyAccountToggle = (id: string, enabled: boolean) =>
   call<{ ok: boolean; message?: string }>("proxy_account_toggle", { id, enabled });
 /** 重命名账号（自定义备注），WebDAV 同步时 LWW 传播 */
@@ -358,6 +368,15 @@ export const proxyAutoclawSmsSend = (channel: ProxyChannelId, phone: string) =>
 /** AutoClaw 国内版：验证码登录（deviceId 沿用发码返回值；code 传 6 位数字字符串，主进程转 JSON number） */
 export const proxyAutoclawSmsLogin = (channel: ProxyChannelId, phone: string, code: string, deviceId: string) =>
   call<{ ok: boolean; id?: string; uid?: string; updated?: boolean; message?: string }>("proxy_autoclaw_sms_login", { channel, phone, code, deviceId }, 0);
+/** Loomy（讯飞）：发送短信验证码（返回 msgid，登录时必须沿用） */
+export const proxyLoomySmsSend = (phone: string) =>
+  call<{ ok: boolean; msgid?: string; phoneTail?: string; message?: string }>("proxy_loomy_sms_send", { phone }, 0);
+/** Loomy（讯飞）：验证码登录（msgid 沿用发码返回值） */
+export const proxyLoomySmsLogin = (phone: string, code: string, msgid: string) =>
+  call<{ ok: boolean; id?: string; uid?: string; message?: string }>("proxy_loomy_sms_login", { phone, code, msgid }, 0);
+/** CodeArts 每日福利：只读探测可领项（领取走既有的批量签到链路，主进程串行换 token） */
+export const proxyCodeartsWelfarePreview = (accountId = "") =>
+  call<{ ok: boolean; rows?: { name: string; ok: boolean; message: string }[]; message?: string }>("proxy_codearts_welfare_preview", { accountId }, 0);
 export const proxyOauthCancel = () => call<{ ok: boolean; cancelled?: boolean }>("proxy_oauth_cancel");
 /** 兜底：浏览器没跳回回环地址时，把地址栏内容整段粘回来完成登录（串行换 token，可能多次上游请求） */
 export const proxyOauthSubmitCallback = (channel: ProxyChannelId, url: string) =>
@@ -368,50 +387,6 @@ export const proxyAccountImportJson = (channel: ProxyChannelId, json: string) =>
 /** 从 JSON/ZIP 文件添加账号（主进程弹文件选择框等用户操作；zip 读取包内全部 .json 合并导入） */
 export const proxyAccountImportFile = (channel: ProxyChannelId) =>
   call<{ ok: boolean; canceled?: boolean; added?: number; dup?: number; invalid?: number; file?: string; message?: string }>("proxy_account_import_file", { channel }, 0);
-
-// ===== 反代网关：模型 / 统计 / 规则 =====
-export const proxyModels = () => call<ProxyModel[]>("proxy_models");
-export const proxyModelsSync = (channel: string) =>
-  // 外网拉模型目录，主进程 httpJson 60s 上限
-  call<{ ok: boolean; channel?: string; count?: number; withRate?: number; message?: string }>("proxy_models_sync", { channel }, 0);
-
-// ===== 反代网关：自定义提供商（中转站 / 自建 OpenAI 兼容端点） =====
-
-/** 创建 / 更新的入参。id 即路由前缀（`id/model` 里的 id），创建后不可改。
- *  create 可带 keys（表单一次填完）；update 忽略 keys，Key 走 add/remove 两条命令。 */
-export interface ProxyProviderInput {
-  id: string;
-  display?: string;
-  baseUrl: string;
-  kind?: ProxyProviderKind;
-  models?: ProxyProviderModel[];
-  extraHeaders?: Record<string, string>;
-  extraBody?: Record<string, unknown>;
-  enabled?: boolean;
-  keys?: { name?: string; key: string }[];
-}
-
-export const proxyProviderList = () =>
-  call<{ ok: boolean; providers?: ProxyProvider[]; message?: string }>("proxy_provider_list");
-export const proxyProviderCreate = (input: ProxyProviderInput) =>
-  call<{ ok: boolean; provider?: ProxyProvider; keyIds?: string[]; message?: string }>("proxy_provider_create", input as unknown as Record<string, unknown>);
-export const proxyProviderUpdate = (input: Partial<ProxyProviderInput> & { id: string }) =>
-  call<{ ok: boolean; provider?: ProxyProvider; message?: string }>("proxy_provider_update", input as unknown as Record<string, unknown>);
-export const proxyProviderDelete = (id: string) =>
-  call<{ ok: boolean; message?: string }>("proxy_provider_delete", { id });
-export const proxyProviderAddKey = (id: string, key: string, name?: string) =>
-  call<{ ok: boolean; id?: string; message?: string }>("proxy_provider_add_key", { id, key, name });
-export const proxyProviderRemoveKey = (accountId: string) =>
-  call<{ ok: boolean; message?: string }>("proxy_provider_remove_key", { accountId });
-/** 用表单里当场填的地址 + Key 发一次真实最小请求（会产生上游计费，UI 已提示）。
- *  key 与 accountId 二选一：编辑态不重填 Key 时按号池账号 id 让主进程自己解密，明文不出主进程。 */
-export const proxyProviderTest = (input: {
-  id?: string; accountId?: string; baseUrl: string; key: string; model: string;
-  kind?: ProxyProviderKind; extraHeaders?: Record<string, string>; extraBody?: Record<string, unknown>;
-}) => call<ProxyProviderTestResult>("proxy_provider_test", input as unknown as Record<string, unknown>);
-/** 拉上游 /v1/models：用该提供商号池里的 Key，因此必须先存过一次 Key */
-export const proxyProviderFetchModels = (id: string) =>
-  call<{ ok: boolean; models?: string[]; message?: string }>("proxy_provider_fetch_models", { id });
 
 /** 切号预检事实（确认框展示用）：目标客户端是否在运行 / 安装路径 / 切完是否自动重启 */
 export interface IdeSwitchProbe {
@@ -450,28 +425,7 @@ export const proxyZcodeRestoreMid = (confirmAck?: boolean) =>
  *  主进程侧已有 120s 看门狗 + 页面 SDK 15s 加载超时托底，这里留 150s 余量即可 */
 export const proxyZcodeSolveCaptcha = (accountId: string) =>
   call<{ ok: boolean; message?: string }>("proxy_zcode_solve_captcha", { accountId }, 150_000);
-/** 区间化统计总览：from/to 为毫秒闭区间，granularity 缺省按跨度自动决策（≤2天→小时） */
-export const proxyStatsOverview = (opts?: { from?: number; to?: number; granularity?: "auto" | "hour" | "day" }) =>
-  call<ProxyStatsOverview>("proxy_stats_overview", opts as Record<string, unknown>);
-export const proxyStatsTop = (dim: ProxyStatsDim, days?: number) =>
-  call<{ name: string; req: number; tokens: number }[]>("proxy_stats_top", { dim, days });
-/** 请求明细：key/model 为模糊搜索，status 走分桶（ok/4xx/5xx/other） */
-export const proxyStatsDetail = (opts: {
-  from?: number;
-  to?: number;
-  page?: number;
-  pageSize?: number;
-  channel?: string;
-  keyId?: string;
-  key?: string;
-  model?: string;
-  status?: string;
-}) => call<ProxyStatsDetail>("proxy_stats_detail", opts as Record<string, unknown>);
-export const proxyStatsCleanup = (days?: number, all?: boolean) =>
-  call<{ deleted: number }>("proxy_stats_cleanup", { days, all });
-export const proxyRecent = (limit?: number) => call<ProxyUsageRow[]>("proxy_recent", { limit });
-
-// ===== 反代网关：操作日志（「日志」页签） =====
+// ===== 号池管家：操作日志（「日志」页签） =====
 export interface ProxyOpLogFilter {
   /** 毫秒时间戳区间（视图层由日期串换算），空/0 = 不限 */
   from?: number | null;
@@ -486,15 +440,10 @@ export const proxyOpLogOps = () => call<string[]>("proxy_oplog_ops");
 /** 导出 Excel（.xlsx 落 downloads，文件名含毫秒时间戳）；导出当前筛选全集（无分页） */
 export const proxyOpLogExport = (filter: Omit<ProxyOpLogFilter, "limit" | "offset">) =>
   call<{ ok: boolean; path?: string; count?: number; message?: string }>("proxy_oplog_export", filter as Record<string, unknown>);
-export const proxyRulesList = () => call<ProxyRuleFile[]>("proxy_rules_list");
-export const proxyOpenRulesDir = () => call<{ ok: boolean }>("proxy_open_rules_dir");
 export const proxyOpenDataDir = () => call<{ ok: boolean }>("proxy_open_data_dir");
 export const proxyVaultStatus = () => call<{ encrypted: boolean; driver: string; dataDir: string }>("proxy_vault_status");
 
-// ===== 反代网关：生态接入（CC Switch） =====
-export const proxyCcSwitchStatus = () => call<CcSwitchStatus>("proxy_ccswitch_status");
-export const proxyCcSwitchRegister = (opts: { appType: CcSwitchAppType; apiKey: string; model: string; port?: number }) =>
-  call<CcSwitchRegisterResult>("proxy_ccswitch_register", opts as unknown as Record<string, unknown>);
+
 
 // ===== 记忆中枢：配置 / 根目录 =====
 export const memoryConfigGet = () => call<MemoryConfigEnvelope>("memory_config_get");
@@ -585,6 +534,8 @@ export const memoryTimeline = (args: { id?: string; topic?: string }) =>
   call<{ chain?: MemoryTimelineNode[]; chains?: { root: string; chain: MemoryTimelineNode[] }[]; text: string }>("memory_timeline", args);
 export const memorySupersede = (id: string, byId: string, reason?: string) =>
   call<{ ok: boolean; id: string }>("memory_supersede", { id, byId, reason });
+export const memoryUnsupersede = (id: string) =>
+  call<{ ok: boolean; id: string; message?: string }>("memory_unsupersede", { id });
 
 // ===== 记忆中枢：Agent 接入 =====
 export const memoryAgentsList = () =>
@@ -597,7 +548,7 @@ export const memoryAgentsList = () =>
 export const memoryAgentVerify = (id: string, skipHandshake = false) => call<MemoryAgentVerify>("memory_agent_verify", { id, skipHandshake }, 0);
 export const memoryAgentVerifyAll = () => call<MemoryAgentVerify[]>("memory_agent_verify_all", {}, 0);
 export const memoryAgentInject = (id: string) =>
-  call<{ ok: boolean; steps: { ok: boolean; action: string; file: string; backup?: string | null }[]; configPath: string; instructionPath: string }>("memory_agent_inject", { id });
+  call<{ ok: boolean; message?: string; steps: { ok: boolean; action: string; file: string; backup?: string | null }[]; configPath: string; instructionPath: string }>("memory_agent_inject", { id });
 export const memoryAgentUninject = (id: string) =>
   call<{ ok: boolean; steps: { ok: boolean; action: string; file: string }[] }>("memory_agent_uninject", { id });
 export const memoryAgentSnippet = (id: string, format?: string) =>
@@ -682,9 +633,9 @@ export const memoryDistillRun = (opts?: { project?: string }) =>
   call<{ processed: number; updated: number; tokens: number; detail: string; report?: string }>("memory_distill_run", opts as Record<string, unknown>, 0);
 export const memoryProfileGet = () =>
   call<{ sections: { name: string; path: string; text: string; exists: boolean }[]; history: { name: string; mtime: number }[]; lastAt: number }>("memory_profile_get");
-export const memoryProfileGenerate = () =>
-  // 画像生成按实现注释「耗时以分钟计」
-  call<{ processed: number; updated: number; tokens: number; detail: string; report?: string }>("memory_profile_generate", {}, 0);
+// 画像生成按实现注释「耗时以分钟计」；dim 只生成单个分区（其余分区文件与 pinned 内容不动）
+export const memoryProfileGenerate = (dim?: "persona" | "preferences" | "tech" | "habits") =>
+  call<{ processed: number; updated: number; tokens: number; detail: string; report?: string }>("memory_profile_generate", dim ? { dim } : {}, 0);
 export const memoryProfileSave = (name: string, text: string) => call<{ ok: boolean }>("memory_profile_save", { name, text });
 export const memoryReviewList = (kind: "supersede" | "classify" | "dedup" | "supersede-done") =>
   call<{ items: { id: string; kind: string; payload: Record<string, any>; created: number }[] }>("memory_review_list", { kind });
@@ -749,14 +700,184 @@ export const memoryImportCursorsGet = () => call<{ ok: boolean; cursors: Record<
 export const memoryImportCursorsReset = (id?: string) => call<{ ok: boolean; cursors: Record<string, unknown> }>("memory_import_cursors_reset", { id });
 export const memoryImportMapSave = (id: string, mapping: { table?: string }) => call<{ ok: boolean; sources: Record<string, unknown>[] }>("memory_import_map_save", { id, mapping });
 
-// ===== 远程网关（桌面连远程 Docker 版）=====
-// 目标 CRUD 与切换永远走本地主进程（call 的 LOCAL_ONLY_CMDS）；业务命令在远程模式下由
-// call() 自动经 remote_invoke 转发，页面无感知
-type RemoteTargetsResult = { activeId: string; targets: import("../types").RemoteTarget[] };
-export const remoteTargetsList = () => call<RemoteTargetsResult>("remote_targets_list");
-export const remoteTargetsSave = (p: { id?: string; alias: string; baseUrl: string; token: string }) =>
-  call<RemoteTargetsResult>("remote_targets_save", p as unknown as Record<string, unknown>);
-export const remoteTargetsDelete = (id: string) => call<RemoteTargetsResult>("remote_targets_delete", { id });
-export const remoteTargetsActivate = (id: string) => call<RemoteTargetsResult>("remote_targets_activate", { id });
-export const remoteTest = (p: { id?: string; baseUrl?: string; token?: string }) =>
-  call<import("../types").RemoteTestResult>("remote_test", p as unknown as Record<string, unknown>, 15000);
+// ===== 外置插件 =====
+// 命令名与插件包结构固定；宿主不感知具体插件，能力全部由 manifest 描述
+export type PluginInfo = {
+  id: string;
+  name: string;
+  version: string;
+  installed: boolean;
+  invalid: boolean;
+  reason: string;
+  enabled: boolean;
+  running: boolean;
+  compatible: boolean;
+  compatReason: string;
+  lastError: string;
+  minAppVersion: string;
+  maxAppVersion: string;
+  ui: { url: string; title: string } | null;
+  /** 侧栏入口声明（label 用作卡片显示名）；未声明则不出现在左侧栏。
+   *  卡片位置由宿主固定（所有内置板块之后），插件不能指定插入点 */
+  sidebar: { label: string } | null;
+  /** 插件声明愿意接收的宿主资源（pool / channels），空数组表示不接 */
+  bridgeKinds: string[];
+  /** 是否支持内嵌主区域（manifest.ui.embed !== false） */
+  embed: boolean;
+  /** 宿主数据推送状态；未声明桥接时为 null */
+  poolSync: { lastAt: number; lastError: string; imported: number; removed: number } | null;
+};
+export type PluginInstallResult = {
+  ok: boolean;
+  canceled?: boolean;
+  updated?: boolean;
+  id?: string;
+  name?: string;
+  version?: string;
+  warning?: string;
+  message?: string;
+};
+export type PluginEmbedResult = { ok: boolean; id?: string; url?: string; title?: string; message?: string };
+export const pluginList = () => call<PluginInfo[]>("plugin_list");
+export const pluginInstall = () => call<PluginInstallResult>("plugin_install");
+export const pluginUninstall = (id: string) => call<{ ok: boolean; message?: string }>("plugin_uninstall", { id });
+export const pluginToggle = (id: string, enabled: boolean) =>
+  call<{ ok: boolean; message?: string }>("plugin_toggle", { id, enabled });
+export const pluginOpen = (id: string) => call<{ ok: boolean; message?: string }>("plugin_open", { id });
+/** 内嵌地址：带一次性令牌，供 iframe 首次免登录 */
+export const pluginEmbed = (id: string) => call<PluginEmbedResult>("plugin_embed", { id });
+/** 手动把宿主号池/渠道状态推给插件一次 */
+export const pluginSyncNow = (id: string) =>
+  call<{ ok: boolean; imported?: number; removed?: number; message?: string }>("plugin_sync_now", { id });
+
+// ===== 提示词库（契约 docs/提示词板块/02-实施契约.md §4；通道名与后端注册名、preload 白名单逐字一致） =====
+// 命名规则：通道 prompts_xxx_yyy → 封装 promptsXxxYyy（与既有 memory_* 的封装风格一致）。
+// 说明：这里的 32 个通道是契约 §4.1/§4.2/§4.3 表格的**全集**（14 + 9 + 9）。
+// 返回形状沿用本文件既有信封：成功返回整个 { ok:true, ... }，失败由 unwrapResult 抛错，
+// 错误码挂在 err.code 上（§4.2 明确要求按 code 分支，不许按 message 文案匹配）。
+
+// ---- 4.1 库 ----
+export const promptsList = (opts?: { includeTrash?: boolean }) =>
+  call<{ ok: boolean; items: PromptItem[] }>("prompts_list", opts as Record<string, unknown>);
+export const promptsGet = (args: { id: string }) =>
+  call<{ ok: boolean; item: PromptItem }>("prompts_get", { id: args.id });
+/** 保存单条：带 expectedHash 时后端做乐观锁，内容已被他处改过会回 { ok:false, code:"conflict" }，
+ *  由 unwrapResult 抛成 err.code==="conflict"——调用方据此弹「已被其他设备修改」的覆盖确认 */
+export const promptsSave = (args: { item: PromptItem; expectedHash?: string }) =>
+  call<{ ok: boolean; id: string; hash: string }>("prompts_save", {
+    item: JSON.parse(JSON.stringify(args.item)),
+    expectedHash: args.expectedHash,
+  });
+export const promptsDelete = (args: { id: string }) => call<{ ok: boolean }>("prompts_delete", { id: args.id });
+export const promptsRestore = (args: { id: string }) => call<{ ok: boolean }>("prompts_restore", { id: args.id });
+export const promptsPurge = (args: { id: string }) => call<{ ok: boolean }>("prompts_purge", { id: args.id });
+export const promptsEmptyTrash = () => call<{ ok: boolean; count: number }>("prompts_empty_trash");
+export const promptsStats = () => call<{ ok: boolean; stats: PromptStats }>("prompts_stats");
+export const promptsMeta = () => call<{ ok: boolean; categories: string[]; tags: string[] }>("prompts_meta");
+export const promptsExport = (args: { ids?: string[]; format: "md" | "json" }) =>
+  call<{ ok: boolean; path: string; count: number }>("prompts_export", { ids: args.ids, format: args.format });
+export const promptsImport = (args: { data: string; format: "md" | "json"; onConflict: "new" | "overwrite" | "skip" }) =>
+  // 批量导入要逐条解析并写盘，条数一多必然超过默认 45s 看门狗；后端有互斥与进度事件托底
+  call<{ ok: boolean; imported: number; overwritten: number; skipped: number }>("prompts_import", { ...args }, 0);
+export const promptsOpenDir = () => call<{ ok: boolean }>("prompts_open_dir");
+export const promptsSetDir = (args: { dir: string }) => call<{ ok: boolean; dir: string }>("prompts_set_dir", { dir: args.dir });
+export const promptsRebuild = () => call<{ ok: boolean; count: number }>("prompts_rebuild");
+
+// ---- 4.2 优化 ----
+export const promptsStylesList = () =>
+  call<{ ok: boolean; styles: PromptStyle[]; defaultId: string }>("prompts_styles_list");
+export const promptsStylesSave = (args: { style: PromptStyle }) =>
+  call<{ ok: boolean; id: string }>("prompts_styles_save", { style: JSON.parse(JSON.stringify(args.style)) });
+export const promptsStylesDelete = (args: { id: string }) => call<{ ok: boolean }>("prompts_styles_delete", { id: args.id });
+export const promptsStylesReset = () => call<{ ok: boolean }>("prompts_styles_reset");
+/** 单次优化：真实调模型，时长由调用方传的 timeoutSec（默认 60s）决定，可能超过默认 45s 看门狗，
+ *  故关闭渲染层看门狗——后端有 timeoutSec 硬上限 + prompts_optimize_cancel 托底，
+ *  失败经 { ok:false, code } 回来（empty_input/too_long/no_model/model_error/timeout/cancelled/empty_result/unknown） */
+export type PromptsOptimizeResult = {
+  ok: boolean; text: string; styleName: string; model: string; elapsedMs: number;
+  tokens?: { in: number; out: number };
+  /** 多角度补全的 <ASSUMPTIONS> 块被后端剥离后的结果；其它风格为空数组 */
+  assumptions?: string[];
+  historyId?: string; unchanged?: boolean; fallback?: boolean;
+  /** 本次是否真走了流式（上游不支持时后端自动回退非流式，这里是 false） */
+  streamed?: boolean;
+  /** 已推过字但最终失败：前端必须清掉半截内容 */
+  partial?: boolean;
+};
+
+export type PromptsOptimizeArgs = {
+  text: string; styleId: string; model?: string;
+  maxLength?: number; temperature?: number; maxTokens?: number; timeoutSec?: number; scenario?: string;
+  /** 本次额外要求（拼进 user 模板的 {extra}）；为空时整段不出现 */
+  extra?: string;
+  /** 本次请求 id：用于按 id 取消（流式下能真的中断上游） */
+  runId?: string;
+};
+
+export const promptsOptimize = (args: PromptsOptimizeArgs) =>
+  call<PromptsOptimizeResult>("prompts_optimize", { ...args }, 0);
+
+/** 流式优化：增量经 app:event 的 optimize-delta 事件推送，收尾结果仍由本调用的返回值给出。
+ *  delta 不逐 token 推（后端节流 60ms / 120 字符），所以事件数量可控。 */
+export const promptsOptimizeStream = (args: PromptsOptimizeArgs) =>
+  call<PromptsOptimizeResult>("prompts_optimize_stream", { ...args }, 0);
+
+export const promptsOptimizeCancel = (args?: { runId?: string }) =>
+  call<{ ok: boolean; aborted?: number }>("prompts_optimize_cancel", args || {});
+export const promptsHistoryList = () => call<{ ok: boolean; items: PromptHistoryItem[] }>("prompts_history_list");
+export const promptsHistoryDelete = (args: { id: string }) => call<{ ok: boolean }>("prompts_history_delete", { id: args.id });
+export const promptsHistoryClear = () => call<{ ok: boolean }>("prompts_history_clear");
+
+// ---- 4.4 线上目录（精选目录，纯客户端）----
+export const promptsCatalogIndex = () =>
+  call<{ ok: boolean; categories: CatalogCategory[]; templates: CatalogTemplate[]; version: number; source: string }>(
+    "prompts_catalog_index"
+  );
+export const promptsCatalogList = (args: {
+  category?: string; subcategory?: string; templateId?: string; q?: string; page?: number; pageSize?: number;
+}) =>
+  call<{ ok: boolean; items: CatalogItem[]; total: number; page: number; pageSize: number; counts: Record<string, number> }>(
+    "prompts_catalog_list",
+    args
+  );
+export const promptsCatalogGet = (id: string) =>
+  call<{ ok: boolean; item?: CatalogItemDetail; message?: string }>("prompts_catalog_get", { id });
+export const promptsCatalogStats = () => call<{ ok: boolean; stats: CatalogStats }>("prompts_catalog_stats");
+/** 检查更新要逐个尝试 CDN 通道 + 只下变更分片，可能超过默认看门狗，故关闭 */
+export const promptsCatalogRefresh = () =>
+  call<{ ok: boolean; updated: boolean; version?: number; count?: number; downloaded?: number; failed?: number; message?: string }>(
+    "prompts_catalog_refresh",
+    {},
+    0
+  );
+/** 导入要等系统文件对话框（用户可能很久才选），关闭看门狗 */
+export const promptsCatalogImport = () =>
+  call<{ ok: boolean; imported?: number; skipped?: number; total?: number; message?: string }>("prompts_catalog_import", {}, 0);
+export const promptsCatalogClearImported = () => call<{ ok: boolean; total?: number }>("prompts_catalog_clear_imported");
+export const promptsCatalogReset = () => call<{ ok: boolean; total?: number }>("prompts_catalog_reset");
+
+// ---- 4.3 同步 ----
+export const promptsSyncStatus = () => call<{ ok: boolean; status: PromptSyncStatus }>("prompts_sync_status");
+/** 整库 WebDAV 三方合并：长任务，主进程有 running 互斥 + 进度事件 + prompts_sync_cancel 托底，关闭看门狗 */
+export const promptsSyncRun = () => call<{ ok: boolean; message?: string }>("prompts_sync_run", {}, 0);
+export const promptsSyncCancel = () => call<{ ok: boolean }>("prompts_sync_cancel");
+export const promptsSyncLogs = () => call<{ ok: boolean; logs: { at: number; text: string }[] }>("prompts_sync_logs");
+export const promptsSyncDevices = () =>
+  call<{ ok: boolean; devices: { id: string; name: string; appVersion: string; lastSyncAt: number; self: boolean }[] }>(
+    "prompts_sync_devices"
+  );
+export const promptsConflictsList = () => call<{ ok: boolean; items: PromptConflict[] }>("prompts_conflicts_list");
+export const promptsConflictDiff = (args: { id: string }) =>
+  call<{ ok: boolean; diff: PromptConflictDiff }>("prompts_conflict_diff", { id: args.id });
+export const promptsConflictResolve = (args: { id: string; decision: "local" | "remote" | "both" | "merge"; mergedText?: string }) =>
+  call<{ ok: boolean }>("prompts_conflict_resolve", { id: args.id, decision: args.decision, mergedText: args.mergedText });
+export const promptsConflictsAuto = (args?: { strategy?: string }) =>
+  // 批量按策略自动合并整条冲突队列：条数多时耗时不可控，同属长任务
+  call<{ ok: boolean; merged: number; remaining: number }>("prompts_conflicts_auto", { strategy: args?.strategy }, 0);
+
+// ---- 4.5 报告历史（契约 §4 之外的 2 个通道，Lead 在后端补注册；前端封装名同规则） ----
+// 提示词库有自己的报告目录（<库>/reports/prompts-*.md，契约 §1），不复用技能仓库的 listReports
+export const promptsReportsList = () =>
+  call<{ ok: boolean; reports: { name: string; path: string; size: number }[] }>("prompts_reports_list");
+export const promptsReportRead = (args: { name: string }) =>
+  call<{ ok: boolean; text: string }>("prompts_report_read", { name: args.name });

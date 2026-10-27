@@ -1,6 +1,16 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // CatPaw 工具字段归一化：OpenAI `tools` / `tool_choice` → 上游 `toolConfigs`
-// （移植来源：参照实现 catpaw/tools.rs，上游为 catpaw-upstream-messages.mjs 的
-// normalizeTools / toolChoiceMode）。
+// （协议依据：官方客户端实测）
+// 归一化入口：normalizeTools / toolChoiceMode。
 //
 // 字段映射（上游协议为唯一权威）：
 //   function.name → name；function.description → description（截 8000 字符）；

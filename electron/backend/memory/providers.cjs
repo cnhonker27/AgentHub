@@ -1,6 +1,16 @@
 /**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
+/**
  * AgentHub · 记忆中枢（Memory Hub）
- * Copyright (c) 2026 沐辉 (HUIdada1)
+ * Copyright (c) 2026 沐晖 (HUIdada1)
  * https://github.com/HUIdada1/AgentHub
  * 本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。
  */
@@ -13,6 +23,7 @@
 const crypto = require("crypto");
 
 const { API_FORMATS } = require("./config-schema.cjs");
+const { flattenConfig } = require("./config.cjs");
 const { LlmClient, gwProvider, DEFAULT_TASK_TAGS, normalizeSourceOrder } = require("./llm/client.cjs");
 const frameworkConfig = require("../config.cjs");
 
@@ -79,7 +90,11 @@ class ProviderStore {
   }
 
   flat() {
-    return this.service.flat();
+    // 记忆中枢启用时走 service.flat()（schema 白名单 + 整体键处理都在那里）；
+    // 未启用时 service 为 null —— 但「设置 · 模型与网关」必须照常可读写，
+    // 所以退回同一份 flattenConfig（口径完全一致，不会出现「设置页看到的」与「任务实际用的」两套配置）。
+    if (this.service) return this.service.flat();
+    return flattenConfig(this.memCfg.all());
   }
 
   // memCfg.set 校验失败返回 {ok:false}，必须抛出去，否则写库失败会被静默成成功
@@ -392,7 +407,7 @@ class ProviderStore {
 
   sources() {
     const cfg = this.flat();
-    // 网关默认垫底（v1.23.0：常不开的网关不该挡在自备 Key 供应商前面）；
+    // 默认序见 llm/client.cjs 的 DEFAULT_SOURCE_ORDER（自定义供应商 → 内置降级档托底）；
     // 存量旧默认序归一化，手动调过的顺序不动（归一口径与运行时 resolveCandidates 共用，避免展示与实际两套）
     const order = normalizeSourceOrder(cfg["models.sourceOrder"]);
     const providers = (cfg["models.providers"] || []).filter((p) => p.enabled !== false);
@@ -408,11 +423,11 @@ class ProviderStore {
         if (key === "custom") {
           return { key, available: providers.length > 0, detail: `${providers.length} 个已启用供应商` };
         }
-        // 兜底没绑供应商+模型时它根本不参与解析，available 如实反映，别再假装可用
+        // 降级档没绑供应商+模型时它根本不参与解析，available 如实反映，别再假装可用
         return {
           key,
           available: !!degrade.enabled && degradeBound,
-          detail: degradeBound ? "全部失败时的兜底" : "未绑定兜底模型（到「路由与降级链」配置后生效）",
+          detail: degradeBound ? "降级档：前面几档不可用时接管" : "未绑定降级模型（在「兜底降级」里绑定后生效）",
         };
       }),
       routing: cfg["models.routing"] || [],
@@ -442,7 +457,7 @@ class ProviderStore {
     const tagDefs = cfg["models.tagDefs"] || [];
     const providers = cfg["models.providers"] || [];
     const models = cfg["models.models"] || [];
-    const tasks = ["extract", "summarize", "tag", "classify", "supersede", "distill", "consolidate", "profile", "dedup"];
+    const tasks = ["extract", "summarize", "tag", "classify", "supersede", "distill", "consolidate", "profile", "dedup", "optimize"];
     /** 指定模型的可用态：绑定了一个用不了的模型时说清是哪种用不了，界面才能给准话 */
     const modelStateOf = (route) => {
       if (!route || !route.modelId) return "";
@@ -478,6 +493,8 @@ class ProviderStore {
   }
 
   usage(days) {
+    // 用量来自记忆中枢的索引库：模块未启用（设置页仍可打开）时没有这张表，如实返回空
+    if (!this.service) return [];
     return this.service.index.llmUsageByProvider(days || 30);
   }
 }

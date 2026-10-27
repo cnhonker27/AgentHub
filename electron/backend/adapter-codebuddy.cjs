@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // CodeBuddy 数据源适配器（腾讯云 CodeBuddy IDE）
 // 权威数据源：%LOCALAPPDATA%\CodeBuddyExtension\Data\<userUuid>\CodeBuddyIDE\<installUuid>\history\<projectHash>\<sessionId>\index.json
 //   会话级 index.json 的 requests[].usage 含每请求 token 用量（inputTokens/outputTokens/totalTokens/lastTokens），

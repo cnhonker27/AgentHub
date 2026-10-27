@@ -1,5 +1,15 @@
-// CatPaw 内容块与工具字段归一化（messages.js 的下半层；移植来源：参照实现 catpaw/blocks.rs，
-// 其上游是 catpaw-upstream-messages.mjs 的 stringifyToolData / normalizeImageBlock /
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
+// CatPaw 内容块与工具字段归一化（messages.js 的下半层；协议依据：官方客户端实测，
+// 上游逻辑见 stringifyToolData / normalizeImageBlock /
 // normalizeContentBlock / messageContent / validateToolArguments / normalizeToolCalls / toolResultContent）。
 //
 // 字段名映射（上游协议为唯一权威）：
@@ -9,7 +19,7 @@
 //   tool_call_id / toolCallId → toolCallId
 //   reasoning_content / reasoningContent → 挂在 text 块上的 reasoningContent
 //
-// 每个取值都按原实现的运算符语义照抄（`||` 真值 vs `??` 空值合并）：
+// 每个取值都按上游的运算符语义对齐（`||` 真值 vs `??` 空值合并）：
 // `arguments: ""` 对 `||` 会继续往后找、对 `??` 会命中空串；`tool_calls: []` 空数组对 `||` 是真值。
 "use strict";
 const { jsTruthy } = require("./fingerprint.cjs");
@@ -38,7 +48,7 @@ function normalizeContentBlock(block) {
   if (block.type === "text" || block.type === "output_text") {
     if (typeof block.text !== "string") throw CatPawError.badRequest("文本消息缺少 text");
     const normalized = { type: "text", text: block.text };
-    // 对象展开、先驼峰后蛇形：两者都在时蛇形覆盖驼峰（照抄原实现顺序）
+    // 对象展开、先驼峰后蛇形：两者都在时蛇形覆盖驼峰（与上游顺序一致）
     if (typeof block.reasoningContent === "string") normalized.reasoningContent = block.reasoningContent;
     if (typeof block.reasoning_content === "string") normalized.reasoningContent = block.reasoning_content;
     return normalized;
@@ -124,7 +134,7 @@ function validateToolArguments(value, index) {
       throw invalid();
     }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw invalid();
-    // 嵌套/危险键的具体原因被这条统一文案吃掉——照抄原实现口径，避免同一输入两种报错
+    // 嵌套/危险键的具体原因被这条统一文案吃掉——与上游口径一致，避免同一输入两种报错
     try {
       validateJsonValue(parsed, `assistant.tool_calls[${index}].function.arguments`, 0);
     } catch {

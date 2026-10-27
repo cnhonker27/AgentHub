@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 反代网关 · /v1/messages（Anthropic Messages 入站）自测
 //
 // 跑法：node scripts/dev-anthropic-in-test.cjs
@@ -552,7 +562,7 @@ const MSG = (extra) => Object.assign({ model: MODEL, max_tokens: 512, stream: tr
     ok(disabled.res.status === 400 && /已被禁用/.test(disabled.res.text), "⑪ 模型被禁用时也是 Messages 形状", [disabled.res.status, disabled.res.text.slice(0, 160)]);
 
     // 429 的 error.type：Anthropic 的枚举里有独立的 rate_limit_error，客户端按它决定「退避重试」
-    // 还是「报网关故障」。按状态码查表而不是照抄调度侧传来的 OpenAI 形 type 就是为了这个。
+    // 还是「报网关故障」。按状态码查表而不是直接沿用调度侧传来的 OpenAI 形 type 就是为了这个。
     TODAY_REQ = 99;
     const quota = await run({ picks: [], scripts: [[]], body: MSG(), headers: apiKey(quotaKey.secret) });
     TODAY_REQ = 0;

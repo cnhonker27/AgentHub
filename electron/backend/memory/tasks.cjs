@@ -1,6 +1,16 @@
 /**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
+/**
  * AgentHub · 记忆中枢（Memory Hub）
- * Copyright (c) 2026 沐辉 (HUIdada1)
+ * Copyright (c) 2026 沐晖 (HUIdada1)
  * https://github.com/HUIdada1/AgentHub
  * 本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。
  */
@@ -356,6 +366,12 @@ class MemoryTasks {
     let writtenBefore = 0;
     let done = 0;
     let dropped = 0;
+    /** 模型调用尝试/失败计数与首个错误：区分「部分项目失败」与「全局失败」。
+     *  此前逐项目 catch 后 continue、IPC 返回的 detail 恒为成功文案，
+     *  前端 ProjectsView 的失败提示是死代码（用户看到「蒸馏 0 个项目」却不知道是没配模型）。 */
+    let modelTried = 0;
+    let modelFailed = 0;
+    let firstModelError = null;
     const reports = [];
 
     for (let pi = 0; pi < projects.length; pi++) {
@@ -381,6 +397,7 @@ class MemoryTasks {
         ...rows.map((r) => `[${r.id}] ${r.title}：${r.summary || ""}`),
       ].join("\n");
       let result;
+      modelTried++;
       try {
         result = await this.client.call({
           task: "distill",
@@ -392,6 +409,8 @@ class MemoryTasks {
           timeoutSec: BIG_JSON_TIMEOUT_SEC,
         });
       } catch (e) {
+        modelFailed++;
+        if (!firstModelError) firstModelError = e;
         reports.push(`${p.project || "(general)"}：跳过（${String(e.message || e).slice(0, 80)}）`);
         continue;
       }
@@ -435,9 +454,23 @@ class MemoryTasks {
       writtenBefore = written;
     }
 
-    this.service.index.setMeta("lastDistillAt", String(Date.now()));
     const reportFile = this._writeReport("distill", "蒸馏报告", ["## 各项目处理结果", ...reports.map((r) => `- ${r}`), "", `token 消耗：${tokens}`]);
-    return { processed: done, updated: written, tokens, detail: `蒸馏 ${done} 个项目，新增 L2 ${written} 条${dropped ? `，丢弃 ${dropped} 条引用不存在的无效建议` : ""}`, report: reportFile };
+    // 全局失败：所有真正调模型的批次都失败（典型是「一个可用模型都没配」）。
+    // 报告已落盘（含逐项目原因）再上抛：既不丢排障线索，也让前端能弹「去设置配置」。
+    // 部分失败保持原有容错语义（单项目失败不毁整轮），只在 detail 里如实带出跳过数。
+    if (modelTried > 0 && modelFailed === modelTried) {
+      const err = firstModelError || new Error("蒸馏失败：所有项目都没能调用模型");
+      err.partial = { processed: done, updated: written, tokens, report: reportFile, failed: modelFailed };
+      throw err;
+    }
+    this.service.index.setMeta("lastDistillAt", String(Date.now()));
+    return {
+      processed: done,
+      updated: written,
+      tokens,
+      detail: `蒸馏 ${done} 个项目，新增 L2 ${written} 条${dropped ? `，丢弃 ${dropped} 条引用不存在的无效建议` : ""}${modelFailed ? `，${modelFailed} 个项目因模型调用失败被跳过` : ""}`,
+      report: reportFile,
+    };
   }
 
   async _writeL2({ type, title, body, tags, project, evidence }) {
@@ -510,6 +543,10 @@ class MemoryTasks {
   // ---------- 任务 8：人格画像 ----------
 
   async runProfile(opts = {}) {
+    // dim：只生成某一个分区（persona/preferences/tech/habits）；空 = 全量。
+    // 单维度时 prompt 要求其余字段输出空数组（省 token），写入时也只落该分区文件——
+    // 其它分区（含用户手改的 pinned 条目）原样不动。
+    const dim = ["persona", "preferences", "tech", "habits"].includes(opts.dim) ? opts.dim : "";
     const cfg = this.flat();
     if (cfg["deep.enabled"] === false) return { processed: 0, tokens: 0, detail: "深层记忆已关闭（配置项 deep.enabled）" };
     if (cfg["deep.personaEnabled"] === false) return { processed: 0, tokens: 0, detail: "画像生成已关闭（配置项 deep.personaEnabled）" };
@@ -530,10 +567,11 @@ class MemoryTasks {
     const prompt = [
       "你是用户画像分析师。基于下面的记忆（含用户手写笔记与项目决策），归纳稳定特征。",
       '只输出严格 JSON：{"persona":[{"trait":"","evidence":["mem_id"]}],"communication":[{"pref":"","evidence":[]}],"tech":[{"pref":"","evidence":[]}],"habits":[{"habit":"","evidence":[]}],"values":[""]}',
+      dim ? `本次只归纳「${dim}」这一段：其余字段一律输出空数组 []，不要编造。` : "",
       "硬性要求：每条结论必须带 2~5 个真实存在的记忆 id 作为证据；没有证据的结论不要输出；不要编造。",
       "",
       ...rows.map((r) => `[${r.id}] (${r.layer}) ${r.title}：${r.summary || ""}`),
-    ].join("\n");
+    ].filter(Boolean).join("\n");
 
     this._progress(40, `调用模型归纳画像（素材 ${rows.length} 条）`);
     const result = await this.client.call({
@@ -557,11 +595,13 @@ class MemoryTasks {
       tech: this._renderProfileSection(parsed.tech, "pref", validIds),
       habits: this._renderProfileSection(parsed.habits, "habit", validIds),
     };
+    // 单维度只写目标分区文件；其它分区（含 pinned 手改内容）原样不动
+    const targets = dim ? { [dim]: sections[dim] } : sections;
     const historyDir = path.join(this.rootDir, "profile", ".history");
     fs.mkdirSync(historyDir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     let written = 0;
-    for (const [name, content] of Object.entries(sections)) {
+    for (const [name, content] of Object.entries(targets)) {
       const rel = `profile/${name}.md`;
       const abs = path.join(this.rootDir, rel);
       if (fs.existsSync(abs)) {
@@ -581,10 +621,10 @@ class MemoryTasks {
     } catch {}
     const reportFile = this._writeReport("profile", "画像生成报告", [
       `素材 ${rows.length} 条（L2 + 高重要度）`,
-      `生成分区：${written} 个`,
+      dim ? `生成分区：${dim}（单维度）` : `生成分区：${written} 个`,
       `token 消耗：${result.usage.input + result.usage.output}`,
     ]);
-    return { processed: rows.length, updated: written, tokens: result.usage.input + result.usage.output, detail: `画像已更新（${rows.length} 条素材）`, report: reportFile };
+    return { processed: rows.length, updated: written, tokens: result.usage.input + result.usage.output, detail: dim ? `画像已更新（${dim} · ${rows.length} 条素材）` : `画像已更新（${rows.length} 条素材）`, report: reportFile };
   }
 
   _renderProfileSection(list, field, validIds) {

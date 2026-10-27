@@ -1,6 +1,16 @@
 /**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
+/**
  * AgentHub · 记忆中枢（Memory Hub）
- * Copyright (c) 2026 沐辉 (HUIdada1)
+ * Copyright (c) 2026 沐晖 (HUIdada1)
  * https://github.com/HUIdada1/AgentHub
  * 本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。
  */
@@ -249,9 +259,203 @@ function jsonHasEntry(adapter) {
   return { present: true, disabled: false };
 }
 
+// ---------- DSH cordis.patch.yml（issue #170：DSH 不读 mcp.json，接入走 profile patch 层） ----------
+// patch 文件是顶层 YAML 数组，条目形如（与官方 patch 实样同构）：
+//   - insert:
+//       - resolve: '@deepseek-ai/dsh-mcp-client'
+//         config: { transport: stdio, serverName: ..., command: ..., args: [...] }
+// 只做文本级受控块操作（对齐 TOML 铁律：绝不全量解析用户 patch——它允许 !!js 表达式，
+// 通用 YAML 解析无法安全覆盖）；块内文本写入前用 js-yaml 单块解析自证（js-yaml 缺失则跳过）。
+
+const CORDIS_BEGIN = "# agenthub-memory:begin （AgentHub 记忆 MCP，由 AgentHub 写入）";
+const CORDIS_END = "# agenthub-memory:end";
+
+function ymlString(s) {
+  // YAML 单引号风格：仅 '' 需双写；反斜杠原样保留（Windows 路径可读性对齐官方 patch 实样）
+  return "'" + String(s).replace(/'/g, "''") + "'";
+}
+
+/** dsh 的合法 profile 目录发现：~/.dsh/profiles/<name>/。开源项目跑在形形色色的机器上，
+ *  profiles/ 下混有非 profile 目录（实测本机就有 node_modules/），用特征判定而非全收：
+ *  排除 node_modules 与点开头目录，且目录里要有 cordis.yml（基础层）或 cordis.patch.yml
+ *  （patch 层）其一——两者都没有的目录 DSH 不认。desktop 等桌面端 profile 优先 */
+function cordisProfileDirs(adapter) {
+  const first = adapter.configCandidates && adapter.configCandidates[0];
+  const profilesDir = first ? path.dirname(path.dirname(first)) : "";
+  const dirs = [];
+  if (!profilesDir) return { profilesDir, dirs };
+  try {
+    for (const d of fs.readdirSync(profilesDir, { withFileTypes: true })) {
+      if (!d.isDirectory()) continue;
+      const name = d.name;
+      if (name === "node_modules" || name.startsWith(".")) continue;
+      if (fs.existsSync(path.join(profilesDir, name, "cordis.yml")) || fs.existsSync(path.join(profilesDir, name, "cordis.patch.yml"))) dirs.push(name);
+    }
+  } catch { /* profiles 目录不存在或不可读 */ }
+  const order = (adapter.configCandidates || []).map((p) => path.basename(path.dirname(p)));
+  dirs.sort((a, b) => (order.indexOf(a) + 1 || order.length + 1) - (order.indexOf(b) + 1 || order.length + 1) || a.localeCompare(b));
+  return { profilesDir, dirs };
+}
+
+/** 合法 profile 对应的 cordis.patch.yml 路径（仅已存在的文件，供校验/卸载遍历） */
+function cordisPatchFiles(adapter) {
+  const { profilesDir, dirs } = cordisProfileDirs(adapter);
+  return dirs
+    .map((d) => path.join(profilesDir, d, "cordis.patch.yml"))
+    .filter((f) => fs.existsSync(f));
+}
+
+function cordisBlock(command, args, env) {
+  const argLines = (args || []).map((a) => `          - ${ymlString(a)}`).join("\n");
+  const envLines = Object.entries(env || {}).map(([k, v]) => `            ${k}: ${ymlString(v)}`).join("\n");
+  return [
+    CORDIS_BEGIN,
+    "- insert:",
+    "    - resolve: '@deepseek-ai/dsh-mcp-client'",
+    "      config:",
+    "        transport: stdio",
+    `        serverName: ${SERVER_KEY}`,
+    `        command: ${ymlString(command)}`,
+    ...(argLines ? ["        args:", argLines] : []),
+    ...(envLines ? ["        env:", envLines] : []),
+    CORDIS_END,
+  ].join("\n");
+}
+
+/** 块文本自证：js-yaml 可用则去掉受控注释后解析，解析不过绝不落盘（patch 文件坏了 DSH 起不来） */
+function cordisBlockValid(block) {
+  let yaml;
+  try { yaml = require("js-yaml"); } catch { return true; /* 依赖不可用：跳过深度校验 */ }
+  try {
+    const body = block.split("\n").filter((l) => !l.startsWith(CORDIS_BEGIN) && !l.startsWith(CORDIS_END)).join("\n");
+    const parsed = yaml.load(body);
+    const item = parsed && parsed[0] && parsed[0].insert && parsed[0].insert[0];
+    return !!(item && item.resolve === "@deepseek-ai/dsh-mcp-client" && item.config && item.config.serverName === SERVER_KEY);
+  } catch {
+    return false;
+  }
+}
+
+function injectCordisPatch(adapter, command, args, env) {
+  // 按 profile 目录覆盖（而非只写已存在的 patch 文件）：用户从未改过 patch 时文件不存在，
+  // 但 profile 本身已被 DSH 认领——patch 层缺失＝无自定义，创建只含我们条目的全新 patch 合法且必要
+  const { profilesDir, dirs } = cordisProfileDirs(adapter);
+  if (!dirs.length) {
+    return { ok: false, message: "未发现 DSH 的 profile（~/.dsh/profiles/<profile>/cordis.patch.yml）。请先运行一次 DSH 让它生成 profile 后重试——DSH 不读取 ~/.dsh/mcp.json，无法通过它接入（issue #170）" };
+  }
+  const order = (adapter.configCandidates || []).map((p) => path.basename(path.dirname(p)));
+  dirs.sort((a, b) => (order.indexOf(a) + 1 || order.length + 1) - (order.indexOf(b) + 1 || order.length + 1) || a.localeCompare(b));
+  const block = cordisBlock(command, args, env);
+  if (!cordisBlockValid(block)) {
+    return { ok: false, message: "待写入的受控块未通过 YAML 自证，已中止注入" };
+  }
+  const NEW_PATCH_HEADER = [
+    "# Your patch layer for this dsh profile, applied after every bundle layer:",
+    "# a top-level YAML array of loader patch entries (id-targeted config",
+    "# overrides, disables, and insert lists; `!!js` expressions allowed).",
+  ].join("\n");
+  const steps = [];
+  // 原子写失败（patch 被占用/只读盘/磁盘满）转成 step 错误，不让异常打断其余 profile 的注入
+  const safeWrite = (file, content, action) => {
+    try {
+      writeAtomic(file, content);
+      steps.push({ ok: true, action, file, backup: currentBak });
+      return true;
+    } catch (e) {
+      steps.push({ ok: false, file, backup: currentBak, message: `写入失败：${(e && e.message) || e}` });
+      return false;
+    }
+  };
+  let currentBak = null;
+  for (const dir of dirs) {
+    const file = path.join(profilesDir, dir, "cordis.patch.yml");
+    let text = "";
+    const exists = fs.existsSync(file);
+    if (exists) {
+      try {
+        text = fs.readFileSync(file, "utf8");
+      } catch (e) {
+        steps.push({ ok: false, file, message: `读取 patch 失败：${(e && e.message) || e}` });
+        continue;
+      }
+      // 顶层形态防御：patch 契约是 YAML 数组——首行非空内容必须是条目（-）或注释（#），
+      // 其它形态（对象/字符串）追加条目会弄坏整个 patch，宁可不注入
+      const firstContent = text.split("\n").map((l) => l.trim()).find((l) => l) || "";
+      if (firstContent && !firstContent.startsWith("-") && !firstContent.startsWith("#")) {
+        steps.push({ ok: false, file, message: "该 patch 文件顶层不是 YAML 数组，已拒绝追加以免破坏 DSH 配置" });
+        continue;
+      }
+    }
+    currentBak = backupFile(file);
+    if (exists) {
+      const begin = text.indexOf(CORDIS_BEGIN);
+      if (begin >= 0) {
+        const end = text.indexOf(CORDIS_END, begin);
+        if (end < 0) {
+          // 对齐指令块同款防御：起始在、结束不在，再追加必产生重复块
+          steps.push({ ok: false, file, backup: currentBak, message: "受控块起始注释存在但结束注释缺失，已拒绝注入，请手动处理" });
+          continue;
+        }
+        safeWrite(file, squeezeSeam(text.slice(0, begin), block + "\n", text.slice(end + CORDIS_END.length)), "replaced");
+        continue;
+      }
+      const sep = text && !text.endsWith("\n") ? "\n" : "";
+      safeWrite(file, `${text}${sep}\n${block}\n`, "injected");
+      continue;
+    }
+    // 全新 patch：官方头注释 + 我们的受控块
+    safeWrite(file, `${NEW_PATCH_HEADER}\n${block}\n`, "created");
+  }
+  // 旧 mcp.json 残留提示（DSH 不读它，issue 作者环境即被写入过）：帮用户清理认知，不代删
+  const legacy = path.join(profilesDir, "..", "mcp.json");
+  if (fs.existsSync(legacy)) {
+    steps.push({ ok: true, action: "legacy-mcp-json", file: legacy, message: "检测到旧的 ~/.dsh/mcp.json 残留——DSH 不读取它，可自行删除" });
+  }
+  const failed = steps.find((s) => !s.ok);
+  return failed ? { ok: false, message: failed.message || "patch 注入失败", steps } : { ok: true, action: "injected", steps };
+}
+
+function uninjectCordisPatch(adapter) {
+  const files = cordisPatchFiles(adapter).filter((f) => fs.existsSync(f));
+  if (!files.length) return { ok: true, action: "noop", steps: [] };
+  const steps = [];
+  let touched = false;
+  for (const file of files) {
+    let text = "";
+    try {
+      text = fs.readFileSync(file, "utf8");
+    } catch { continue; }
+    const begin = text.indexOf(CORDIS_BEGIN);
+    if (begin < 0) continue;
+    const end = text.indexOf(CORDIS_END, begin);
+    if (end < 0) {
+      steps.push({ ok: false, file, message: "受控块起始注释存在但结束注释缺失，请手动处理" });
+      continue;
+    }
+    const bak = backupFile(file);
+    const before = text.slice(0, begin).replace(/\n+$/, "\n");
+    const after = text.slice(end + CORDIS_END.length).replace(/^\n+/, "");
+    writeAtomic(file, before + after);
+    touched = true;
+    steps.push({ ok: true, action: "uninjected", file, backup: bak });
+  }
+  const failed = steps.find((s) => !s.ok);
+  return failed ? { ok: false, message: failed.message || "卸载失败", steps } : { ok: true, action: touched ? "uninjected" : "noop", steps };
+}
+
+function cordisHasEntry(adapter) {
+  for (const file of cordisPatchFiles(adapter)) {
+    try {
+      if (fs.readFileSync(file, "utf8").includes(CORDIS_BEGIN)) return { present: true, disabled: false };
+    } catch { /* 单文件不可读不影响其余 profile 判定 */ }
+  }
+  return null;
+}
+
 module.exports = {
   BLOCK_BEGIN, BLOCK_END, SERVER_KEY, INSTRUCTION_BLOCK,
   injectBlock, removeBlock, hasBlock,
   injectJsonConfig, uninjectJsonConfig, injectTomlConfig, uninjectTomlConfig,
+  injectCordisPatch, uninjectCordisPatch, cordisHasEntry,
   tomlHasEntry, jsonHasEntry, backupFile, writeAtomic, tomlBlockRange, tomlString,
 };

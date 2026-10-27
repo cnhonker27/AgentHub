@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // LobsterAI（网易有道龙虾）渠道自测探针（离线为主；联网探针默认跳过）
 // 跑法（必须用项目内 Electron 的 Node：加密实现在 Electron 运行时，系统 Node 无 safeStorage）：
 //   ELECTRON_RUN_AS_NODE=1 "node_modules/electron/dist/electron.exe" tools/proxy-lobster-selftest.cjs
@@ -238,7 +248,7 @@ async function main() {
   await T("T19 预刷新窗口：lobster 用默认 24h（凭据独立，不与客户端共用文件）", () => {
     // raccoon 因与桌面端共用 auth.json 而必须把窗口压到 300s 防抢刷；
     // lobster 走独立回环 OAuth（AgentHub 持自己那份凭据），不存在共用文件问题，
-    // 故沿用默认 24h。此断言锁住「不要照抄 raccoon 的 300s」。
+    // 故沿用默认 24h。此断言锁住「不要沿用 raccoon 的 300s」。
     assert.strictEqual(ad.refreshWindowSec, undefined, "lobster 不应设 refreshWindowSec（走默认 24h）");
     // access token 实测 30 天有效，24h 窗口不会每轮都触发刷新
     const dec = require("../electron/backend/proxy/util.cjs").jwtDecode("x.eyJleHAiOjQxMDI0NDQ4MDB9.y");

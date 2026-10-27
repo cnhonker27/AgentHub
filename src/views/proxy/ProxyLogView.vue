@@ -1,3 +1,13 @@
+<!--
+  ============================================================
+   作者：沐晖
+   日期：2026-10-22
+   版权声明：本代码归沐晖所有。
+     · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+     · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+     此注释为版权与授权声明，禁止删除。
+  ============================================================
+-->
 <script setup lang="ts">
 // 反代网关 · 操作日志（「日志」页签）：反代网关各项操作一条一条落库（op_logs 表，stats.db），
 // 这里分页展示 + 时间段/等级/操作筛选 + 导出 Excel。写入点见 backend/proxy/oplog.cjs 模块头。
@@ -106,7 +116,7 @@ const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize))
     <div class="page-head">
       <div>
         <div class="page-title">日志</div>
-        <div class="page-sub">反代网关各项操作记录（代理请求 / 签到 / 账号 / 配置等），本地存储 30 天；等级：信息=成功 · 警告=需人工/4xx · 错误=失败</div>
+        <div class="page-sub">号池管家各项操作记录（账号 / 签到 / 配置等），本地存储 30 天；等级：信息=成功 · 警告=需人工/4xx · 错误=失败</div>
       </div>
       <div class="page-actions">
         <button class="btn btn-primary" @click="load(); loadOps()">刷新</button>

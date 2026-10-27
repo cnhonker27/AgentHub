@@ -1,6 +1,16 @@
 <!--
+  ============================================================
+   作者：沐晖
+   日期：2026-10-22
+   版权声明：本代码归沐晖所有。
+     · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+     · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+     此注释为版权与授权声明，禁止删除。
+  ============================================================
+-->
+<!--
   AgentHub · 记忆中枢（Memory Hub）
-  Copyright (c) 2026 沐辉 (HUIdada1)
+  Copyright (c) 2026 沐晖 (HUIdada1)
   https://github.com/HUIdada1/AgentHub
   本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。
 -->
@@ -59,7 +69,8 @@ const kpi = computed(() => {
       label: "已连通 Agent",
       value: mem.beats.length ? `${mem.verifiedAgents}/${mem.beats.length}` : `0/${agents.value.filter((a) => a.injected).length}`,
       foot: "真实调用过 / 已配置",
-      page: "agents",
+      page: "hub",
+      hubSub: "agents",
       help: "分母是已注入 MCP 的 Agent 数，分子是「真的调用过记忆工具」的数量。只配置了但从未调用不算连通——避免假绿灯。",
     },
     {
@@ -149,20 +160,21 @@ function openDrawer(id: string) {
   mem.openDetail(id);
 }
 
-function goto(page: string) {
+function goto(page: string, hubSub?: string) {
   if (page === "review") {
     mem.gotoReview();
     return;
   }
   // 去浏览页时明确落到列表视图：浏览页是保活的，不指定视图会停在用户上次看的那个视图上
   if (page === "browse") mem.browseViewHint = "list";
+  // 接入与迁移页内的段落落点（KPI「已连通 Agent」直接落到接入段）
+  if (page === "hub") app.hubSubHint = hubSub || "agents";
   app.setPage(page);
 }
 
-/** 模型与网关现为配置页的子板块：先留跳转提示（配置页消费后清空），再进配置页 */
+/** 模型与网关已迁到平台设置：直接打开「设置 · 模型与网关」页签，不再经配置页中转 */
 function openModels() {
-  mem.configTabHint = "__models__";
-  app.openModuleConfig();
+  app.openSettings("models");
 }
 
 let offEvent: (() => void) | undefined;
@@ -238,7 +250,7 @@ watch(active, (v) => {
     </div>
 
     <div class="mem-grid mem-grid-kpi">
-      <div v-for="k in kpi" :key="k.label" class="mem-kpi" :class="{ 'is-warn': k.warn }" @click="goto(k.page)">
+      <div v-for="k in kpi" :key="k.label" class="mem-kpi" :class="{ 'is-warn': k.warn }" @click="goto(k.page, k.hubSub)">
         <span class="k-label">{{ k.label }}<MemHelp v-if="k.help" :text="k.help" :width="300" /></span>
         <span class="k-value">{{ k.value }}</span>
         <span class="k-foot">{{ k.foot }}</span>
@@ -255,7 +267,7 @@ watch(active, (v) => {
         </div>
         <!-- 定高滚动：后续接入的 Agent 变多时列表自己滚，不把卡片越撑越高 -->
         <div v-if="agents.length" class="mem-scroll mem-scroll-sm">
-          <div v-for="a in sortedAgents" :key="a.id" class="mem-chain-node" style="cursor: pointer" @click="goto('agents')">
+          <div v-for="a in sortedAgents" :key="a.id" class="mem-chain-node" style="cursor: pointer" @click="goto('hub', 'agents')">
             <span class="mem-dot" :class="a.beat ? 'ok' : a.injected ? 'warn' : 'bad'"></span>
             <span class="n-title">{{ a.name }}</span>
             <span style="margin-left: auto" class="mem-chip" :class="a.beat ? 'accent' : a.injected ? 'warn' : ''">

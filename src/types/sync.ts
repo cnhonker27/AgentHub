@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 统一用量模型与配置类型 —— 前后端共用结构（Node 侧对应 electron/backend）
 
 /** 统一用量明细（所有数据源归一化后的结构） */
@@ -212,16 +222,32 @@ export interface BillingConfig {
   displayCurrency: "CNY" | "USD"; // 显示币种
   usdToCny: number; // USD→CNY 汇率（手动，改后全部历史费用即时重算）
   importProxy: string; // 价格源导入代理（留空=系统代理/直连）
-  remotePricing: RemotePricingConfig; // 远程价格源自动拉取（来源 remote）
+  sources: Record<string, PricingSourceConfig>; // 三套在线价格表（official / modelsdev / remote）
 }
 
-/** 远程价格源（参考 sub2api pricing.remote_url/hash_url；三层来源中优先级居中：手动 > 远程 > 内置） */
-export interface RemotePricingConfig {
+/**
+ * 在线定价源的单套配置（链接内置在代码里，不需要用户填地址）。
+ * 三套的顺序即优先级：官方倍率预设 > models.dev > 远程价格表；手动价永远最高。
+ */
+export interface PricingSourceConfig {
   enabled: boolean;
-  url: string; // 价格表 JSON 地址（LiteLLM 兼容格式）
-  hashUrl: string; // 哈希校验文件地址（可选，远程无变化时短路由）
   intervalHours: number; // 检查间隔（小时，随数据同步顺带触发）
 }
+
+/** 单套价格源的状态（配置 + 上次拉取结果，界面直接渲染三张卡片） */
+export interface PricingSourceStatus extends PricingSourceConfig {
+  id: string; // official / modelsdev / remote
+  name: string;
+  host: string; // 展示用域名
+  url: string; // 内置链接（不展示，仅供诊断）
+  lastAt: number | null;
+  lastHash: string | null;
+  lastModels: number | null;
+  lastTotal: number | null;
+  lastError: string | null;
+  lastErrorAt: number | null;
+}
+
 
 /** 同步日志 */
 export interface SyncLog {
@@ -300,12 +326,13 @@ export interface PriceEntry {
   effectiveTo: number | null; // epoch ms（不含）；null = 至今
   updatedAt: number;
   updatedBy: string;
-  source: "manual" | "remote" | "builtin"; // manual=手动 > remote=远程拉取 > builtin=内置种子
+  source: "manual" | "newapi" | "remote" | "builtin"; // 手动 > New API > 远程拉取 > 内置种子
 }
 
 /** 价格表行：每个模型（+供应商维度）的最新版本段 */
 export interface PriceRow extends PriceEntry {
   versions: number; // 该模型共有几个价格版本
+  sources: PriceEntry["source"][]; // 该模型存在哪些来源的价格段（被高优先级盖住的来源不单独出行）
   active: boolean; // 当前时刻是否生效中（false = 待生效）
 }
 

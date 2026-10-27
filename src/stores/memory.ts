@@ -1,6 +1,16 @@
 /**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
+/**
  * AgentHub · 记忆中枢（Memory Hub）
- * Copyright (c) 2026 沐辉 (HUIdada1)
+ * Copyright (c) 2026 沐晖 (HUIdada1)
  * https://github.com/HUIdada1/AgentHub
  * 本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。
  */
@@ -41,8 +51,6 @@ export const useMemoryStore = defineStore("memory", {
     /** 事件回流计数：新增记忆时自增，浏览页据此置顶高亮 */
     newTick: 0,
     lastNewId: "",
-    /** 配置页子板块跳转提示：仪表盘点「模型与网关」时写 "__models__"，配置页消费后清空 */
-    configTabHint: "",
     /** 项目页「查看记忆」跳转预过滤：BrowseView 激活时消费并清空 */
     browsePrefilter: "",
     /** 记忆浏览的视图落点提示（"list" | "heatmap" | "review" | "trash"）：待确认收件箱入口都走它，消费后清空 */
@@ -110,7 +118,7 @@ export const useMemoryStore = defineStore("memory", {
         this.root = env.root || "";
         this.loaded = true;
         this.loadError = "";
-        // 页签显隐白名单：app 侧据此过滤横条；配置里没这个键的（含后端还没加 ui.tabs 时）按默认 5 个渲染
+        // 页签显隐白名单：app 侧据此过滤横条；配置里没这个键的（含后端还没加 ui.tabs 时）按默认 8 个渲染
         try {
           const app = useAppStore();
           const tabs = (this.config?.ui?.tabs as unknown) || [];
@@ -200,6 +208,8 @@ export const useMemoryStore = defineStore("memory", {
       try {
         const c = await api.memoryConflictsList();
         out.sync = c.conflicts.length;
+        // 页签已合并为「接入与迁移」：红点同时挂 hub 键（老配置开 sync 页签的用户也照常看到）
+        out.hub = c.conflicts.length;
       } catch {
         /* 同上 */
       }

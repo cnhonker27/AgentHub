@@ -1,11 +1,21 @@
 <!--
+  ============================================================
+   作者：沐晖
+   日期：2026-10-22
+   版权声明：本代码归沐晖所有。
+     · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+     · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+     此注释为版权与授权声明，禁止删除。
+  ============================================================
+-->
+<!--
   AgentHub · 记忆中枢（Memory Hub）
-  Copyright (c) 2026 沐辉 (HUIdada1)
+  Copyright (c) 2026 沐晖 (HUIdada1)
   https://github.com/HUIdada1/AgentHub
   本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。
 -->
 <!-- 记忆中枢 · 自动化任务：总控（含预算）+ 9 张任务卡（状态为主）+ 时间线
-     成本明细在仪表盘「AI 花费」；模型配置在配置页；隐私开关在配置页「隐私」分组 -->
+     成本明细在仪表盘「AI 花费」；模型配置在「设置 · 模型与网关」；隐私开关在配置页「隐私」分组 -->
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { toast as ElMessage } from "../../utils/toast";
@@ -13,6 +23,7 @@ import { useAppStore } from "../../stores/app";
 import { useMemoryStore } from "../../stores/memory";
 import * as api from "../../api/ipc";
 import { formatInteger, timeAgo, timeUntil, formatDateTime } from "../../composables/useFormat";
+import { useAiGuard } from "../../composables/useAiGuard";
 import { taskLabelZh } from "../../components/memory/labels";
 import MemHelp from "../../components/memory/MemHelp.vue";
 import MemSelect from "../../components/memory/MemSelect.vue";
@@ -21,6 +32,8 @@ import MemProgressDialog from "../../components/memory/MemProgressDialog.vue";
 
 const app = useAppStore();
 const mem = useMemoryStore();
+/** AI 引导守卫：模型类任务在未配置 / 渠道报错时弹窗引导去「设置 · 模型与网关」 */
+const aiGuard = useAiGuard();
 const active = computed(() => app.activeModule === "memory" && app.activePage === "auto");
 
 type TaskRhythm = { intervalMin: number | null; daily: string | null; weekly: number | null; weeklyTime: string | null };
@@ -41,7 +54,9 @@ type StatusShape = {
 };
 
 const status = ref<StatusShape | null>(null);
-const timeline = ref<{ task: string; name?: string; at: number; ok: boolean; ms: number; tokens: number; detail: string; processed?: number; updated?: number; report?: string }[]>([]);
+/** 时间线条目：errorCode 由后端 scheduler 写入（record.errorCode = e.code），
+ *  是「未配置模型」这类原因唯一可靠的判定依据（不再靠文案匹配） */
+const timeline = ref<{ task: string; name?: string; at: number; ok: boolean; ms: number; tokens: number; detail: string; errorCode?: string; processed?: number; updated?: number; report?: string }[]>([]);
 const timelineAll = ref(false);
 const limitInput = ref(0);
 const limitEl = ref<HTMLInputElement | null>(null);
@@ -107,6 +122,9 @@ const runTracking = computed(() => !!trackId.value && !runResult.value);
 let trackResolving = false;
 
 async function runTask(id: string) {
+  // 前置守卫：只对「会调模型」的任务做（索引自检/清理/归类这些零成本任务不该被模型配置拦住）
+  const needsModel = status.value?.tasks.find((t) => t.id === id)?.needsModel !== false;
+  if (needsModel && !(await aiGuard.ensureAiReady({ task: taskNameOf(id) }))) return;
   try {
     const r = await api.memoryAutoTaskRun(id);
     if (!r.ok) {
@@ -139,13 +157,15 @@ async function runTask(id: string) {
 
 /** 跟踪收口：任务不在跑也不在队后，从时间线找本次执行记录（e.at >= 开始时间戳），
     找到即回填结果；时间线在事件节流下可能滞后，补一拍再收口，仍没有按「已跳过」处理 */
-function finishTrack(entry?: { ok: boolean; detail: string; tokens: number }) {
+function finishTrack(entry?: { ok: boolean; detail: string; tokens: number; errorCode?: string }) {
   if (!trackId.value) return;
   trackId.value = "";
   if (entry && entry.ok) {
     runResult.value = { ok: true, message: entry.detail || "执行完成", extra: [entry.tokens ? `消耗 ${formatInteger(entry.tokens)} token` : ""].filter(Boolean) };
   } else if (entry) {
     runResult.value = { ok: false, message: entry.detail || "任务失败" };
+    // 手动执行是用户在场场景：未配置模型时弹一次引导窗（后台自动跑不弹，只落时间线标记）
+    if (entry.errorCode === "no_model") aiGuard.handleAiError({ code: "no_model", message: entry.detail } as unknown as Error, { task: trackName.value });
   } else {
     runResult.value = { ok: false, message: "任务已结束（可能被跳过或取消）" };
   }
@@ -312,24 +332,6 @@ async function saveTaskEnabled(t: TaskRow) {
   }
 }
 
-const pauseConfirmOpen = ref(false);
-
-function pauseAll(resume = false) {
-  // 恢复不需要确认；暂停走 MemDialog 确认（模块弹窗统一，不再用 ElMessageBox）
-  if (resume) return doPause(true);
-  pauseConfirmOpen.value = true;
-}
-
-async function doPause(resume = false) {
-  try {
-    await api.memoryAutoPause({ resume });
-    await refresh();
-    ElMessage.success(resume ? "已恢复" : "已暂停");
-  } catch (e) {
-    ElMessage.error((e as Error).message || "操作失败");
-  }
-}
-
 async function exportReport() {
   try {
     const r = await api.memoryAutoReport();
@@ -386,6 +388,94 @@ function focusLimit() {
   limitEl.value?.focus();
   limitEl.value?.select();
 }
+
+/* ===== 三「停」合一：运行中 / 暂停到明天 / 全部关闭 =====
+   原来总开关与「暂停全部」是两个控件、概念上却是同一件事（停还是不停）。
+   暂停到明天走后端 pausedUntil（到期自动恢复），不再需要用户记得回来手动恢复。 */
+const autoMode = computed(() => (!status.value?.enabled ? "off" : status.value?.paused ? "paused" : "on"));
+const AUTO_MODE_OPTIONS = [
+  { value: "on", label: "运行中（按各任务节奏自动执行）" },
+  { value: "paused", label: "暂停到明天 0 点（手动「立即执行」不受影响）" },
+  { value: "off", label: "全部关闭（手动「立即执行」仍可用）" },
+];
+const modeBusy = ref(false);
+async function setAutoMode(v: string | number) {
+  const mode = String(v);
+  if (mode === autoMode.value || modeBusy.value) return;
+  modeBusy.value = true;
+  try {
+    if (mode === "off") {
+      // 先清暂停态：否则下次开启会立刻处于「暂停到某时刻」的残留状态
+      await api.memoryAutoPause({ resume: true });
+      await mem.save({ "auto.enabled": false });
+    } else if (mode === "paused") {
+      await mem.save({ "auto.enabled": true });
+      const tomorrow = new Date();
+      tomorrow.setHours(24, 0, 0, 0);
+      await api.memoryAutoPause({ until: tomorrow.getTime() });
+    } else {
+      await mem.save({ "auto.enabled": true });
+      await api.memoryAutoPause({ resume: true });
+    }
+    await refresh();
+    ElMessage.success(mode === "on" ? "自动化已恢复运行" : mode === "paused" ? "已暂停，明天 0 点自动恢复" : "自动化已全部关闭");
+  } catch (e) {
+    await refresh();
+    ElMessage.error((e as Error).message || "切换失败");
+  } finally {
+    modeBusy.value = false;
+  }
+}
+
+/* ===== 预设套餐：只调整任务开关与日预算，不改动各任务的执行节奏 ===== */
+type PresetId = "frugal" | "standard" | "busy";
+const PRESETS: { id: PresetId; label: string; desc: string; tokens: number; on: string[] }[] = [
+  { id: "frugal", label: "省钱", desc: "只跑零成本任务（归类、索引自检、清理），完全不调模型", tokens: 0, on: ["classify", "index-scan", "cleanup"] },
+  { id: "standard", label: "标准", desc: "零成本 + 打标签 + 摘要 + 失效识别；日预算 20 万 token", tokens: 200000, on: ["classify", "index-scan", "cleanup", "tag", "summarize", "extract", "supersede"] },
+  { id: "busy", label: "勤快", desc: "全部任务开启（含蒸馏、画像、全库查重）；日预算 50 万 token", tokens: 500000, on: ["classify", "index-scan", "cleanup", "tag", "summarize", "extract", "supersede", "distill", "profile", "consolidate"] },
+];
+/** 预设管辖的任务 id：名单外的任务（含后端将来新增的）一律不处理，避免被预设意外关闭 */
+const PRESET_KNOWN = new Set(["extract", "summarize", "tag", "classify", "supersede", "distill", "consolidate", "profile", "index-scan", "cleanup"]);
+const presetConfirm = ref<PresetId | null>(null);
+const presetBusy = ref(false);
+const presetTarget = computed(() => PRESETS.find((x) => x.id === presetConfirm.value) || null);
+function applyPreset(id: PresetId) {
+  presetConfirm.value = id;
+}
+async function doApplyPreset() {
+  const p = presetTarget.value;
+  presetConfirm.value = null;
+  if (!p || presetBusy.value) return;
+  presetBusy.value = true;
+  let fail = 0;
+  try {
+    for (const t of status.value?.tasks || []) {
+      if (!PRESET_KNOWN.has(t.id)) continue;
+      const want = p.on.includes(t.id);
+      if (want === t.enabled) continue;
+      try {
+        await api.memoryAutoTaskSave(t.id, { enabled: want });
+      } catch {
+        fail++;
+      }
+    }
+    await mem.save({ "auto.dailyTokenLimit": p.tokens });
+    await refresh();
+    if (fail) ElMessage.warning(`已应用「${p.label}」套餐：${fail} 个任务未保存成功，可手动重试`);
+    else ElMessage.success(`已应用「${p.label}」套餐（任务节奏未改动）`);  } catch (e) {
+    await refresh();
+    ElMessage.error((e as Error).message || "应用套餐失败");
+  } finally {
+    presetBusy.value = false;
+  }
+}
+
+/** 任务清单折叠：9 张卡默认收起（预设覆盖大多数场景，逐卡微调是高级需求） */
+const tasksOpen = ref(false);
+const taskSummary = computed(() => {
+  const list = status.value?.tasks || [];
+  return { total: list.length, on: list.filter((t) => t.enabled).length };
+});
 
 watch(
   () => status.value?.dailyTokenLimit,
@@ -481,18 +571,19 @@ watch(active, (v) => {
     <div class="mem-card">
       <div class="mem-card-title">
         总控
-        <MemHelp text="总开关停掉全部自动化；「暂停」只是临时停（手动执行不受影响）。日 token 上限到顶后只停会调模型的任务，索引自检这类零成本任务照跑。" />
-        <span class="mem-hint">{{ status?.paused ? "已暂停" : status?.enabled ? "运行中" : "已关闭" }}</span>
+        <MemHelp text="一个下拉管三种「停」：运行中按各任务节奏自动跑；暂停到明天 0 点（手动执行不受影响）；全部关闭（手动执行仍可用）。日 token 上限到顶后只停会调模型的任务，索引自检这类零成本任务照跑。" />
+        <span class="mem-hint">{{ autoMode === "paused" && status?.pausedUntil ? `暂停至 ${formatDateTime(status.pausedUntil)}` : autoMode === "paused" ? "已暂停" : autoMode === "off" ? "已关闭" : "运行中" }}</span>
       </div>
-      <!-- 总开关是主控件，暂停是次级文字按钮：分组显示避免误点 -->
+      <!-- 三「停」合一：开关与暂停本是同一件事（停不停），合成一个下拉 -->
       <div class="mem-row" style="gap: 14px; padding: 4px 0; border-bottom: 1px solid var(--mem-line); margin-bottom: 8px; align-items: center">
-        <span class="mem-row" style="gap: 8px; align-items: center">
-          <div class="switch" :class="{ on: !!status?.enabled }" role="switch" :aria-checked="!!status?.enabled" @click="saveKV({ 'auto.enabled': !status?.enabled })"></div>
-          <span style="font-size: 13px">总开关<MemHelp text="关掉后所有自动化任务停止调度（手动点「立即执行」仍可用）；这是唯一的总闸。" /></span>
-        </span>
-        <button class="btn btn-ghost" @click="pauseAll(status?.paused)">
-          {{ status?.paused ? "恢复自动化" : "暂停全部（手动「立即执行」不受影响）" }}
-        </button>
+        <span style="font-size: 13px; flex: 0 0 auto">自动化状态</span>
+        <MemSelect
+          :model-value="autoMode"
+          width="320px"
+          :disabled="modeBusy"
+          :options="AUTO_MODE_OPTIONS"
+          @change="setAutoMode"
+        />
       </div>
       <div class="mem-two-col" style="gap: 4px 14px">
         <!-- 左列：运行状态 -->
@@ -522,9 +613,8 @@ watch(active, (v) => {
         <div class="mem-kv">
           <span class="k">日 token 上限<MemHelp text="每天允许自动化花掉的 token 上限（0 = 不限）。到顶后只跳过会调模型的任务，第二天 0 点自动重置。" /></span>
           <span class="v">
-            <input ref="limitEl" v-model.number="limitInput" type="number" min="0" class="f-input" style="width: 140px" />
-            <button class="btn-outline" @click="saveLimit(limitInput)">保存</button>
-            <span class="mem-hint">0 = 不限额</span>
+            <input ref="limitEl" v-model.number="limitInput" type="number" min="0" class="f-input" style="width: 140px" @change="saveLimit(limitInput)" @keyup.enter="saveLimit(limitInput)" />
+            <span class="mem-hint">改完自动保存 · 0 = 不限额</span>
           </span>
           <span class="k">超预算行为<MemHelp text="选「暂停」只停会花钱的任务、保留索引自检这类零成本任务；选「不限制」则超了也继续跑。" /></span>
           <span class="v">
@@ -542,32 +632,62 @@ watch(active, (v) => {
       </div>
     </div>
 
-    <div class="mem-grid mem-grid-3">
-      <div v-for="t in status?.tasks || []" :key="t.id" class="mem-tile">
-        <div class="mem-tile-head">
-          <span class="t-name">{{ t.name }}</span>
-          <span class="mem-row" style="gap: 6px">
-            <button class="btn btn-ghost" style="padding: 0 8px; font-size: 12px" @click="openEdit(t)">编辑</button>
-            <div class="switch" :class="{ on: t.enabled }" role="switch" :aria-checked="!!t.enabled" @click="toggleTask(t)"></div>
-            <span class="mem-hint">{{ t.enabled ? "开" : "关" }}</span>
-          </span>
-        </div>
-        <div class="t-row"><span>说明</span><span>{{ TASK_DESC[t.id] || "—" }}</span></div>
-        <div class="t-row"><span>节奏</span><span>{{ fmtInterval(t) }}</span></div>
-        <!-- 上次 / 下次合并一行两列：标签|值|标签|值 四列网格，值右对齐 -->
-        <div class="t-dual">
-          <span>上次</span><span>{{ t.lastAt ? timeAgo(t.lastAt) : "从未执行" }}</span>
-          <span>下次</span><span>{{ t.enabled && t.nextAt ? timeUntil(t.nextAt) : "—" }}</span>
-        </div>
-        <div class="t-row">
-          <span>统计<MemHelp :text="t.needsModel ? `调模型 · ${t.estimate}；失败会标红并可立即重跑。` : '不调模型、零成本。'" /></span>
-          <span>
-            {{ t.successRate === null ? "—" : t.successRate + "%" }}（{{ t.runs }} 次 · {{ formatInteger(t.tokens) }} token）
-          </span>
-        </div>
-        <div class="mem-tile-foot">
-          <button class="btn btn-ghost" @click="runTask(t.id)">立即执行</button>
-          <span v-if="status?.queue?.includes(t.id)" class="mem-chip">已排队</span>
+    <!-- 预设套餐：一键定好「跑哪些任务、花多少」，逐卡微调收进下方折叠 -->
+    <div class="mem-card">
+      <div class="mem-card-title">
+        预设套餐
+        <span class="mem-hint">一键设定任务开关与日预算；各任务的节奏不受影响</span>
+        <MemHelp text="按使用强度选一档：省钱＝只跑零成本任务（不配模型也能用）；标准＝加上打标签、摘要、失效识别；勤快＝全量（含蒸馏与画像，花 token 较多）。应用后仍可在下方逐个调整。" />
+      </div>
+      <div class="mem-row" style="gap: 10px; flex-wrap: wrap">
+        <button
+          v-for="p in PRESETS"
+          :key="p.id"
+          class="btn"
+          :class="presetBusy ? '' : 'btn-outline'"
+          :disabled="presetBusy"
+          :title="p.desc"
+          @click="applyPreset(p.id)"
+        >
+          {{ p.label }}
+        </button>
+        <span class="mem-hint" style="align-self: center">点选后确认即生效（会按套餐调整各任务开关；你手动改过的开关也会被调整）</span>
+      </div>
+    </div>
+
+    <div class="mem-card">
+      <div class="mem-card-title">
+        任务清单（{{ taskSummary.total }} 项 · {{ taskSummary.on }} 项开启）
+        <span class="mem-hint">逐卡可改开关与执行节奏；多数场景用上方套餐即可</span>
+        <button class="btn-outline" @click="tasksOpen = !tasksOpen">{{ tasksOpen ? "收起" : "展开管理" }}</button>
+      </div>
+      <div v-if="tasksOpen" class="mem-grid mem-grid-3">
+        <div v-for="t in status?.tasks || []" :key="t.id" class="mem-tile">
+          <div class="mem-tile-head">
+            <span class="t-name">{{ t.name }}</span>
+            <span class="mem-row" style="gap: 6px">
+              <button class="btn btn-ghost" style="padding: 0 8px; font-size: 12px" @click="openEdit(t)">编辑</button>
+              <div class="switch" :class="{ on: t.enabled }" role="switch" :aria-checked="!!t.enabled" @click="toggleTask(t)"></div>
+              <span class="mem-hint">{{ t.enabled ? "开" : "关" }}</span>
+            </span>
+          </div>
+          <div class="t-row"><span>说明</span><span>{{ TASK_DESC[t.id] || "—" }}</span></div>
+          <div class="t-row"><span>节奏</span><span>{{ fmtInterval(t) }}</span></div>
+          <!-- 上次 / 下次合并一行两列：标签|值|标签|值 四列网格，值右对齐 -->
+          <div class="t-dual">
+            <span>上次</span><span>{{ t.lastAt ? timeAgo(t.lastAt) : "从未执行" }}</span>
+            <span>下次</span><span>{{ t.enabled && t.nextAt ? timeUntil(t.nextAt) : "—" }}</span>
+          </div>
+          <div class="t-row">
+            <span>统计<MemHelp :text="t.needsModel ? `调模型 · ${t.estimate}；失败会标红并可立即重跑。` : '不调模型、零成本。'" /></span>
+            <span>
+              {{ t.successRate === null ? "—" : t.successRate + "%" }}（{{ t.runs }} 次 · {{ formatInteger(t.tokens) }} token）
+            </span>
+          </div>
+          <div class="mem-tile-foot">
+            <button class="btn btn-ghost" @click="runTask(t.id)">立即执行</button>
+            <span v-if="status?.queue?.includes(t.id)" class="mem-chip">已排队</span>
+          </div>
         </div>
       </div>
     </div>
@@ -592,7 +712,11 @@ watch(active, (v) => {
               <td>{{ e.ok ? "✓" : "✗" }}</td>
               <td class="num">{{ (e.ms / 1000).toFixed(1) }}s</td>
               <td class="num">{{ formatInteger(e.tokens) }}</td>
-              <td>{{ e.detail }}</td>
+              <td>
+                {{ e.detail }}
+                <!-- 未配置模型：时间线上直接给出去处，不必等用户自己找「设置」 -->
+                <button v-if="e.errorCode === 'no_model'" class="btn-link" style="margin-left: 6px" @click="app.openSettings('models')">去配置模型 →</button>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -663,14 +787,16 @@ watch(active, (v) => {
       </template>
     </MemDialog>
 
-    <!-- 暂停全部确认：暂停是次级操作，确认后停止调度（手动「立即执行」不受影响） -->
-    <MemDialog v-model:open="pauseConfirmOpen" title="暂停自动化" sub="临时停止，随时可恢复" width="480px">
-      <p style="margin: 0; line-height: 1.7">
-        暂停后所有自动化任务停止调度；手动点「立即执行」不受影响，点「恢复自动化」即回到原节奏。
-      </p>
+    <!-- 预设套餐确认：会按套餐调整各任务开关（节奏不动），先讲清楚再应用 -->
+    <MemDialog :open="!!presetTarget" :title="`应用「${presetTarget?.label || ''}」套餐`" sub="只调整任务开关与日预算，不改变各任务的执行节奏" width="520px" @update:open="(v: boolean) => { if (!v) presetConfirm = null; }">
+      <div v-if="presetTarget" style="line-height: 1.8">
+        <p style="margin: 0 0 8px">{{ presetTarget.desc }}</p>
+        <p style="margin: 0 0 8px">将开启：{{ presetTarget.on.map((id) => taskNameOf(id)).join("、") || "（无）" }}；其余任务关闭。</p>
+        <p style="margin: 0; color: var(--text-3)">你手动改过的任务开关也会被调整为套餐口径；执行节奏保持不变。</p>
+      </div>
       <template #foot>
-        <button class="btn btn-cta" @click="pauseConfirmOpen = false; doPause(false)">确认暂停</button>
-        <button class="btn btn-ghost" @click="pauseConfirmOpen = false">取消</button>
+        <button class="btn btn-cta" :disabled="presetBusy" @click="doApplyPreset">{{ presetBusy ? "应用中…" : "确认应用" }}</button>
+        <button class="btn btn-ghost" @click="presetConfirm = null">取消</button>
       </template>
     </MemDialog>
 

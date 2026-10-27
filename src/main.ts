@@ -1,8 +1,17 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 import { createApp } from "vue";
 import { createPinia } from "pinia";
 import { isElectron } from "./api/ipc";
 import { probeCaps } from "./api/caps";
-import { refreshRemoteState } from "./api/remote";
 import { getToken } from "./api/web-transport";
 // 服务式 API 不经模板渲染，插件接管不到它们的样式：全库只用到这两个（② 段重数）。
 // 中文 locale 的注入点随全量注册一起没了，改由 App.vue 的 <el-config-provider> 承接。
@@ -18,6 +27,7 @@ import "./styles/global.css";
 import "./styles/skills.css";
 import "./styles/sync.css";
 import "./styles/memory.css";
+import "./styles/prompts.css";
 import "./styles/element.css";
 // 液滴光标 + 点击涟漪（纯装饰动效层：触屏/减弱动效下自动不安装）
 // 首帧镜像（与 config 异步加载形成双轨）：界面动效默认开启，镜像为 "0" 才关（缺失跟随默认）；
@@ -35,13 +45,15 @@ const root = document.documentElement;
 root.classList.toggle("fx-off", !fxOn);
 root.classList.toggle("fx-particles-off", localStorage.getItem("agenthub.fxParticles") !== "1");
 root.classList.toggle("fx-pools-off", localStorage.getItem("agenthub.fxPools") !== "1");
+// 桌面端标记：窗口是无边框的，顶栏要靠 -webkit-app-region: drag 当拖拽区。
+// 浏览器里这个属性会吃掉点击，所以只在 Electron 下挂，CSS 用 html.is-electron 限定作用域
+root.classList.toggle("is-electron", isElectron());
 setCursorFX(cursorOn);
 
 // 启动形态三选一：Electron 直接挂载（IPC）；浏览器先探测网关托管（有后端走 RPC，
 // 无令牌先挂登录页）；纯静态预览（dev:web）回落挂载走 mock
 async function bootstrap() {
   if (isElectron()) {
-    void refreshRemoteState(); // 远程目标状态：目标切换 chip 与 call() 的远程分支都靠它
     app.mount("#app");
     return;
   }

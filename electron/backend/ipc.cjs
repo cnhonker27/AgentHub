@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // IPC 命令注册：主进程 ipcMain.handle 处理器，对应前端 src/api/ipc.ts
 // 框架命令（配置 / 版本 / 数据目录）+ 技能仓库命令（扫描 / 同步 / 冲突 / 回收站 / WebDAV / 更新）
 // preload 白名单和这里要一一对应
@@ -16,8 +26,9 @@ const remotesync = require("./remotesync.cjs");
 const webdav = require("./webdav.cjs");
 const watch = require("./watch.cjs");
 const proxy = require("./proxy/index.cjs");
-const proxyRemote = require("./proxy/remote.cjs");
 const memory = require("./memory/index.cjs");
+const pluginHost = require("./plugin-host.cjs");
+const pluginBridge = require("./plugin-bridge.cjs");
 
 // 渲染层拿到的密码一律是掩码；保存/测试连接收到精确掩码时回填磁盘真值
 const PASSWORD_MASK = "••••••••";
@@ -134,6 +145,32 @@ function register(ctx) {
     return { ok: true, canceled: r.canceled, path: r.canceled ? null : r.filePaths[0] };
   }));
 
+  // ===== 无边框窗口：自绘标题栏的窗口控制（原生标题栏已在 main.cjs 用 frame:false 去掉）=====
+  // 一律用 event.sender 反查窗口，不用全局 mainWindow：轻量模式会销毁重建，全局变量可能是旧实例
+  const senderWindow = (e) => BrowserWindow.fromWebContents(e.sender);
+  ipcMain.handle("window_minimize", (e) => {
+    const w = senderWindow(e);
+    if (w) w.minimize();
+    return ok({});
+  });
+  ipcMain.handle("window_toggle_maximize", (e) => {
+    const w = senderWindow(e);
+    if (!w) return ok({ maximized: false });
+    if (w.isMaximized()) w.unmaximize();
+    else w.maximize();
+    return ok({ maximized: w.isMaximized() });
+  });
+  // 走 close() 而不是 destroy()：托盘/轻量模式的三态决策在 main.cjs 的 close 事件里，必须让它经过
+  ipcMain.handle("window_close", (e) => {
+    const w = senderWindow(e);
+    if (w) w.close();
+    return ok({});
+  });
+  ipcMain.handle("window_is_maximized", (e) => {
+    const w = senderWindow(e);
+    return ok({ maximized: !!w && !w.isDestroyed() && w.isMaximized() });
+  });
+
   // ===== 软件更新 =====
   ipcMain.handle("get_is_portable", () => updater.isPortable());
   ipcMain.handle("get_update_status", () => updater.getStatus());
@@ -142,6 +179,16 @@ function register(ctx) {
   ipcMain.handle("install_update", () => updater.triggerInstall());
   ipcMain.handle("open_release_page", () => updater.openReleases());
   ipcMain.handle("open_repo_page", () => updater.openRepo());
+  // 设置页「反馈与需求」的入口：用系统默认浏览器打开 issue 表单（应用内 webview 打不开
+  // GitHub 的登录态，也没法提交表单）。只放行本项目仓库的 https 链接 —— 渲染层即使被
+  // 注入也打不开任意地址，白名单比「只校验 http(s)」更难被滥用。
+  ipcMain.handle("open_external_url", handle(async ({ url } = {}) => {
+    const target = String(url || "");
+    const allow = /^https:\/\/github\.com\/HUIdada1\/AgentHub(\/|$|\?)/i.test(target);
+    if (!allow) return { ok: false, message: "只允许打开本项目仓库的链接" };
+    await shell.openExternal(target);
+    return { ok: true };
+  }));
 
   // ===== 技能仓库：WebDAV 跨设备同步（服务器凭据走统一 webdavShared，根目录取 roots.skills） =====
   ipcMain.handle("webdav_test", handle(({ config: form }) => {
@@ -539,20 +586,71 @@ function register(ctx) {
   // ===== 用量同步模块（原「用量记录同步」backend/ipc.cjs，冲突命令已加 sync_ 前缀） =====
   require("./sync-ipc.cjs").registerSync(ctx);
 
-  // ===== 反代网关（命令实现见 backend/proxy/index.cjs） =====
+  // ===== 号池管家（命令实现见 backend/proxy/index.cjs） =====
   proxy.register(ipcMain);
-
-  // ===== 远程网关（桌面连远程 Docker 版：目标管理与命令转发，实现见 backend/proxy/remote.cjs） =====
-  // 转发在主进程做：管理令牌不进渲染进程；地址/协议校验（http 仅私网）内聚在 remote.cjs
-  ipcMain.handle("remote_targets_list", handle(() => proxyRemote.listTargets()));
-  ipcMain.handle("remote_targets_save", handle((p) => proxyRemote.saveTarget(p)));
-  ipcMain.handle("remote_targets_delete", handle(({ id }) => proxyRemote.deleteTarget(id)));
-  ipcMain.handle("remote_targets_activate", handle(({ id }) => proxyRemote.activateTarget(id)));
-  ipcMain.handle("remote_test", handle((p) => proxyRemote.testTarget(p)));
-  ipcMain.handle("remote_invoke", handle(({ cmd, args }) => proxyRemote.rpc(cmd, args)));
 
   // ===== 记忆中枢（命令实现见 backend/memory/index.cjs） =====
   memory.register(ipcMain);
+
+  // ===== 外置插件（命令实现见 backend/plugin-host.cjs） =====
+  // 命令名固定，插件能力全部由 manifest 描述，宿主不感知具体插件
+  ipcMain.handle("plugin_list", () => {
+    try {
+      // 桥接状态随列表一起返回：设置页要显示「上次同步 / 同步失败」
+      return pluginHost.list().map((p) => ({ ...p, poolSync: pluginBridge.status(p.id) }));
+    } catch { return []; }
+  });
+  ipcMain.handle("plugin_install", async (e) => {
+    try {
+      const win = BrowserWindow.fromWebContents(e.sender) || undefined;
+      const r = await dialog.showOpenDialog(win, {
+        title: "选择插件包",
+        filters: [{ name: "插件包", extensions: ["zip"] }],
+        properties: ["openFile"],
+      });
+      if (r.canceled || !r.filePaths[0]) return { ok: false, canceled: true };
+      const out = await pluginHost.install(r.filePaths[0]);
+      if (out.ok) pluginBridge.schedule("force").catch(() => { /* 安装后首推失败由轮询补 */ });
+      return out;
+    } catch (err) {
+      return { ok: false, message: String((err && err.message) || err) };
+    }
+  });
+  ipcMain.handle("plugin_uninstall", async (_e, args) => {
+    try { return await pluginHost.uninstall(String((args && args.id) || "")); }
+    catch (err) { return { ok: false, message: String((err && err.message) || err) }; }
+  });
+  ipcMain.handle("plugin_toggle", async (_e, args) => {
+    try {
+      const out = await pluginHost.toggle(String((args && args.id) || ""), !!(args && args.enabled));
+      if (out.ok && args && args.enabled) pluginBridge.schedule("force").catch(() => { /* 同上 */ });
+      return out;
+    } catch (err) { return { ok: false, message: String((err && err.message) || err) }; }
+  });
+  ipcMain.handle("plugin_open", async (_e, args) => {
+    try { return await pluginHost.open(String((args && args.id) || "")); }
+    catch (err) { return { ok: false, message: String((err && err.message) || err) }; }
+  });
+  // 内嵌地址：带一次性令牌，渲染层用它填 iframe.src
+  ipcMain.handle("plugin_embed", (_e, args) => {
+    try {
+      const id = String((args && args.id) || "");
+      const r = pluginHost.embedUrl(id);
+      if (!r.ok) return r;
+      // 内嵌前确保插件在跑，并补推一次宿主数据（插件刚起来时号池还是空的）
+      return pluginHost.start(id).then((s) => {
+        if (!s.ok) return s;
+        pluginBridge.schedule("force").catch(() => { /* 失败不影响打开 */ });
+        return r;
+      }).catch((e) => ({ ok: false, message: String((e && e.message) || e) }));
+    } catch (err) {
+      return { ok: false, message: String((err && err.message) || err) };
+    }
+  });
+  ipcMain.handle("plugin_sync_now", async (_e, args) => {
+    try { return await pluginBridge.pushNow(String((args && args.id) || "")); }
+    catch (err) { return { ok: false, message: String((err && err.message) || err) }; }
+  });
 }
 
 module.exports = { register, onConfigSaved, refreshConfigCache };

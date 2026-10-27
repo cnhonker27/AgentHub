@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 配置读写（Node 主进程侧）：框架配置（主题 / 模块顺序）与技能仓库配置（工具 / WebDAV / 调度）
 // 统一落在 Windows 惯例的用户应用数据目录（Electron userData = %APPDATA%\AgentHub），
 // 深合并默认值，临时文件原子落盘；WebDAV 密码用系统级密钥加密存储。
@@ -25,7 +35,7 @@ function isPortable() {
 // 凭据信封按前缀分派，加密后端二选一（桌面 safeStorage / headless AES）：
 //   enc:v1: — Electron safeStorage（Windows 下即 DPAPI），OS 用户绑定、原理上不可跨机
 //   enc:v2: — AES-256-GCM，密钥取自 AGENTHUB_SECRET_KEY，桌面与 headless 形态通用
-// 两种前缀并存是刻意的：统一成"可移植信封"只会退化成把密钥一起搬走（等于没有加密）。
+// 两种前缀并存是刻意的：统一成"通用信封"只会退化成把密钥一起搬走（等于没有加密）。
 // 无 safeStorage 且无 key 时保持明文降级（自测环境依赖此行为）；生产形态由网关入口强制 key
 let safeStorage = null;
 try { safeStorage = require("electron").safeStorage; } catch { /* 自测环境无 electron */ }
@@ -123,8 +133,9 @@ function defaultConfig() {
     /** 远程网关实例（桌面连远程 Docker 版）：tokenEnc 以 enc:v1: 加密落盘，列表接口只回 hasToken */
     remoteTargets: [],
     remoteActiveId: "local",
-    moduleOrder: ["skills", "sync", "proxy", "memory"],
-    // ===== 四大板块启用开关（issue #91 轻量模式）：关闭后左上角置灰不可点、后台完全不运行。
+    // 五大模块的显示顺序（用户在「设置 · 个性化」中调整）；prompts = 提示词库（第五板块）
+    moduleOrder: ["skills", "sync", "proxy", "memory", "prompts"],
+    // ===== 板块启用开关（issue #91 轻量模式）：关闭后左上角置灰不可点、后台完全不运行。
     // 唯一写入口是 module_toggle IPC（主进程读改写），设置页表单不拥有它；
     // 记忆中枢旧版 memory.enabled=false 由 loadConfig 迁移到这里，旧字段保留但不再被读取
     modules: {
@@ -132,6 +143,7 @@ function defaultConfig() {
       sync: { enabled: true },  // 用量统计（键名与 moduleOrder/前端 ModuleKey 对齐）
       proxy: { enabled: true },
       memory: { enabled: true },
+      prompts: { enabled: true }, // 提示词库（第五板块）
     },
     // ===== 技能仓库 =====
     // 各工具候选路径按顺序探测，取第一个存在的
@@ -178,12 +190,42 @@ function defaultConfig() {
         usage: "/dosage-sync",     // 用量统计同步根目录（存量数据位置，勿改默认）
         proxy: "/agenthub-proxy",  // 反代网关号池同步根目录
         memory: "/agenthub-memory", // 记忆中枢同步根目录
+        prompts: "/agenthub-prompts", // 提示词库同步根目录（第五板块；与其它板块数据隔离）
       },
     },
     // ===== 记忆中枢（模块自带配置在 <仓库>/config/memory.config.json，此处只放框架指针） =====
     memory: {
       enabled: true,
       rootDir: "",   // 空 = 默认 <用户文件夹>/AgentHub/memory
+    },
+    // ===== 提示词库（第五板块）=====
+    // 库目录（用户资产，参与 WebDAV 同步）与「本机偏好目录」（风格 / 优化历史，不参与同步）
+    // 是两处不同的位置：前者在 ~/AgentHub/prompts，后者在 userData/prompts，勿混用。
+    prompts: {
+      // —— 同步 ——
+      syncAuto: true,              // 自动同步默认开（用户确认）
+      syncIntervalHours: 4,        // 同步周期（小时，1~24）；界面用数字输入框
+      mergeStrategy: "newer-wins", // newer-wins | local-wins | remote-wins | longer-wins | manual
+      onDeleteConflict: "tombstone", // 一边删一边改时：tombstone=保留删除 | keep-modified=保留修改
+      syncVersions: true,          // 版本历史是否随同步上传
+      // —— 库 ——
+      rootDir: "",                 // 空 = 默认 <用户文件夹>/AgentHub/prompts（与 memory 同父目录）
+      versionKeep: 20,             // 每条保留的版本数上限
+      trashDays: 30,               // 回收站保留天数
+      itemMaxKB: 1024,             // 单条正文上限（KB）
+      defaultCategory: "未分类",
+      // —— 优化 ——
+      defaultStyleId: "builtin-general",
+      defaultModel: "",            // 空 = 跟随「设置 · 模型与网关」的默认模型
+      maxLength: 800,              // 改写结果建议长度上限（对应 WorkBuddy 模板里的硬约束）
+      temperature: 0.7,            // 改写任务需要多样性，比记忆任务的 0.2 高
+      maxTokens: 4096,
+      timeoutSec: 60,
+      scenario: "通用 AI 助手",     // 注入 system 模板的目标场景描述
+      historyLimit: 50,            // 优化历史条数上限
+      // 流式输出：默认开。上游不支持时后端会自动回退非流式（只慢一次，之后记住该供应商），
+      // 所以默认开是安全的；反代环境特别不稳的用户可以在设置里关掉，省掉那次失败往返。
+      stream: true,
     },
     // 后台与调度
     schedule: {
@@ -252,13 +294,20 @@ function defaultConfig() {
       channelEnabled: {},       // 渠道启闭（「上游启闭」弹窗）：{ [渠道 id]: true|false }，缺省 = 启用。
                                 // 关闭的渠道在反代网关全部页面隐藏，路由/调用/调度也不再使用，重新打开立即恢复
       ccSwitchModel: "",        // 生态接入默认模型（注册进 CC Switch 时使用，缺省取 fallbackModel）
-      // ===== 上游超时旋钮（毫秒；对应 agent2api 四段超时的可配置化，0/缺省 = 用内置默认） =====
+      // ===== 上游超时旋钮（毫秒；对应四段超时的可配置化，0/缺省 = 用内置默认） =====
       firstByteBaseMs: 30000,      // 首字节基础预算（30s，按输入规模追加、封顶 firstByteMaxMs）
       firstByteMaxMs: 180000,      // 首字节预算封顶（超长 prompt 的 prefill 可能上百秒）
       streamIdleMs: 300000,        // 流式相邻数据空闲超时（300s，收到新数据即重置）
       httpJsonTimeoutMs: 60000,    // 非流式 JSON 请求（额度查询 / token 刷新）总超时（60s）
-      retrySameAccountCount: 1,    // 瞬时错误同账号原地重发次数（0~5，参考 agent2api retryCount）
+      retrySameAccountCount: 1,    // 瞬时错误同账号原地重发次数（0~5，对齐 retryCount）
       retrySameAccountIntervalMs: 1000, // 同账号原地重发退避间隔（毫秒，200~10000）
+      rateRetryDelayMs: 1000,      // 无明示重置时间的 429 同号退避基数（毫秒，实际延迟带 ±15% 抖动；
+                                   // 1000~15000。上游窗口更长时调大比「冷却换号」划算）
+      dedupeSameBody: true,        // 同 body 请求去重排队：客户端快速重试时，后来的请求等前一个结束再发
+                                   // （防风控识别为反代：同一账号连发同一份内容是最典型的机器特征；
+                                   // 关掉后并发重试会全部并行打到上游，也更容易把上游拦截窗口续期）
+      dedupeWaitMs: 45000,         // 去重排队等待上限（毫秒，1000~300000）：到点无条件放行，
+                                   // 宁可多一个并发，也不让用户被一个卡住的前序请求挂住
     },
   };
 }
@@ -286,6 +335,73 @@ function normalizeModuleOrder(order) {
   const list = (Array.isArray(order) ? order : []).filter((k) => known.includes(k));
   for (const k of known) if (!list.includes(k)) list.push(k);
   return list;
+}
+
+// ===== 提示词库（第五板块）配置归一化与目录工具 =====
+
+/** 整数收敛：非有限值回默认，超出区间钳制（配置可能被手改，下游不再重复判合法性） */
+function clampInt(v, def, min, max) {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return def;
+  return Math.min(max, Math.max(min, n));
+}
+
+/** 提示词库配置归一化：逐字段收敛到安全区间，未知值一律回默认。
+ *  为什么在 loadConfig 里做而不是在各消费点做：调度器与优化器都直接读配置，
+ *  分散判合法性必然出现某处漏判（例如 syncIntervalHours 为 0 会让调度器每 tick 都触发）。 */
+function normalizePrompts(p) {
+  const def = defaultConfig().prompts;
+  const o = p && typeof p === "object" && !Array.isArray(p) ? p : {};
+  const str = (v, d) => (typeof v === "string" ? v.trim() : d);
+  const bool = (v, d) => (typeof v === "boolean" ? v : d);
+  const num = (v, d, min, max) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : d;
+  };
+  const MERGE = ["newer-wins", "local-wins", "remote-wins", "longer-wins", "manual"];
+  return {
+    syncAuto: bool(o.syncAuto, def.syncAuto),
+    syncIntervalHours: clampInt(o.syncIntervalHours, def.syncIntervalHours, 1, 24),
+    mergeStrategy: MERGE.includes(o.mergeStrategy) ? o.mergeStrategy : def.mergeStrategy,
+    onDeleteConflict: o.onDeleteConflict === "keep-modified" ? "keep-modified" : def.onDeleteConflict,
+    syncVersions: bool(o.syncVersions, def.syncVersions),
+    rootDir: str(o.rootDir, def.rootDir),
+    versionKeep: clampInt(o.versionKeep, def.versionKeep, 1, 500),
+    trashDays: clampInt(o.trashDays, def.trashDays, 0, 3650),
+    itemMaxKB: clampInt(o.itemMaxKB, def.itemMaxKB, 1, 10240),
+    defaultCategory: str(o.defaultCategory, def.defaultCategory) || def.defaultCategory,
+    defaultStyleId: str(o.defaultStyleId, def.defaultStyleId) || def.defaultStyleId,
+    defaultModel: str(o.defaultModel, def.defaultModel),
+    maxLength: clampInt(o.maxLength, def.maxLength, 100, 20000),
+    temperature: num(o.temperature, def.temperature, 0, 2),
+    maxTokens: clampInt(o.maxTokens, def.maxTokens, 256, 200000),
+    timeoutSec: clampInt(o.timeoutSec, def.timeoutSec, 5, 600),
+    scenario: str(o.scenario, def.scenario) || def.scenario,
+    historyLimit: clampInt(o.historyLimit, def.historyLimit, 1, 500),
+    stream: bool(o.stream, def.stream),
+  };
+}
+
+/** 提示词库目录（用户资产，参与 WebDAV 同步）：默认 <用户文件夹>/AgentHub/prompts。
+ *  与记忆中枢 <用户文件夹>/AgentHub/memory 同父目录，便于用户统一备份。 */
+function promptsLibDir() {
+  let custom = "";
+  try {
+    custom = (loadConfig().prompts || {}).rootDir || "";
+  } catch { /* 配置读不出来时用默认目录，不让调用方拿到空路径 */ }
+  const dir = custom && custom.trim()
+    ? path.resolve(custom.trim())
+    : path.join(os.homedir(), "AgentHub", "prompts");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/** 提示词库本机偏好目录（优化风格 / 优化历史）：**不参与同步**，落在应用数据目录下。
+ *  为什么与库目录分开：风格与历史是「这台机器的偏好」，同步到别的设备会互相覆盖。 */
+function promptsLocalDir() {
+  const dir = path.join(dataDir(), "prompts");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 // ===== 按渠道自动签到规则（proxy.checkinAutoRules）：号池页每个渠道一套时间/抖动 =====
@@ -346,11 +462,14 @@ function normalizeShared(s) {
       region: typeof s3.region === "string" ? s3.region.trim() : "",
       pathStyle: s3.pathStyle === true,
     },
+    // 各板块同步根目录白名单：**新增板块必须同时加到这里**，否则用户在设置页填的根目录
+    // 会在下一次 loadConfig 时被本函数静默丢弃（只剩默认值），表现为「填了不生效」
     roots: {
       skills: normRoot(roots.skills, def.roots.skills),
       usage: normRoot(roots.usage, def.roots.usage),
       proxy: normRoot(roots.proxy, def.roots.proxy),
       memory: normRoot(roots.memory, def.roots.memory),
+      prompts: normRoot(roots.prompts, def.roots.prompts),
     },
   };
 }
@@ -539,11 +658,14 @@ function loadConfig() {
   // 模块开关归一化（issue #91）：非法/缺失回 true；旧版「记忆中枢已关闭」（memory.enabled=false）
   // 一次性迁移进 modules.memory.enabled，此后 modules.* 是唯一事实源
   merged.modules = merged.modules && typeof merged.modules === "object" ? merged.modules : {};
-  for (const k of ["skills", "sync", "proxy", "memory"]) {
+  // 板块 key 白名单：**新增板块必须补进这个数组**，否则模块开关被剔除（表现为板块不存在）
+  for (const k of ["skills", "sync", "proxy", "memory", "prompts"]) {
     const m = merged.modules[k] && typeof merged.modules[k] === "object" ? merged.modules[k] : {};
     m.enabled = m.enabled !== false;
     merged.modules[k] = m;
   }
+  // 提示词库配置归一化：脏配置（手改 config.json）不得传到调度器与优化器
+  merged.prompts = normalizePrompts(merged.prompts);
   if (merged.memory && merged.memory.enabled === false) merged.modules.memory.enabled = false;
   merged.webdav.password = decryptSecret(merged.webdav.password);
   merged.webdavShared = normalizeShared(merged.webdavShared);
@@ -673,6 +795,11 @@ function saveConfigFromUI(cfg) {
     //（主进程读改写），设置页表单不拥有它——否则开关切换后任何整份保存都会把
     // 渲染层旧快照里的开关状态写回去，重启后开关「自己弹回来」
     if (disk && disk.modules) next.modules = disk.modules;
+    // models（模型与网关）**当前**住在记忆中枢配置里，config.json 里没有这一段 → 这行现在是空操作。
+    // 但它是一次性把隐患封死的托底：若将来把 models 上移到平台配置，缺这行的话
+    // 「切主题 / 拖模块顺序」这类整份保存会把供应商与模型池整段冲掉（issue #90/#95/#91 同型事故）。
+    // 上移前必须确认这条仍然在（B6 的硬前置，不可省）。
+    if (disk && disk.models) next.models = disk.models;
   } catch { /* 读盘失败时退回原行为（宁可保存成功，也不要让设置页整体保存失败） */ }
   return saveConfig(next);
 }
@@ -708,5 +835,8 @@ module.exports = {
   getUpdateNotified, setUpdateNotified, isPortable, encryptSecret, decryptSecret, isEncrypted, applyAutoStart,
   loadSharedWebdav, saveSharedWebdav, clearSharedWebdav, maskedSharedWebdav, moduleWebdav, sharedEncryptionPassphrase, PASSWORD_MASK,
   normalizeHm, normalizeJitter,
+  // 提示词库（第五板块）：库目录（参与同步）与本机偏好目录（风格/历史，不参与同步）由本模块统一提供，
+  // 避免后端各处自己拼路径导致两个目录被混用
+  promptsLibDir, promptsLocalDir, normalizePrompts,
   saveConfigFromUI, OUT_OF_BAND_PROXY_FIELDS,
 };

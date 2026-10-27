@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // WebDAV 客户端（原生 fetch 实现）
 // 协议子集：PROPFIND / GET / PUT / MKCOL，Basic 认证，XML multistatus 解析
 "use strict";
@@ -243,6 +253,13 @@ async function getDav(url, cfg) {
       throw new Error(`GET 失败：HTTP 409（父目录不存在）${url}——远端目录尚未创建，请先确保目录存在再读取`);
     }
     throw new Error(`GET 失败：HTTP ${res.status}`);
+  }
+  // 读取前先看响应头体积：get 是整体入内存（arrayBuffer），远端异常大文件会把主进程 OOM。
+  // 超限即中止并说明原因，避免内存耗尽；上限可用 AGENTHUB_WEBDAV_MAX_DOWNLOAD_MB 覆盖（s3.cjs 同值，两处需一致）
+  const len = Number(res.headers.get("content-length") || 0);
+  const maxMB = Number(process.env.AGENTHUB_WEBDAV_MAX_DOWNLOAD_MB || 0) || 512;
+  if (len > maxMB * 1048576) {
+    throw new Error(`远端文件约 ${(len / 1048576).toFixed(1)}MB，超过单次下载上限 ${maxMB}MB，已中止（避免内存耗尽；确认需要时可用 AGENTHUB_WEBDAV_MAX_DOWNLOAD_MB 调大）`);
   }
   return Buffer.from(await res.arrayBuffer());
 }

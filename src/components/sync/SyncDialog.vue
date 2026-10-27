@@ -1,3 +1,13 @@
+<!--
+  ============================================================
+   作者：沐晖
+   日期：2026-10-22
+   版权声明：本代码归沐晖所有。
+     · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+     · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+     此注释为版权与授权声明，禁止删除。
+  ============================================================
+-->
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useSyncStore } from "../../stores/sync";
@@ -52,7 +62,7 @@ onBeforeUnmount(stopPolling);
     <section class="sync-dialog" role="dialog" aria-modal="true" aria-label="用量同步">
       <div class="sync-dialog-head">
         <div>
-          <div class="eyebrow">沐辉制作 · AGENTHUB 用量统计</div>
+          <div class="eyebrow">沐晖制作 · AGENTHUB 用量统计</div>
           <h2>用量同步</h2>
         </div>
         <el-tooltip content="关闭" placement="top">

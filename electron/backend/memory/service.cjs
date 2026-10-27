@@ -1,6 +1,16 @@
 /**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
+/**
  * AgentHub · 记忆中枢（Memory Hub）
- * Copyright (c) 2026 沐辉 (HUIdada1)
+ * Copyright (c) 2026 沐晖 (HUIdada1)
  * https://github.com/HUIdada1/AgentHub
  * 本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。
  */
@@ -18,16 +28,8 @@ const { MemoryIndex, startOfToday } = require("./indexer.cjs");
 const { MemorySearch } = require("./search.cjs");
 const layout = require("./layout.cjs");
 const { redact } = require("./redact.cjs");
-const { SCHEMA } = require("./config-schema.cjs");
+const { flattenConfig } = require("./config.cjs");
 const { ensureSynonyms } = require("./synonyms.cjs");
-
-// schema 里声明为 map / list / providerlist / modeltable 的键要保持整体，不拆点路径。
-// 该判定只依赖静态 SCHEMA：flat() 在每次写入/读取时都会被调用，提前算一次，避免每轮重建 Set。
-const WHOLE_KEYS = new Set(
-  Object.entries(SCHEMA)
-    .filter(([, meta]) => ["map", "list", "providerlist", "modeltable", "orderlist"].includes(meta.type))
-    .map(([key]) => key),
-);
 
 class MemoryService {
   constructor(rootDir, cfg, options = {}) {
@@ -144,6 +146,8 @@ class MemoryService {
       created: row.created, updated: row.updated, importance: row.importance,
       hash: row.hash, size: row.size,
       validFrom: row.valid_from, validTo: row.valid_to, supersededBy: row.superseded_by,
+      // 「被谁取代」带上目标标题：详情抽屉里只显示一串原始 id 没有信息量（目标被清理时回落 id）
+      supersededByTitle: row.superseded_by ? ((this.index.getById(row.superseded_by) || {}).title ?? row.superseded_by) : null,
       refs: row.refs_text ? row.refs_text.split(",").filter(Boolean) : [],
       pinned: !!row.pinned, starred: !!row.starred,
       dedupStatus: row.dedup_status, aiProcessed: !!row.ai_processed,
@@ -219,11 +223,16 @@ class MemoryService {
    * 开启后对应建议在入队时立即按推荐执行——语义与人工裁决完全一致（supersede=确认失效、
    * classify=按 slug 归入/无推荐则忽略、dedup=采纳新记忆并标旧失效），绝不物理删除。
    * 执行失败时建议保留 pending，回落到收件箱由人工处理。产出点在 reviewAdd 之后调用本方法。
+   * 置信闸门（review.autoConfirmMinConfidence）：建议置信度（dedup/supersede 用 confidence、
+   * classify 用匹配分 score）低于下限时同样回落人工队列；未携带置信度视为完全可信（兼容历史建议）。
    */
   autoConfirmReview(kind, queueId, payload) {
     if (!queueId) return;
     const cfg = this.flat();
     try {
+      const conf = payload?.confidence ?? payload?.score;
+      const minConf = Number(cfg["review.autoConfirmMinConfidence"]);
+      if (Number.isFinite(minConf) && conf != null && Number(conf) < minConf) return;
       if (kind === "supersede" && cfg["review.autoConfirmSupersede"]) {
         void this.markSuperseded(payload.oldId, payload.newId, payload.reason || "自动按推荐确认失效")
           .then((r) => { if (r && r.ok) this.index.reviewResolve(queueId, "confirmed"); })
@@ -248,22 +257,9 @@ class MemoryService {
 
   flat() {
     // 把嵌套配置拍平成点路径（引擎读取口径与 schema 一致）。
-    // schema 里声明为 map / list / providerlist / modeltable 的键保持整体——
-    // 它们本来就是「一个键装一组数据」，拆成点路径会让 taskEffort.distill 这类读取口径失真。
-    const out = {};
-    const walk = (obj, prefix) => {
-      for (const [k, v] of Object.entries(obj || {})) {
-        const key = prefix ? `${prefix}.${k}` : k;
-        const isLeafObject = v && typeof v === "object" && !Array.isArray(v);
-        if (isLeafObject && !WHOLE_KEYS.has(key)) { walk(v, key); continue; }
-        // schema 删除某键后，旧配置文件里的残留同名键必须被安全忽略，
-        // 否则引擎会读到一个「已从表单消失但仍生效」的幽灵旋钮（dedup.l4.autoDelete 就是这么踩的）
-        if (!Object.prototype.hasOwnProperty.call(SCHEMA, key)) continue;
-        out[key] = v;
-      }
-    };
-    walk(this.cfg.all ? this.cfg.all() : this.cfg);
-    return out;
+    // 实现收在 config.cjs 的 flattenConfig：记忆中枢停用时 ProviderStore.flat() 也用它，
+    // 两处必须同一份实现——否则「设置页看到的配置」与「任务实际用的配置」会分叉。
+    return flattenConfig(this.cfg.all ? this.cfg.all() : this.cfg);
   }
 
   // ---------- 写 ----------
@@ -695,6 +691,44 @@ class MemoryService {
       if (r.ok) done.push(oldId);
     }
     return done;
+  }
+
+  // 撤销失效标记（markSuperseded 的镜像）：裁决执行后的「撤销」兜底。
+  // 边界：① 只清 superseded_by 与被覆盖写入的 valid_to——若记忆在被取代前本就有自然有效期，
+  // 原值已被 markSuperseded 覆盖、无法还原，清空等同用户显式判定「仍有效」；
+  // ② 文件读不到时不静默只改索引（与 markSuperseded 不同）：自愈扫描会把只改索引的行还原回来，
+  // 撤销必须落在文件上才算数，失败要如实告知。
+  async unmarkSuperseded(id) {
+    if (this.index.readOnly) {
+      return { ok: false, message: "索引库来自更新版本的 AgentHub，当前处于只读模式：请升级应用后再操作" };
+    }
+    return this.withWrite(() => this._unmarkSupersededLocked(id));
+  }
+
+  async _unmarkSupersededLocked(id) {
+    const row = this.index.getById(id);
+    if (!row) return { ok: false, message: "记忆不存在（可能已被清理）：请刷新列表" };
+    if (!row.superseded_by && !row.valid_to) return { ok: false, message: "该记忆未被标记失效，无需撤销" };
+    if (row.type === "daily" && row.anchor) {
+      let updated = false;
+      await this.store.withLock(row.path, () => {
+        updated = this.store.updateDailySection(row.path, row.anchor, (sec) => ({
+          ...sec, meta: { ...sec.meta, supersededBy: "" },
+        }), { backup: true });
+      });
+      if (!updated) return { ok: false, message: "目标节已不存在（可能被外部修改）：请先重建索引再撤销" };
+    } else {
+      const text = this.store.read(row.path);
+      if (!text) return { ok: false, message: "记忆文件已不存在，无法撤销（可先在回收站找备份）" };
+      const { fm, body } = parseFrontmatter(text);
+      delete fm.validTo;
+      delete fm.supersededBy;
+      await this.store.withLock(row.path, () => this.store.writeStandalone(row.path, fm, body, { backup: true }));
+    }
+    this.index.db.prepare("UPDATE mem SET valid_to = NULL, superseded_by = NULL WHERE id = ?").run(id);
+    this.index.reviewAdd("supersede-undo", { id, wasBy: row.superseded_by || null, at: Date.now() }, "resolved", "done");
+    this.onEvent({ type: "supersede", id });
+    return { ok: true, id };
   }
 
   // ---------- 回收站 ----------
@@ -1679,7 +1713,7 @@ class MemoryService {
   }
 
   /**
-   * 记忆体检（2026-10-16 借鉴 causal-memory 的 drift/bias_audit 本地化）：纯 SQL 统计，不用 LLM。
+   * 记忆体检（2026-10-16 本地化 drift/bias_audit）：纯 SQL 统计，不用 LLM。
    * 五项：僵尸记忆 / 检索趋势 / 分布 / 演化链 / 回收站。任一段异常只让该段为空，不抛。
    * 输出两份：完整报告（调度任务产出，落 mem_meta 供前端/IPC 取）；摘要进 memory_status。
    */

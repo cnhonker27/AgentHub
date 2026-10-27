@@ -1,7 +1,18 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // IPC 封装：Electron 环境下通过 preload 桥接调用主进程；浏览器环境下回退到本地 mock（便于独立开发/预览 UI）。
 import type {
   SyncConfig, Summary, DeviceMeta, DeviceBreakdown, SyncLog, SyncProgress, SourceHealth, SourceInfo, UsageRecord, TotalMode, AggregateRow,
-  PriceEntry, PriceRow, UnpricedModel, ImportPreview, ImportPreviewItem, RemotePricingConfig, ModelAlias,
+  PriceEntry, PriceRow, UnpricedModel, ImportPreview, ImportPreviewItem, ModelAlias,
+  PricingSourceStatus,
   DataDirInfo, SetDataDirResult, BackupInfo,
 } from "../types/sync";
 import { mock } from "./sync-mock";
@@ -112,10 +123,10 @@ export const importPricesPreview = (source: "litellm" | "openrouter") =>
   call<ImportPreview>("import_prices_preview", { source });
 export const importPricesApply = (items: ImportPreviewItem[], effectiveFrom: number) =>
   call<{ ok: boolean; message: string }>("import_prices_apply", { items, effectiveFrom });
-export const pullRemotePricing = (force = false) =>
-  call<{ ok: boolean; message: string }>("pull_remote_pricing", { force });
-export const getRemotePricingStatus = () =>
-  call<RemotePricingConfig & { lastAt: number | null; lastHash: string | null; lastModels: number | null }>("get_remote_pricing_status");
+// ===== 在线定价源：三套内置价格表（拉取即自动应用差异）=====
+export const pullPricingSource = (id: string, force = true) =>
+  call<{ ok: boolean; message: string }>("pull_pricing_source", { id, force });
+export const getPricingSourcesStatus = () => call<PricingSourceStatus[]>("get_pricing_sources_status");
 
 // ===== 其它 =====
 export const openDataDir = () => call<void>("sync_open_data_dir");

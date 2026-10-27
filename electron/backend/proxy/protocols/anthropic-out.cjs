@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 反代网关 · 出线侧：Anthropic Messages 协议（Claude Code / Anthropic SDK 看到的字节）
 //
 // 输入是调度核心交出来的四种事件（delta / usage / finish / error，词汇与 OpenAI 通路完全一致），
@@ -330,7 +340,7 @@ function create(ctx) {
     /**
      * 失败收尾。写头之前回 Messages 形状的错误体；已写头就只能塞进流里（客户端得拿到终止事件）。
      * type 的口径与 openai-out 不同：Anthropic 认的是 ERROR_TYPE_BY_STATUS 那套按状态码定的枚举，
-     * 调度侧传来的 OpenAI 形 type/code 在这里一律不用（照抄会让客户端读不出错误类别）。
+     * 调度侧传来的 OpenAI 形 type/code 在这里一律不用（直接沿用会让客户端读不出错误类别）。
      */
     endErr(status, message) {
       const type = ERROR_TYPE_BY_STATUS[Number(status)] || "api_error";

@@ -1,8 +1,21 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 应用级状态：配置（主题 / 模块顺序 + 技能仓库配置）、当前模块与子页面、技能仓库全局数据
 import { defineStore } from "pinia";
 import { MODULES } from "../types";
 import { moduleEnabled } from "../api/caps";
 import type { AppConfig, SettingsTab, ModuleDef, ModuleKey, PageDef, Overview, ToolRow } from "../types";
+// 提示词库默认值：单一事实源在 types（配置页从 promptTypes re-export 拿同一份），
+// 这里只做「后端缺字段 / 浏览器 mock」时的深合并基线
+import { PROMPTS_CONFIG_DEFAULTS } from "../types";
 import * as api from "../api/ipc";
 
 /** 递归合并：以 base 为基线补全 patch 缺失的嵌套字段；数组与原始值一律整体取 patch（有则覆盖）。
@@ -29,8 +42,10 @@ const defaultConfig: AppConfig = {
   fxParticles: false,
   fxPools: false,
   fxCursor: true,
+  // moduleOrder 直接由 MODULES 派生：MODULES 里新增板块（如 prompts）时这里自动带上，
+  // 不需要再手工补一份顺序，避免两处清单不同步导致新板块在左栏「不存在」
   moduleOrder: MODULES.map((m) => m.key),
-  modules: { skills: { enabled: true }, sync: { enabled: true }, proxy: { enabled: true }, memory: { enabled: true } },
+  modules: { skills: { enabled: true }, sync: { enabled: true }, proxy: { enabled: true }, memory: { enabled: true }, prompts: { enabled: true } },
   tools: {},
   customDirs: [],
   mountMode: "junction",
@@ -74,6 +89,10 @@ const defaultConfig: AppConfig = {
   },
   // 记忆中枢指针（其余配置在 <仓库>/config/memory.config.json，由 memory 模块页读取）
   memory: { enabled: true, rootDir: "" },
+  // 提示词库（配置与技能仓库/号池同源，走 app.save() 落 framework config.json）。
+  // 深合并基线里必须有这一段：后端还没补 prompts 段时，配置页读 app.config.prompts.syncIntervalHours
+  // 才不会因 undefined 直接抛错白屏
+  prompts: { ...PROMPTS_CONFIG_DEFAULTS },
 };
 
 /** 技能仓库内的页面 id（skill-detail 为隐藏详情页，不进横条菜单，由技能库卡片进入） */
@@ -141,8 +160,14 @@ export const useAppStore = defineStore("app", {
     helpOpen: false,             // 技能仓库使用帮助对话框
     helpSection: "",             // 打开时定位到的帮助小节 id
     // ===== 记忆中枢：页签显隐白名单（由 memory store 的 loadAll 从 cfg["ui.tabs"] 写回）=====
-    /** 空数组 = 未加载/未配置，pagesOf 兜底为默认 5 个（dashboard/browse/projects/auto/sync） */
+    /** 空数组 = 未加载/未配置，pagesOf 兜底为默认 8 个（dashboard/browse/projects/profile/agents/auto/import/sync） */
     memoryTabs: [] as string[],
+    /** 记忆中枢「接入与迁移」页内段落落点（"agents" | "import" | "sync"）：入口带过来，HubView 消费后清空 */
+    hubSubHint: "",
+    // ===== 外置插件：已安装插件清单（侧栏入口与设置板块的唯一数据源）=====
+    plugins: [] as api.PluginInfo[],
+    /** 主区域正在内嵌的插件页；null = 显示普通模块页面 */
+    pluginView: null as { id: string; url: string; title: string } | null,
   }),
   getters: {
     isDark: (s) => s.config.theme === "dark",
@@ -156,11 +181,12 @@ export const useAppStore = defineStore("app", {
         .filter((m) => moduleEnabled(m.key))
         .map((m) => ({ ...m, enabled: !s.config.modules?.[m.key] || s.config.modules[m.key].enabled !== false }));
     },
-    /** 当前模块的子页面：memory 模块按 ui.tabs 白名单过滤（空=默认 5 个核心页；dashboard/browse 保底），其余模块全量返回 */
+    /** 当前模块的子页面：memory 模块按 ui.tabs 白名单过滤（空=默认核心页；dashboard/browse 保底），其余模块全量返回 */
     pagesOf(s): PageDef[] {
       const all = this.moduleOf(s.activeModule).pages;
       if (s.activeModule !== "memory") return all;
-      const DEFAULT_TABS = ["dashboard", "browse", "projects", "auto", "sync"];
+      // 默认核心页：接入/导入/同步三段已并入 hub；老配置显式勾选 agents/import/sync 的仍照常显示
+      const DEFAULT_TABS = ["dashboard", "browse", "projects", "profile", "hub", "auto"];
       const allow = new Set(s.memoryTabs.length ? s.memoryTabs : DEFAULT_TABS);
       allow.add("dashboard");
       allow.add("browse");
@@ -177,6 +203,33 @@ export const useAppStore = defineStore("app", {
     },
   },
   actions: {
+    /** 外置插件状态：安装/卸载/启停后都要重拉，侧栏入口据此显隐。
+     *  失败一律归零——插件不可用绝不能影响主程序启动。 */
+    async refreshPlugins() {
+      try {
+        const list = await api.pluginList();
+        this.plugins = Array.isArray(list) ? list : [];
+      } catch { this.plugins = []; }
+      // 插件被停用/卸载时，正在内嵌的页面要跟着关掉
+      if (this.pluginView) {
+        const cur = this.plugins.find((p) => p.id === this.pluginView!.id);
+        if (!cur || !cur.installed || cur.invalid || !cur.running) this.pluginView = null;
+      }
+    },
+    /** 打开插件页：优先内嵌主区域；插件声明 ui.embed:false 或取地址失败时返回错误，由调用方回落独立窗口 */
+    async openPluginView(id: string) {
+      try {
+        const r = await api.pluginEmbed(id);
+        if (!r || !r.ok || !r.url) return { ok: false, message: (r && r.message) || "打开失败" };
+        this.settingsOpen = false;
+        this.pluginView = { id: r.id || id, url: r.url, title: r.title || id };
+        this.refreshPlugins();
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, message: e instanceof Error ? e.message : String(e) };
+      }
+    },
+    closePluginView() { this.pluginView = null; },
     /** 板块开关切换（issue #91）：走主进程唯一写入口，成功后同步内存态供 UI 即时置灰。
      *  必须是 action 不能是 getter——Pinia getter 会被立即求值，函数值会被提前调用炸掉 */
     async toggleModule(key: string, enabled: boolean) {
@@ -341,6 +394,8 @@ export const useAppStore = defineStore("app", {
     selectModule(key: ModuleKey) {
       this.settingsOpen = false;
       this.pageBeforeConfig = "";
+      // 切模块即离开插件页面（插件页面不属于任何模块）
+      this.pluginView = null;
       // 已停用的板块置灰不可点（issue #91）：入口拦在切换处，避免渲染层绕过
       if (this.config.modules?.[key] && this.config.modules[key].enabled === false) return;
       if (this.activeModule === key) return;
@@ -351,6 +406,8 @@ export const useAppStore = defineStore("app", {
     },
     setPage(id: string) {
       this.settingsOpen = false;
+      // 点模块页签即离开插件页面
+      this.pluginView = null;
       this.activePage = id;
     },
     /** 技能仓库模块内跳转（各技能页面里的「去同步 / 去裁决 / 返回技能库」都用它） */

@@ -1,3 +1,13 @@
+/**
+ * ============================================================
+ *  作者：沐晖
+ *  日期：2026-10-22
+ *  版权声明：本代码归沐晖所有。
+ *    · 禁止滥用本人代码（含用于违法违规、恶意攻击、侵犯他人权益等用途）；
+ *    · 禁止在未经本人授权的情况下直接搬运本代码（含复制、转载、用于商业项目）。
+ *    此注释为版权与授权声明，禁止删除。
+ * ============================================================
+ */
 // 反代网关 · 号池 WebDAV 同步引擎：多设备共享号池（账号 + 凭据）
 // 远端布局（root 默认 /agenthub-proxy，与技能仓库 /agent-skills、用量统计 /dosage-sync 同盘隔离）：
 //   pool/devices/<deviceId>.json     设备档案
@@ -872,6 +882,9 @@ module.exports = { run, cancel, progress, configured, noteRemoved, noteKeyRemove
   // mergeSnapshot 不走这两个导出的话，「包集随同步传播」只能靠 grep 源文件钉，抓不到
   // 「写错了 LWW 门的位置」这类真缺陷
   exportPool, mergeSnapshot,
+  // 元数据明文化（号池「导出凭据」复用：zcode 切号快照是 DPAPI 密文，导出给外部软件用
+  // 必须先解密；与同步快照共用同一份实现，两处各写一份会让字段清单分叉）
+  prepareMetaForExport,
   // 共享配置同步（自测与诊断用；主流程在 run() 内部调用 runSharedSync）
   exportShared, applyShared, encodeEnvelope, decodeEnvelope, runSharedSync,
   // 号池归档封套（自测用：与共享配置共用同一 encode/decodeEnvelope，去重后靠这组断言守住行为）
