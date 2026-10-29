@@ -29,6 +29,16 @@
 @media (max-height: 620px) {
   .prompts-scope.page { padding: 10px 16px 16px; }
 }
+/* 抽屉打开时锁背景滚动：OnlineView 会给根 .page 元素挂上 pr-lock-scroll。
+   这里是「两个类」选择器，specificity 高于 global.css 的单类 .page（overflow:auto），
+   不依赖样式表加载顺序就能盖住。
+   刻意用 overflow:hidden 而不是 display:none —— hidden 会保留 scrollTop，
+   关抽屉后页面还停在原处，不会跳回顶部。
+   已知代价：本文件外 ::-webkit-scrollbar 宽 8px，锁滚动时页面滚动条消失，
+   内容会右移 8px。不用 scrollbar-gutter 兜底是因为 global.css:1303 明确警告：
+   容器上出现标准滚动条属性会让 Chromium 放弃 ::-webkit-scrollbar 渲染，
+   全局主题绿滚动条会失效——不值得为 8px 冒这个险。 */
+.page.pr-lock-scroll { overflow: hidden; }
 /* 配置页复用框架 .cfg-sec 版式：纵向节奏交给 gap，避免 .cfg-sec > * + * 的 margin 与 gap 叠加成双倍 */
 .prompts-scope.cfg-sec { gap: var(--gap-block); }
 .prompts-scope.cfg-sec > * + * { margin-top: 0; }
@@ -156,7 +166,8 @@ html.fx-off .prompts-scope .pr-card::after { display: none; }
 .pr-opt-bar .pr-field { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-3); }
 .pr-opt-adv {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  /* min(190px, 100%) 兜底：容器窄于 190px 时 minmax 的下限会硬撑出横向溢出 */
+  grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr));
   gap: 10px 14px;
   margin-top: 12px;
   padding-top: 12px;
@@ -187,6 +198,95 @@ html.fx-off .prompts-scope .pr-card::after { display: none; }
 .pr-area[readonly] { color: var(--text-2); }
 .pr-area-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 11.5px; color: var(--text-3); }
 
+/* 原文框 / 结果框的高度分配：原文是「输入」，结果才是要盯的产出。
+   原文高度压到基类的一半（三档同步减半，保持响应式比例），让出来的空间给结果框。
+   必须用修饰类而不是改 .pr-area —— 弹窗里的备注框、风格模板编辑器都复用它。 */
+.pr-area--input { min-height: clamp(72px, 13vh, 150px); }
+.pr-area--result { min-height: clamp(200px, 34vh, 420px); }
+
+/* 流式生成中：呼吸边框。textarea 里放不了光标，用边框变化表达「还在写」最省事也最不打扰 */
+.pr-area--streaming {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+  transition: box-shadow 0.3s var(--ease), border-color 0.3s var(--ease);
+}
+
+/* 流式输出时的末尾光标：贴在已生成文本后面闪，告诉用户「还在写」 */
+.pr-stream-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  background: var(--accent-strong);
+  animation: pr-blink 1s steps(2, start) infinite;
+}
+@keyframes pr-blink { 50% { opacity: 0; } }
+html.fx-off .prompts-scope .pr-stream-cursor { animation: none; }
+
+/* 补充要求：三行小框，故意做矮——它是「加一句」，不是第二份原文 */
+.pr-extra {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px dashed var(--pr-line-strong);
+  border-radius: var(--r-md);
+  background: var(--pr-soft);
+}
+.pr-extra-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; font-weight: 600; }
+.pr-extra-head .pr-hint { font-weight: 400; }
+.pr-area--extra { min-height: 62px; background: transparent; border-color: var(--pr-line); }
+
+/* 结构预览：把 ## 分节渲染成卡片，一眼看出哪一层是空的 */
+.pr-struct {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: clamp(200px, 34vh, 420px);
+  padding: 10px 12px;
+  border: 1px solid var(--pr-line-strong);
+  border-radius: var(--r-md);
+  background: var(--pr-soft);
+  overflow: auto;
+}
+.pr-struct-sec { border-left: 2px solid var(--accent-line); padding-left: 10px; }
+.pr-struct-title { font-size: 12.5px; font-weight: 600; color: var(--accent-strong); margin-bottom: 2px; }
+.pr-struct-body {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 假设清单：模型替用户猜的项，逐条列出并允许转成变量 */
+.pr-assume {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn);
+  border-radius: var(--r-md);
+  background: var(--warn-dim);
+}
+.pr-assume-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; font-weight: 600; color: var(--warn); }
+.pr-assume-head .pr-hint { font-weight: 400; }
+.pr-assume-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.pr-assume-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  justify-content: space-between;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+.pr-assume-list li > span { flex: 1; min-width: 0; word-break: break-word; }
+.pr-assume-list .btn { flex: none; }
+
 /* 中间按钮区（只有「优化」「保存为风格」——上框就是原文，故没有「恢复原文」） */
 .pr-opt-actions {
   display: flex;
@@ -201,7 +301,7 @@ html.fx-off .prompts-scope .pr-card::after { display: none; }
 /* 结果动作区 */
 .pr-result-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
-/* 优化进行中的结果框占位：转圈 + 「正在优化中」。与 .pr-area 同高，避免态切换时页面跳动 */
+/* 优化进行中的结果框占位：转圈 + 「正在优化中」。与结果框同高，避免态切换时页面跳动 */
 .pr-loading {
   min-height: clamp(140px, 26vh, 300px);
   display: flex;
@@ -213,6 +313,8 @@ html.fx-off .prompts-scope .pr-card::after { display: none; }
   border-radius: var(--r-md);
   background: var(--pr-soft);
 }
+/* 结果位上的转圈块：必须跟 .pr-area--result 同高，否则转圈态↔文本框切换时整页跳一下 */
+.pr-loading--result { min-height: clamp(200px, 34vh, 420px); }
 .pr-loading .ph {
   font-size: 30px;
   color: var(--accent-strong);
@@ -229,7 +331,9 @@ html.fx-off .prompts-scope .pr-loading .ph { animation: none; }
 /* ==================== 优化历史（独立页签） ==================== */
 .pr-hist-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  /* min(340px, 100%) 兜底：1080px 断点只覆盖视口变窄，
+     覆盖不到「容器本身比 340px 还窄」的情况，这里补上 */
+  grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr));
   gap: 10px;
 }
 @media (max-width: 1080px) {
@@ -295,7 +399,8 @@ html.fx-off .prompts-scope .pr-loading .ph { animation: none; }
 
 .pr-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(272px, 1fr));
+  /* min(272px, 100%) 兜底：同 .pr-tpl-grid/.pr-cat-grid，窄容器下 272px 下限会溢出 */
+  grid-template-columns: repeat(auto-fill, minmax(min(272px, 100%), 1fr));
   gap: 10px;
 }
 .pr-grid.is-list { grid-template-columns: minmax(0, 1fr); }
@@ -370,7 +475,8 @@ html.fx-off .prompts-scope .pr-loading .ph { animation: none; }
 /* 设备 / 日志两张卡并排：窄屏放不下时自动换成单列，等高起点对齐 */
 .pr-sync-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  /* min(320px, 100%) 兜底：窄容器下 320px 下限会溢出 */
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
   gap: var(--gap-block);
   align-items: start;
 }
@@ -448,3 +554,236 @@ html.fx-off .prompts-scope .pr-loading .ph { animation: none; }
   gap: 6px;
 }
 .pr-style-card.on { border-color: var(--accent-line); background: var(--accent-dim); }
+
+/* ==================== 线上提示词库 ====================
+   左栏 200px 固定 + 主区自适应。左栏不做折叠：分类只有 8 个，折叠反而多一次点击。 */
+.pr-online {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+@media (max-width: 1080px) {
+  .pr-online { grid-template-columns: minmax(0, 1fr); }
+  .pr-online-side { flex-direction: row; flex-wrap: wrap; gap: 14px; }
+  .pr-side-group { min-width: 140px; }
+}
+
+.pr-online-side {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px;
+  border: 1px solid var(--pr-line);
+  border-radius: var(--r-md);
+  background: var(--pr-soft);
+}
+/* 左栏吸顶：本页唯一的滚动容器是根 .page，案例列表一长，分类树就被滚走，
+   用户得先滚回顶部才能换分类——这是「滚动有问题」的主因。
+   只在宽屏生效：窄屏（<=1080px）左栏已改成横向布局，吸顶会把它横在卡片上方挡住内容。
+   三处非默认值都有原因：
+   · align-self:start —— grid 项被拉伸到整行高时 sticky 没有任何可移动余量，必须显式钉住
+     （.pr-online 的 align-items:start 已经给了这个效果，这里再写一次防回归）；
+   · background:--panel —— 吸顶后卡片会从它底下穿过去，--pr-soft 是半透明的会透出字来，
+     换框架里的实色面板 token（与 .pr-drawer 同款，亮暗主题都成立）；
+   · max-height + overflow —— 分类多 / 窗口矮时，钉住的面板若高过可视区，
+     最下面几项会永远露不出来、点不到；这里用 shell 的精确刻度算出可视高度：
+     .app = 100vh，上下两条 --topbar-h 轨道 + 3 段 --gap-shell（2 段行间距 + 1 段底部内边距），
+     再留 24px 余量。宁可保守一点（滚动条早出现），也不能高估把内容顶出可视区。 */
+@media (min-width: 1081px) {
+  .pr-online-side {
+    position: sticky;
+    top: 12px;
+    align-self: start;
+    background: var(--panel);
+    max-height: calc(100vh - 2 * var(--topbar-h) - 3 * var(--gap-shell) - 24px);
+    overflow: auto;
+    z-index: 2;
+  }
+}
+.pr-side-group { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pr-side-title {
+  font-size: 11px;
+  color: var(--text-3);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-bottom: 4px;
+}
+.pr-side-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.16s var(--ease), color 0.16s var(--ease);
+}
+.pr-side-row:hover { background: var(--pr-soft-2, var(--pr-soft)); color: var(--text); }
+.pr-side-row.on { background: var(--accent-dim); color: var(--accent-strong); font-weight: 600; }
+.pr-side-row .n { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.pr-side-row.on .n { color: var(--accent-strong); }
+
+.pr-online-main { min-width: 0; }
+/* 分页条复用全局 .pager / .pager .pg-info（类名不变），落在主区里时补两条：
+   · margin-top 显式写死与网格的间距，不再依赖全局 .pager 的那一条被后续样式改掉；
+   · flex-wrap —— 主区窄、页码多时允许换行，不许把容器撑出横向滚动条（验收要求 <900px 无横向滚动）。
+   刻意不动 display：.pr-online-main 是普通块容器，分页条不会被当成弹性/网格项压扁。 */
+.pr-online-main .pager { margin-top: 14px; flex-wrap: wrap; }
+.pr-online-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 56px 12px 40px;
+  color: var(--text-3);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+/* 模板卡：一行两个，宽屏三个 */
+.pr-tpl-grid {
+  display: grid;
+  /* min(280px, 100%) 兜底：容器窄于 280px 时 minmax 的下限会硬撑出横向溢出 */
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  gap: 10px;
+}
+.pr-tpl-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--pr-line);
+  border-radius: var(--r-md);
+  background: var(--pr-soft);
+  cursor: pointer;
+  transition: border-color 0.18s var(--ease), transform 0.18s var(--ease);
+}
+.pr-tpl-card:hover { border-color: var(--accent-line); transform: translateY(-1px); }
+.pr-tpl-card.on { border-color: var(--accent-line); background: var(--accent-dim); }
+.pr-tpl-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pr-tpl-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.pr-tpl-desc { margin: 0; font-size: 12px; line-height: 1.65; color: var(--text-2); }
+.pr-tpl-use {
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--text-3);
+  border-top: 1px dashed var(--pr-line);
+  padding-top: 6px;
+}
+.pr-tpl-use b { color: var(--text-2); font-weight: 600; margin-right: 6px; }
+
+/* 案例卡 */
+.pr-cat-grid {
+  display: grid;
+  /* 同 .pr-tpl-grid：窄容器下 240px 下限会溢出，用 min(240px, 100%) 兜底 */
+  grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr));
+  gap: 10px;
+}
+.pr-cat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--pr-line);
+  border-radius: var(--r-md);
+  background: var(--pr-soft);
+  cursor: pointer;
+  transition: border-color 0.18s var(--ease), transform 0.18s var(--ease);
+}
+.pr-cat-card:hover { border-color: var(--accent-line); transform: translateY(-1px); }
+.pr-cat-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pr-cat-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.pr-cat-summary {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--text-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* 详情抽屉：不跳页，右侧浮层。遮罩只压暗一点，让用户仍能感到「这是同一页」 */
+.pr-drawer-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 0, 0, 0.28);
+  display: flex;
+  justify-content: flex-end;
+  /* 滚轮在遮罩上滚到底不许带动背景页。
+     注意：遮罩本身不是滚动容器，真正会滚的是里面的 .pr-drawer-body，
+     所以那条链的断点必须加在 .pr-drawer-body 上（见下），这里只做兜底。 */
+  overscroll-behavior: contain;
+}
+.pr-drawer {
+  width: min(480px, 92vw);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  /* 必须用实色：--pr-soft 是半透明的，抽屉会透出后面的卡片，读正文时非常干扰 */
+  background: var(--panel);
+  border-left: 1px solid var(--pr-line-strong);
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.18);
+  animation: pr-drawer-in 0.22s var(--ease);
+}
+@keyframes pr-drawer-in { from { transform: translateX(24px); opacity: 0.6; } to { transform: none; opacity: 1; } }
+html.fx-off .prompts-scope .pr-drawer { animation: none; }
+.pr-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--pr-line);
+}
+.pr-drawer-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.pr-drawer-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  /* 抽屉正文是真正被滚轮命中的容器：滚到底不再带动外层 .page 一起滚，
+     与 Sidebar.vue 卡内滚动同一套处理。单靠 .pr-drawer-mask 上的 contain 拦不住这条链。 */
+  overscroll-behavior: contain;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.pr-drawer-sec { display: flex; flex-direction: column; gap: 6px; }
+.pr-drawer-label { font-size: 11.5px; font-weight: 600; color: var(--text-3); letter-spacing: 0.02em; }
+.pr-drawer-sec p { margin: 0; font-size: 12.5px; line-height: 1.7; color: var(--text-2); }
+.pr-drawer-sec ol, .pr-drawer-sec ul { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.75; color: var(--text-2); }
+.pr-drawer-sec li { margin-bottom: 3px; }
+.pr-pitfall li { color: var(--warn); }
+.pr-drawer-pre {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--pr-line);
+  border-radius: var(--r-md);
+  background: var(--pr-soft);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pr-drawer-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--pr-line);
+  background: var(--pr-soft);
+}
+.pr-drawer-foot .btn { flex: 1; justify-content: center; }

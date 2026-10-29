@@ -34,6 +34,7 @@ import MemSelect from "../../components/memory/MemSelect.vue";
 import MemDialog from "../../components/memory/MemDialog.vue";
 import MemProgressDialog from "../../components/memory/MemProgressDialog.vue";
 import MemReviewPanel from "../../components/memory/MemReviewPanel.vue";
+import SearchDebugPanel from "../../components/memory/SearchDebugPanel.vue";
 import { typeLabelZh, agentLabel, projectLabel } from "../../components/memory/labels";
 
 const app = useAppStore();
@@ -92,7 +93,9 @@ const drawerOpen = ref(false);
 const drawerId = ref("");
 /** 新增记忆改为弹窗（原来就地展开一张卡，把列表往下挤） */
 const createOpen = ref(false);
-const draft = ref({ title: "", body: "", tags: "", importance: 3, project: "" });
+/** 搜不到时的排查弹层：带上当前搜索词，直接看分词与命中（排障动作回到发生搜索的地方） */
+const searchDebugOpen = ref(false);
+const draft = ref({ title: "", body: "", tags: [] as string[], importance: 3, project: "" });
 
 const pageSize = computed(() => Number(mem.cfg("ui.pageSize", 50)));
 /** 列表接口给的是逗号分隔字符串（检索接口给数组），展示层统一成数组，避免直接 .join 崩渲染 */
@@ -404,7 +407,7 @@ function rowAction(row: MemoryRow, cmd: string) {
 
 /** 打开新增弹窗：每次给一张干净的空白表单 */
 function openCreate() {
-  draft.value = { title: "", body: "", tags: "", importance: 3, project: "" };
+  draft.value = { title: "", body: "", tags: [], importance: 3, project: "" };
   createOpen.value = true;
 }
 
@@ -432,7 +435,7 @@ async function submitCreate() {
       layer: "l1",
       project: draft.value.project || undefined,
       agent: "manual",
-      tags: draft.value.tags.split(/[,，\s]+/).filter(Boolean),
+      tags: draft.value.tags.map((t) => t.replace(/^#/, "").trim()).filter(Boolean),
       // 输入框清空时给默认 3，而不是让空串被后端钳成 1
       importance: (() => {
         const n = Number(draft.value.importance);
@@ -515,12 +518,18 @@ watch(
     void load();
   },
 );
-/** 别处（仪表盘 KPI、侧栏、各页「N 条待确认 →」）的视图落点提示：消费后清空 */
+/** 别处（仪表盘 KPI、侧栏、各页「N 条待确认 →」、首启引导）的视图落点提示：消费后清空 */
 watch(
   () => mem.browseViewHint,
   (v) => {
     if (!v) return;
     mem.browseViewHint = "";
+    // 首启引导第 3 步的落点：跳过来直接弹出新建表单（表单是本页内部状态，别的入口带不进来）
+    if (v === "create") {
+      view.value = "list";
+      openCreate();
+      return;
+    }
     if (v !== "list" && v !== "heatmap" && v !== "review" && v !== "trash") {
       console.warn("[memory] 未知视图落点: " + v + "，已自动回落至 list 列表视图");
       view.value = "list";
@@ -544,7 +553,7 @@ watch(filters, () => {
     <div class="mem-head">
       <p class="mem-sub">
         实时记录 · 支持中文与代码符号检索
-        <MemHelp text="搜索走本地全文索引：中文按二字切分（「记忆」也能命中），英文与代码符号按整词。搜不到时先换更短的关键词；还搜不到就是真没记过。" />
+        <MemHelp text="搜索走本地全文索引；搜不到就换更短的关键词" />
       </p>
       <div class="mem-head-actions">
         <button class="btn btn-cta" @click="openCreate">＋ 新增一条记忆</button>
@@ -607,7 +616,7 @@ watch(filters, () => {
           <span class="mem-row" style="gap: 6px">
             <div class="switch" :class="{ on: filters.includeSuperseded }" role="switch" :aria-checked="!!filters.includeSuperseded" @click="filters.includeSuperseded = !filters.includeSuperseded"></div>
             <span class="mem-hint">显示已失效</span>
-            <MemHelp text="记忆会被推翻（例如「改用 Vue3」推翻了「我在用 React」）。旧的那条会被标记失效并从默认结果里隐去，避免拿旧偏好当现在的偏好；打开这里可以连失效的一起看。" />
+            <MemHelp text="被推翻的旧记忆标失效并默认隐去，这里可连失效一起看" />
           </span>
         </el-tooltip>
         <span class="mem-row" style="gap: 6px">
@@ -646,7 +655,11 @@ watch(filters, () => {
               <!-- 空状态 -->
               <tr v-else-if="!rows.length">
                 <td colspan="8" style="text-align: center; color: var(--text-3); padding: 28px 0">
-                  {{ query ? "没有命中的记忆 —— 试试更短的关键词，或在「检索与索引」页看分词结果" : "当前条件下没有记忆" }}
+                  <template v-if="query">
+                    没有命中的记忆 —— 试试更短的关键词
+                    <button class="btn-link" style="margin-left: 6px" @click="searchDebugOpen = true">为什么搜不到？</button>
+                  </template>
+                  <template v-else>当前条件下没有记忆</template>
                 </td>
               </tr>
               <!-- 数据行 -->
@@ -730,7 +743,7 @@ watch(filters, () => {
         <div class="mem-card-title">
           每日记录热力图（一年视图）
           <span class="mem-hint">今日 {{ todayCount }} 条 · 活跃 {{ heatActiveDays }} 天 · 近一年 {{ formatInteger(heatTotal) }} 条</span>
-          <MemHelp text="每格一天，颜色越深当天记录越多。点任一天在下方展开当日清单（再点一次收起）——回答「某天记了多少条」最直接的方式。" />
+          <MemHelp text="每格一天，颜色越深记录越多；点某天在下方展开当日清单" />
         </div>
         <MemoryHeatmap :data="heat" :picked="dayPick" @pick="pickDay" />
 
@@ -776,7 +789,7 @@ watch(filters, () => {
         <div class="mem-card-title">
           自动清理
           <span class="mem-hint">按类删除异常记忆 —— 一律先进回收站，可恢复</span>
-          <MemHelp text="每天 04:00 的「异常记忆清理」任务按这里的开关执行（也可「立即清理一次」）。删除先入回收站，超过保留期后由同一任务从磁盘彻底删除。注意：删除会随记忆同步传播到其他设备，开启前请确认。" />
+          <MemHelp text="每天 04:00 自动清理；删除先进回收站，但会随同步传播到其他设备" />
           <span class="mem-inline-ctl">
             <span class="mem-row" style="gap: 6px; align-items: center">
               <span class="mem-hint">保留</span>
@@ -800,7 +813,7 @@ watch(filters, () => {
           <span class="mem-hint">{{ trash.length }} 个文件 · 保留 {{ formatInteger(trashDays) }} 天，到期自动彻底删除</span>
           <span class="mem-inline-ctl">
             <button class="btn-outline danger" @click="purgeTrash">清理超期文件</button>
-            <MemHelp text="删除的记忆先整份进这里，保留期内可一键恢复回原路径；到期文件由每天的「异常记忆清理」任务自动从磁盘彻底删除，也可点「清理超期文件」立刻收口。" />
+            <MemHelp text="删除的记忆先进这里，保留期内可恢复，到期自动彻底清除" />
           </span>
         </div>
         <div v-if="trash.length" class="mem-table-wrap mem-table-scroll">
@@ -844,13 +857,34 @@ watch(filters, () => {
           <MemSelect v-model="draft.project" :options="createProjectOptions" placeholder="（自动归类 / 通用 general）" />
         </div>
         <div class="mem-row" style="gap: 10px">
-          <span class="mem-section" style="flex: 1 1 220px">
-            <span class="s-title">标签（逗号分隔）</span>
-            <input v-model="draft.tags" class="f-input" placeholder="如：索引, 性能" />
+          <span class="mem-section" style="flex: 1 1 240px">
+            <span class="s-title">标签（选已有或输入新的）</span>
+            <el-select
+              v-model="draft.tags"
+              class="f-el-select"
+              popper-class="glass-popper"
+              multiple filterable allow-create default-first-option
+              :reserve-keyword="false"
+              placeholder="选择或输入标签"
+            >
+              <el-option v-for="t in tags" :key="t.name" :value="t.name" :label="`${t.name}（${t.count}）`" />
+            </el-select>
           </span>
           <span class="mem-section" style="flex: 0 0 auto">
-            <span class="s-title">重要度 1~5</span>
-            <input v-model.number="draft.importance" type="number" min="1" max="5" class="f-input" style="width: 96px" />
+            <span class="s-title">重要度</span>
+            <span class="mem-stars" role="radiogroup" aria-label="重要度">
+              <button
+                v-for="n in 5"
+                :key="n"
+                type="button"
+                class="mem-star"
+                :class="{ on: draft.importance >= n }"
+                role="radio"
+                :aria-checked="draft.importance === n"
+                :title="`重要度 ${n}`"
+                @click="draft.importance = n"
+              >★</button>
+            </span>
           </span>
         </div>
       </div>
@@ -858,6 +892,11 @@ watch(filters, () => {
         <button class="btn btn-cta" @click="submitCreate">写入</button>
         <button class="btn btn-ghost" @click="createOpen = false">取消</button>
       </template>
+    </MemDialog>
+
+    <!-- 搜不到时的排查弹层：复用检索调试面板（带上当前搜索词直接跑一次） -->
+    <MemDialog v-model:open="searchDebugOpen" title="为什么搜不到？" sub="看这次查询被切成什么词、命中了哪些条；索引本身由后台自动维护" width="760px">
+      <SearchDebugPanel v-if="searchDebugOpen" :query="query.trim()" />
     </MemDialog>
 
     <!-- 写入进度（写盘 + 重建索引可能被写队列排队，给进度与结果） -->

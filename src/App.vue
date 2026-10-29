@@ -12,7 +12,7 @@
 <script setup lang="ts">
 import zhCn from "element-plus/es/locale/lang/zh-cn";
 import { ElConfigProvider } from "element-plus";
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { onMounted, onUnmounted, ref, watch, computed } from "vue";
 import { animate, stagger } from "motion-v";
 import { usePreferredReducedMotion } from "@vueuse/core";
 import { useAppStore } from "./stores/app";
@@ -54,6 +54,7 @@ import MemoryBrowseView from "./views/memory/BrowseView.vue";
 import MemoryProjectsView from "./views/memory/ProjectsView.vue";
 import MemoryProfileView from "./views/memory/ProfileView.vue";
 import MemoryAgentsView from "./views/memory/AgentsView.vue";
+import MemoryHubView from "./views/memory/HubView.vue";
 import MemoryIndexView from "./views/memory/IndexView.vue";
 import MemoryAutoView from "./views/memory/AutoView.vue";
 import MemoryImportView from "./views/memory/ImportView.vue";
@@ -66,9 +67,23 @@ import ConfigMemorySection from "./components/config/ConfigMemorySection.vue";
 import PromptsOptimizeView from "./views/prompts/OptimizeView.vue";
 import PromptsHistoryView from "./views/prompts/HistoryView.vue";
 import PromptsLibraryView from "./views/prompts/LibraryView.vue";
+import PromptsOnlineView from "./views/prompts/OnlineView.vue";
 import PromptsSyncView from "./views/prompts/SyncView.vue";
 import PromptsPromptDetailView from "./views/prompts/PromptDetailView.vue";
 import ConfigPromptsSection from "./components/config/ConfigPromptsSection.vue";
+// 本地网关模块：六个页面（总览 / 服务与密钥 / 路由与渠道 / 模型目录 / 请求日志 / 接入与文档）
+// 账号体系复用号池，本模块不建第二套账号模型；后端未接入时各页显示「后端未就绪」占位
+import LocalgwDashboardView from "./views/localgw/LocalgwDashboardView.vue";
+import LocalgwKeysView from "./views/localgw/LocalgwKeysView.vue";
+import LocalgwRoutingView from "./views/localgw/LocalgwRoutingView.vue";
+import LocalgwModelsView from "./views/localgw/LocalgwModelsView.vue";
+import LocalgwLogView from "./views/localgw/LocalgwLogView.vue";
+import LocalgwAccessView from "./views/localgw/LocalgwAccessView.vue";
+import LocalgwStatsView from "./views/localgw/LocalgwStatsView.vue";
+import LocalgwProvidersView from "./views/localgw/LocalgwProvidersView.vue";
+import LocalgwCcSwitchView from "./views/localgw/LocalgwCcSwitchView.vue";
+import LocalgwNetProxyView from "./views/localgw/LocalgwNetProxyView.vue";
+import ConfigLocalgwSection from "./components/config/ConfigLocalgwSection.vue";
 import { useMemoryStore } from "./stores/memory";
 import * as api from "./api/ipc";
 import type { UpdateEvent } from "./types";
@@ -554,12 +569,12 @@ onMounted(() => {
   usageData.startDayWatcher(); // 跨天换日守护：过 0 点自动把「今日/本月」口径的数据换到新一天
   app.refreshUpdateStatus(); // 启动拉一次更新状态，维护设置齿轮红点
   app.refreshPlugins(); // 外置插件清单：侧栏入口据此显隐（无插件时为空数组）
-  // 更新事件全局唯一监听：focus-update 打开设置弹窗 · 通用并自增信号（滚动高亮由
-  // ConfigGeneralSection 据 configFocusUpdate 执行）；state 回流顺带维护红点（浏览器预览无桥接返回 undefined）
+  // 更新事件全局唯一监听：focus-update 打开设置弹窗 · 检查更新并自增信号（滚动高亮由
+  // ConfigUpdateSection 据 configFocusUpdate 执行）；state 回流顺带维护红点（浏览器预览无桥接返回 undefined）
   const offFocusUpdate = api.onUpdateEvent((e) => {
     const ev = e as UpdateEvent;
     if (ev.event === "focus-update") {
-      app.openSettings("general");
+      app.openSettings("update");
       app.configFocusUpdate++;
       return;
     }
@@ -649,6 +664,16 @@ watch(
   { immediate: true }
 );
 const seen = (mod: string, page: string) => !!visited.value[`${mod}/${page}`];
+
+/** 当前 (模块, 页) 是否是 MODULES 里声明过的合法组合（config 是各模块隐藏的配置页，不在 MODULES 中）。
+ *  正常路径恒真 —— 左侧栏只发 MODULES 里的页 id，恢复上次位置时也校验过；
+ *  只有配置被手改坏（activePage 残留已删除的旧 id、pageBeforeConfig 指向已下线页）时才为假。
+ *  模板据此给「没有任何视图承接的页」一块可见提示，而不是留一片空白主区。
+ *  为什么用 MODULES 反查而不是维护一份「有视图的页清单」：后者是模板分支的复制品，
+ *  新增页面时漏同步就会把正常页误判成不存在（宁可漏报，不可误报）。 */
+const pageValid = computed(
+  () => app.activePage === "config" || app.moduleOf(app.activeModule).pages.some((p) => p.id === app.activePage)
+);
 </script>
 
 <template>
@@ -699,19 +724,36 @@ const seen = (mod: string, page: string) => !!visited.value[`${mod}/${page}`];
         <MemoryBrowseView v-if="seen('memory', 'browse')" v-show="on('memory', 'browse')" class="page" :class="{ 'page-anim': on('memory', 'browse') }" />
         <MemoryProjectsView v-if="seen('memory', 'projects')" v-show="on('memory', 'projects')" class="page" :class="{ 'page-anim': on('memory', 'projects') }" />
         <MemoryProfileView v-if="seen('memory', 'profile')" v-show="on('memory', 'profile')" class="page" :class="{ 'page-anim': on('memory', 'profile') }" />
+        <!-- 接入与迁移：Agent 接入 + 导入历史 + 多机同步三段合一（v1.90 起为默认页签） -->
+        <MemoryHubView v-if="seen('memory', 'hub')" v-show="on('memory', 'hub')" class="page" :class="{ 'page-anim': on('memory', 'hub') }" />
+        <!-- 旧三段页签保留渲染：老配置显式勾选过它们的用户仍能打开（默认白名单已切到 hub） -->
         <MemoryAgentsView v-if="seen('memory', 'agents')" v-show="on('memory', 'agents')" class="page" :class="{ 'page-anim': on('memory', 'agents') }" />
         <MemoryIndexView v-if="seen('memory', 'index')" v-show="on('memory', 'index')" class="page" :class="{ 'page-anim': on('memory', 'index') }" />
         <MemoryAutoView v-if="seen('memory', 'auto')" v-show="on('memory', 'auto')" class="page" :class="{ 'page-anim': on('memory', 'auto') }" />
         <MemoryImportView v-if="seen('memory', 'import')" v-show="on('memory', 'import')" class="page" :class="{ 'page-anim': on('memory', 'import') }" />
         <MemorySyncView v-if="seen('memory', 'sync')" v-show="on('memory', 'sync')" class="page" :class="{ 'page-anim': on('memory', 'sync') }" />
         <!-- 提示词库五页：各页自带 .page.prompts-scope 容器（样式作用域见 styles/prompts.css）；
-             页 id 与 MODULES 一一对应；prompt-detail 是隐藏页（从库/优化结果点卡片进入），不进横条菜单；
-             MODULES 里的「线上提示词库」为禁用占位页，此处不挂组件 -->
+             页 id 与 MODULES 一一对应；prompt-detail 是隐藏页（从库/优化结果点卡片进入），不进横条菜单 -->
         <PromptsOptimizeView v-if="seen('prompts', 'optimize')" v-show="on('prompts', 'optimize')" :class="{ 'page-anim': on('prompts', 'optimize') }" />
         <PromptsHistoryView v-if="seen('prompts', 'history')" v-show="on('prompts', 'history')" :class="{ 'page-anim': on('prompts', 'history') }" />
         <PromptsLibraryView v-if="seen('prompts', 'library')" v-show="on('prompts', 'library')" :class="{ 'page-anim': on('prompts', 'library') }" />
+        <PromptsOnlineView v-if="seen('prompts', 'online')" v-show="on('prompts', 'online')" :class="{ 'page-anim': on('prompts', 'online') }" />
         <PromptsSyncView v-if="seen('prompts', 'sync')" v-show="on('prompts', 'sync')" :class="{ 'page-anim': on('prompts', 'sync') }" />
         <PromptsPromptDetailView v-if="seen('prompts', 'prompt-detail')" v-show="on('prompts', 'prompt-detail')" :class="{ 'page-anim': on('prompts', 'prompt-detail') }" />
+        <!-- 本地网关十页：页面形式照搬旧版「反代网关」七页（总览 / API Keys / 模型目录 /
+             用量统计 / 自定义提供商 / 生态接入 / 网络代理）+ 路由与渠道 / 请求日志 / 接入与文档。
+             各页自带 .page 容器（样式作用域见 styles/localgw.css）；
+             后端 IPC 未接入时页面各自降级为「后端未就绪」占位，不影响其它模块 -->
+        <LocalgwDashboardView v-if="seen('localgw', 'dashboard')" v-show="on('localgw', 'dashboard')" :class="{ 'page-anim': on('localgw', 'dashboard') }" />
+        <LocalgwKeysView v-if="seen('localgw', 'keys')" v-show="on('localgw', 'keys')" :class="{ 'page-anim': on('localgw', 'keys') }" />
+        <LocalgwModelsView v-if="seen('localgw', 'models')" v-show="on('localgw', 'models')" :class="{ 'page-anim': on('localgw', 'models') }" />
+        <LocalgwStatsView v-if="seen('localgw', 'stats')" v-show="on('localgw', 'stats')" :class="{ 'page-anim': on('localgw', 'stats') }" />
+        <LocalgwRoutingView v-if="seen('localgw', 'routing')" v-show="on('localgw', 'routing')" :class="{ 'page-anim': on('localgw', 'routing') }" />
+        <LocalgwProvidersView v-if="seen('localgw', 'providers')" v-show="on('localgw', 'providers')" :class="{ 'page-anim': on('localgw', 'providers') }" />
+        <LocalgwCcSwitchView v-if="seen('localgw', 'ccswitch')" v-show="on('localgw', 'ccswitch')" :class="{ 'page-anim': on('localgw', 'ccswitch') }" />
+        <LocalgwNetProxyView v-if="seen('localgw', 'netproxy')" v-show="on('localgw', 'netproxy')" :class="{ 'page-anim': on('localgw', 'netproxy') }" />
+        <LocalgwLogView v-if="seen('localgw', 'log')" v-show="on('localgw', 'log')" :class="{ 'page-anim': on('localgw', 'log') }" />
+        <LocalgwAccessView v-if="seen('localgw', 'access')" v-show="on('localgw', 'access')" :class="{ 'page-anim': on('localgw', 'access') }" />
         <!-- 各模块的配置页：右上「配置」按钮切换到这里的页面（page + cfg-body 组合出页壳与留白）；
              配置页内部的二级子板块 tab 由各 section 自己渲染 -->
         <div v-if="seen('skills', 'config')" v-show="on('skills', 'config')" class="page cfg-body" :class="{ 'page-anim': on('skills', 'config') }">
@@ -728,6 +770,22 @@ const seen = (mod: string, page: string) => !!visited.value[`${mod}/${page}`];
         </div>
         <div v-if="seen('prompts', 'config')" v-show="on('prompts', 'config')" class="page cfg-body" :class="{ 'page-anim': on('prompts', 'config') }">
           <ConfigPromptsSection />
+        </div>
+        <div v-if="seen('localgw', 'config')" v-show="on('localgw', 'config')" class="page cfg-body" :class="{ 'page-anim': on('localgw', 'config') }">
+          <ConfigLocalgwSection />
+        </div>
+        <!-- 兜底：当前 (模块, 页) 没有任何视图承接时的可见提示（正常路径不会出现，见 pageValid）。
+             loaded 之前不渲染，避免配置异步加载的那一两帧闪一块"页面不存在" -->
+        <div v-if="app.loaded && !pageValid" class="page cfg-body">
+          <div class="card">
+            <div class="cfg-sec-title">页面不存在</div>
+            <div class="cfg-sec-sub">
+              当前页面「{{ app.activePage }}」已不在「{{ app.moduleOf(app.activeModule).name }}」的页面清单里（可能来自旧版本的配置残留）。
+            </div>
+            <div class="cfg-sec-actions">
+              <button class="btn" @click="app.setPage(app.moduleOf(app.activeModule).pages[0].id)">回到首页</button>
+            </div>
+          </div>
         </div>
       </div>
       <!-- 外置插件页面：内嵌在主区域，切模块或停用插件即销毁（顺带释放插件页面里的长连接）。

@@ -158,7 +158,8 @@ function toggleMulti(key: string, option: string) {
 const MULTI_OPTION_LABELS: Record<string, Record<string, string>> = {
   "ui.tabs": {
     dashboard: "仪表盘", browse: "记忆浏览", projects: "项目归档", profile: "深层画像",
-    agents: "Agent 接入", index: "检索与索引", auto: "自动化", import: "导入与去重", sync: "WebDAV同步",
+    hub: "接入与迁移", agents: "Agent 接入", index: "检索与索引", auto: "自动化",
+    import: "导入与去重", sync: "WebDAV同步",
   },
 };
 function multiLabel(key: string, o: string): string {
@@ -348,7 +349,7 @@ const shownKeys = computed(() => (advancedOpen.value ? visibleKeys.value : basic
          引导条不能省：用户主动想配模型时若本页毫无线索，会找不到入口。 -->
     <div class="mem-banner info">
       <span class="b-grow">
-        供应商、模型池与来源优先级已移至 <b>「设置 · 模型与网关」</b>（平台级配置，所有板块共用）；本页只保留记忆中枢自己的路由规则。
+        供应商与模型池已移至 <b>「设置 · 模型与网关」</b>；本页只保留记忆中枢自己的路由规则。
       </span>
       <button class="btn-outline" @click="gotoModels">前往设置 →</button>
     </div>

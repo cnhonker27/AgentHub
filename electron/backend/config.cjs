@@ -133,8 +133,13 @@ function defaultConfig() {
     /** 远程网关实例（桌面连远程 Docker 版）：tokenEnc 以 enc:v1: 加密落盘，列表接口只回 hasToken */
     remoteTargets: [],
     remoteActiveId: "local",
-    // 五大模块的显示顺序（用户在「设置 · 个性化」中调整）；prompts = 提示词库（第五板块）
-    moduleOrder: ["skills", "sync", "proxy", "memory", "prompts"],
+    // 六大模块的显示顺序（用户在「设置 · 个性化」中调整）；
+    // 产品定义的默认顺序：用量统计 → 记忆中枢 → 提示词库 → 号池管家 → 本地网关 → 技能仓库
+    //（「数据 → 记忆 → 提示词 → 账号 → 对外接口 → 技能资产」的使用链路）。
+    // ⚠️ 这份清单是 normalizeModuleOrder() 的已知集合：**新增板块必须补进来**，
+    //    否则渲染层保存上来的 moduleOrder 里该 key 会被静默剔除，
+    //    前端 orderedModules 按 moduleOrder 映射取模块 → 新板块在左栏「不存在」。
+    moduleOrder: ["sync", "memory", "prompts", "proxy", "localgw", "skills"],
     // ===== 板块启用开关（issue #91 轻量模式）：关闭后左上角置灰不可点、后台完全不运行。
     // 唯一写入口是 module_toggle IPC（主进程读改写），设置页表单不拥有它；
     // 记忆中枢旧版 memory.enabled=false 由 loadConfig 迁移到这里，旧字段保留但不再被读取
@@ -143,7 +148,8 @@ function defaultConfig() {
       sync: { enabled: true },  // 用量统计（键名与 moduleOrder/前端 ModuleKey 对齐）
       proxy: { enabled: true },
       memory: { enabled: true },
-      prompts: { enabled: true }, // 提示词库（第五板块）
+      prompts: { enabled: true }, // 提示词库（第三板块）
+      localgw: { enabled: true }, // 本地网关（第五板块）；前端模块顺序列表可见可排序，但启停开关锁死启用（方案决策 5 只收窄启停）
     },
     // ===== 技能仓库 =====
     // 各工具候选路径按顺序探测，取第一个存在的
@@ -198,7 +204,7 @@ function defaultConfig() {
       enabled: true,
       rootDir: "",   // 空 = 默认 <用户文件夹>/AgentHub/memory
     },
-    // ===== 提示词库（第五板块）=====
+    // ===== 提示词库（第三板块）=====
     // 库目录（用户资产，参与 WebDAV 同步）与「本机偏好目录」（风格 / 优化历史，不参与同步）
     // 是两处不同的位置：前者在 ~/AgentHub/prompts，后者在 userData/prompts，勿混用。
     prompts: {
@@ -223,6 +229,9 @@ function defaultConfig() {
       timeoutSec: 60,
       scenario: "通用 AI 助手",     // 注入 system 模板的目标场景描述
       historyLimit: 50,            // 优化历史条数上限
+      // 流式输出：默认开。上游不支持时后端会自动回退非流式（只慢一次，之后记住该供应商），
+      // 所以默认开是安全的；反代环境特别不稳的用户可以在设置里关掉，省掉那次失败往返。
+      stream: true,
     },
     // 后台与调度
     schedule: {
@@ -258,7 +267,16 @@ function defaultConfig() {
                                 // （免费→低成本→普通，组内仍按打分）；Key 可单独覆盖
       rateLimitPerMin: 120,     // 单 Key 令牌桶限速（次/分钟，Key 可单独覆盖）
       concurrency: 8,           // 单渠道在途并发上限（满则跳备选渠道，不做全局 429，issue #106）
-      creditsRefreshMin: 30,    // 额度自动刷新周期（分钟）
+      creditsRefreshMin: 30,    // 额度自动刷新周期（分钟；**下限 15**，由 credits.startScheduler 强制）
+      creditsAutoRefresh: true, // 额度自动刷新总开关（R-11，2026-10-28）：false = 停止定时轮询，
+                                // 仅保留手动刷新；默认 true = 保持既有行为不变。
+                                // 依据 docs/号池签到核对-20261028/05-pool-probing-audit.md R-11：
+                                // 额度查询是主动出站请求，应允许用户单独关掉。
+      autoCheckinAfterLogin: false, // 登录/导入后自动签到（R-20，2026-10-28）：**默认 false**。
+                                // 原实现无条件在 OAuth 登录、账号导入、批量导入后顺手跑一次签到，
+                                // 界面上无任何提示，属隐蔽的对外写操作。改为默认关：
+                                // 只把账号存进号池，不做任何对外动作；用户仍可在号池页手动签到。
+                                // 依据 docs/号池签到核对-20261028/05-pool-probing-audit.md R-20。
       usageRetentionDays: 90,   // 请求流水保留期（天，1~3650）：启动 GC 与用量统计页「清理」共用
                                 // （默认 90 = 该保留期此前在 proxy/store.cjs 的 gc() 里写死的那个数）
       expiringSoonDays: 1,      // 积分包「即将到期」预警阈值（天，0~3650，0=关闭预警）：
@@ -326,15 +344,30 @@ function mergeConfig(def, cfg) {
   return out;
 }
 
-/** 模块顺序归一化：非法项剔除，缺失模块按默认顺序补尾 */
+/** 历史内置默认顺序（**顺序敏感**）：用户从未拖过「模块顺序」时，磁盘上存的就是这几份之一。
+ *  它们是「没自定义过」的指纹——据此做一次性迁移到新默认顺序，不会覆盖真正调过顺序的用户。
+ *  第 1 份是第五板块时代的内置默认；第 2 份是本地网关刚加进来、但顺序还是「技能仓库打头」的默认。
+ *  两份都要收：升级路径上两种都真实存在过。 */
+const LEGACY_MODULE_ORDERS = [
+  ["skills", "sync", "proxy", "memory", "prompts"],
+  ["skills", "sync", "proxy", "memory", "prompts", "localgw"],
+];
+
+/** 模块顺序归一化：非法项剔除，缺失模块按默认顺序补尾。
+ *  另做一次**只在完全相等时**触发的一次性迁移：磁盘顺序恰好等于某份历史内置默认
+ *  （长度与逐项都相等）→ 视为「用户从未自定义」，直接换成当前默认顺序。
+ *  多一个 / 少一个 / 顺序不同都不动——那说明用户拖过，必须尊重。 */
 function normalizeModuleOrder(order) {
   const known = defaultConfig().moduleOrder;
-  const list = (Array.isArray(order) ? order : []).filter((k) => known.includes(k));
+  let list = (Array.isArray(order) ? order : []).filter((k) => known.includes(k));
+  if (LEGACY_MODULE_ORDERS.some((legacy) => list.length === legacy.length && list.every((k, i) => k === legacy[i]))) {
+    list = known.slice();
+  }
   for (const k of known) if (!list.includes(k)) list.push(k);
   return list;
 }
 
-// ===== 提示词库（第五板块）配置归一化与目录工具 =====
+// ===== 提示词库（第三板块）配置归一化与目录工具 =====
 
 /** 整数收敛：非有限值回默认，超出区间钳制（配置可能被手改，下游不再重复判合法性） */
 function clampInt(v, def, min, max) {
@@ -375,6 +408,7 @@ function normalizePrompts(p) {
     timeoutSec: clampInt(o.timeoutSec, def.timeoutSec, 5, 600),
     scenario: str(o.scenario, def.scenario) || def.scenario,
     historyLimit: clampInt(o.historyLimit, def.historyLimit, 1, 500),
+    stream: bool(o.stream, def.stream),
   };
 }
 
@@ -655,7 +689,7 @@ function loadConfig() {
   // 一次性迁移进 modules.memory.enabled，此后 modules.* 是唯一事实源
   merged.modules = merged.modules && typeof merged.modules === "object" ? merged.modules : {};
   // 板块 key 白名单：**新增板块必须补进这个数组**，否则模块开关被剔除（表现为板块不存在）
-  for (const k of ["skills", "sync", "proxy", "memory", "prompts"]) {
+  for (const k of ["skills", "sync", "proxy", "memory", "prompts", "localgw"]) {
     const m = merged.modules[k] && typeof merged.modules[k] === "object" ? merged.modules[k] : {};
     m.enabled = m.enabled !== false;
     merged.modules[k] = m;
@@ -831,7 +865,7 @@ module.exports = {
   getUpdateNotified, setUpdateNotified, isPortable, encryptSecret, decryptSecret, isEncrypted, applyAutoStart,
   loadSharedWebdav, saveSharedWebdav, clearSharedWebdav, maskedSharedWebdav, moduleWebdav, sharedEncryptionPassphrase, PASSWORD_MASK,
   normalizeHm, normalizeJitter,
-  // 提示词库（第五板块）：库目录（参与同步）与本机偏好目录（风格/历史，不参与同步）由本模块统一提供，
+  // 提示词库（第三板块）：库目录（参与同步）与本机偏好目录（风格/历史，不参与同步）由本模块统一提供，
   // 避免后端各处自己拼路径导致两个目录被混用
   promptsLibDir, promptsLocalDir, normalizePrompts,
   saveConfigFromUI, OUT_OF_BAND_PROXY_FIELDS,
