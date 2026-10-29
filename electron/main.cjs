@@ -140,7 +140,7 @@ const pluginHost = require("./backend/plugin-host.cjs");
 const pluginBridge = require("./backend/plugin-bridge.cjs");
 
 /**
- * 提示词库后端（第五板块）：惰性 require + 兜底。
+ * 提示词库后端（第三板块）：惰性 require + 兜底。
  * 为什么不做顶层 require：该模块若缺失或初始化抛错（旧安装包残留、开发中途），
  * 顶层 require 失败会让**整个主进程起不来**；这里降级为「仅提示词库不可用」。
  * 另外 IPC 注册与板块开关无关（停用只停后台设施），否则停用后再启用会因
@@ -154,6 +154,35 @@ function promptsMod() {
     return null;
   }
 }
+
+/**
+ * 本地网关后端（第五板块）：与提示词库同款「惰性 require + 兜底」。
+ * 为什么不做顶层 require：localgw 会连带 require server.cjs / forwarder.cjs 等一大票文件，
+ * 其中任何一个缺失（旧安装包残留、增量更新中途）都会让顶层 require 抛错 →
+ * 整个主进程起不来。降级为「仅本地网关不可用」是唯一可接受的失败半径。
+ *
+ * 注意：这里**只加载模块**，不启动 HTTP 服务。是否 listen 由 boot() 内的
+ * autostart 开关决定（默认 false），即「装了不等于对外开端口」。
+ */
+function localgwMod() {
+  try {
+    return require("./backend/localgw/index.cjs");
+  } catch (e) {
+    __crashLog("localgw-require-failed", __describe(e));
+    return null;
+  }
+}
+
+/** 本地网关 → 渲染层广播：走既有 app:event 通道，event 字段固定 "localgw"
+ *  （消费方：Sidebar.vue 的 p.event === "localgw" 分支；payload 结构见 localgw/usagehook.cjs） */
+function broadcastLocalgw(payload) {
+  try {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) w.webContents.send("app:event", payload);
+    }
+  } catch { /* 无窗口/已销毁时静默：广播失败不能影响网关转发本身 */ }
+}
+
 pluginHost.init({ app });
 pluginBridge.init(pluginHost);
 // 顶层 require 链完成：此后的未捕获异常可以降级记录，不再按「启动失败」弹窗退出
@@ -563,7 +592,11 @@ function registerModuleToggle() {
       const m = String((args && args.module) || "");
       const enabled = !!(args && args.enabled);
       // 板块 key 白名单：**新增板块必须补进来**，否则开关报「未知板块」
-      if (!["skills", "sync", "proxy", "memory", "prompts"].includes(m)) return { ok: false, message: "未知板块" };
+      // localgw 在前端的启停开关是锁死的（方案决策 5：对外 API 的唯一入口，写死启用，
+      // 顺序列表里可见可排序但不可停），白名单仍要收 —— 否则旧配置里残留的
+      // localgw.enabled=false 只能靠改配置文件恢复，且 module_toggle 会给出
+      // 「未知板块」这种自相矛盾的回复（该 key 明明在 MODULES 里）。
+      if (!["skills", "sync", "proxy", "memory", "prompts", "localgw"].includes(m)) return { ok: false, message: "未知板块" };
       const cfg = config.loadConfig();
       const next = { ...cfg.modules, [m]: { ...((cfg.modules || {})[m] || {}), enabled } };
       if (!enabled && Object.values(next).every((x) => !x || x.enabled === false)) {
@@ -611,6 +644,20 @@ function registerModuleToggle() {
             try { await pm.boot(); } catch (e) { __crashLog("prompts-boot-failed", __describe(e)); }
           } else {
             try { await pm.shutdown(); } catch { /* 停用失败无碍，下次启动会重新收口 */ }
+          }
+        }
+      } else if (m === "localgw") {
+        // 本地网关：启用 = 按 autostart 决定是否拉起 HTTP 服务；停用 = 立刻关掉监听。
+        // IPC 常驻注册（与 prompts 同口径）：停用后前端仍能读状态/密钥/日志，
+        // 否则页面会白屏，用户连「为什么连不上」都看不到。
+        const lgw = localgwMod();
+        if (lgw) {
+          if (enabled) {
+            try { lgw.setRuntime({ broadcast: broadcastLocalgw }); } catch { /* 广播器注入失败只影响事件刷新 */ }
+            // boot() 内部已按 autostart 短路：autostart=false 时不会开端口
+            try { await lgw.boot(); } catch (e) { __crashLog("localgw-boot-failed", __describe(e)); }
+          } else {
+            try { await lgw.shutdown(); } catch { /* 停用失败无碍，下次启动会重新收口 */ }
           }
         }
       }
@@ -816,7 +863,7 @@ if (!gotLock) {
 
     ipc.register({ ipcMain, app, shell, nativeTheme });
     registerModuleToggle();
-    // 提示词库（第五板块）：IPC 无条件注册（停用只停后台调度），后台设施按板块开关启停
+    // 提示词库（第三板块）：IPC 无条件注册（停用只停后台调度），后台设施按板块开关启停
     {
       const pm = promptsMod();
       if (pm) {
@@ -825,6 +872,18 @@ if (!gotLock) {
         // 那样挂 .catch —— 对同步函数调 .catch 会抛 TypeError，而此处不在 try 内，
         // 会变成未捕获异常（对照 L611 的 await 写法：await 一个非 Promise 值是安全的）
         if (on("prompts")) { try { pm.boot(); } catch (e) { __crashLog("prompts-boot-failed", __describe(e)); } }
+      }
+    }
+    // 本地网关（第五板块）：IPC 无条件注册（停用只停 HTTP 服务），服务按板块开关 + autostart 启停。
+    // 与 prompts 的差别：localgw.boot() 是 **async**（内含 server.start()），所以必须挂 .catch ——
+    // 裸调用一旦 reject 就是 unhandledRejection，会让主进程静默退出（同 proxy.boot 的教训）。
+    // setRuntime 必须在 boot 之前：usagehook 的广播器只在 boot 时注入，晚注入会丢掉启动初期的落账事件。
+    {
+      const lgw = localgwMod();
+      if (lgw) {
+        try { lgw.register(ipcMain); } catch (e) { __crashLog("localgw-register-failed", __describe(e)); }
+        try { lgw.setRuntime({ broadcast: broadcastLocalgw }); } catch (e) { __crashLog("localgw-runtime-failed", __describe(e)); }
+        if (on("localgw")) lgw.boot().catch((e) => __crashLog("localgw-boot-failed", __describe(e)));
       }
     }
     remotesync.setOnFinish(notifySync);
@@ -886,6 +945,10 @@ if (!gotLock) {
       memory.shutdown();
       // 提示词库：停掉定时同步调度（模块缺失时是空操作，不拦退出）
       try { const pm = promptsMod(); if (pm) pm.shutdown(); } catch { /* 未加载时无操作 */ }
+      // 本地网关：关掉 HTTP 监听并释放连接。shutdown() 是 async，这里只能尽力而为——
+      // 但必须调：进程退出虽会回收 socket，可「更新重启」是拦下退出再重启，
+      // 端口没放掉会让新实例的 9527 探测失败、静默漂到 9528（用户看到端口变了会困惑）。
+      try { const lgw = localgwMod(); if (lgw) lgw.shutdown().catch(() => {}); } catch { /* 未加载时无操作 */ }
       // 插件进程必须显式回收：Windows 下父进程退出不会带走子进程，会留孤儿占端口
       try { pluginBridge.stop(); } catch { /* 无桥接时是空操作 */ }
       try { pluginHost.killAll(); } catch { /* 无插件时是空操作 */ }

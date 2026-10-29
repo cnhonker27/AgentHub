@@ -24,6 +24,10 @@
  *   --install                          无条件执行一次 npm install
  *   --strict-update                    拉取失败时中止，而不是降级继续启动
  *   --timeout=90                       远端操作超时秒数（默认 90）
+ *   --dev-port=1420                    启动前检查哪个端口（默认从 npm script 的
+ *                                      wait-on tcp:<port> / vite.config 里自动识别）
+ *   --no-port-check                    不检查端口占用，直接启动
+ *   --force-port                       端口被占时强制结束占用者
  *   --help
  *
  * 代理也可来自环境变量 AGENTHUB_PROXY / HTTPS_PROXY，
@@ -31,10 +35,13 @@
  *
  * 安全边界：本脚本只做「合并上游 + 装依赖 + 起服务」，不会 stash / reset /
  * force、不自动解冲突、不切换分支、不改 git 配置。
+ * 唯一的例外是端口清理：启动前若发现目标端口被「本仓库自己遗留的」进程占着
+ * （上一次 dev 被强杀后 vite 变成孤儿是常见现象），会结束它再启动；
+ * 不属于本仓库的进程一律不动、只报错。--no-port-check 可整体关闭该行为。
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 
 const RAW = process.argv.slice(2);
@@ -73,6 +80,10 @@ const DO_PULL = !has('no-pull');
 const DO_INSTALL = !has('no-install');
 const DO_RUN = !has('no-run');
 const FORCE_INSTALL = has('install') || has('force-install');
+// 启动前检查端口占用：默认开，--no-port-check 关
+const NO_PORT_CHECK = has('no-port-check');
+const DEV_PORT_OVERRIDE = val('dev-port');
+const FORCE_PORT = has('force-port');
 // 默认容错：更新失败不阻塞启动；加 --strict-update 恢复「失败即中止」
 const STRICT_UPDATE = has('strict-update');
 
@@ -167,14 +178,180 @@ function printHelp() {
   say('  --install            无条件执行一次 npm install');
   say('  --strict-update      拉取失败时中止，而不是降级继续启动');
   say('  --timeout=<sec>      远端操作超时（默认 90 秒）');
+  say('  --dev-port=<port>    启动前检查哪个端口（默认自动识别）');
+  say('  --no-port-check      不检查端口占用，直接启动');
+  say('  --force-port         端口被占时强制结束占用者（确认是自己的进程再用）');
   say('  -h, --help           显示本帮助');
   say('');
   say('上游代码用 git merge 合并到「当前所在分支」，不会切换分支、不会丢弃你的提交；');
   say('遇到冲突会停下并提示你手动解决。');
   say('');
+  say('启动前会检查 dev 端口：上次启动残留的进程（如被强杀后变孤儿的 vite）占着时');
+  say('会自动结束它——靠 .git/uir-dev.lock 记录 PID 自证身份；认不出的只报错不动手。');
+  say('');
   say('双击运行： update-install-run.cmd');
   say('  代理可写在同目录 update-install-run.proxy.txt（首行有效），.cmd 会自动读取。');
   say('');
+}
+
+// ---------------------------------------------------------------- 端口占用
+// dev 脚本靠 `wait-on tcp:<port>` 等 vite 起来。上一次 dev 若不是 Ctrl+C 正常退出，
+// vite 会变成孤儿继续监听，下次启动就撞上 "Port 1420 is already in use"，
+// 而 wait-on 等不到端口、electron 也跟着退出，现象是「莫名其妙启动失败」。
+// 启动前先把「本仓库自己遗留的」监听进程收掉；别人的进程一律不动、只报错。
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+function npmScriptOf(name) {
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    return (pkg.scripts && pkg.scripts[name]) || '';
+  } catch {
+    return '';
+  }
+}
+
+// 端口来源优先级：--dev-port 参数 > npm script 里的 tcp:<port> > vite.config 的 port
+function devPortFor(scriptName) {
+  if (DEV_PORT_OVERRIDE) {
+    const n = Number(DEV_PORT_OVERRIDE);
+    return Number.isInteger(n) && n > 0 && n < 65536 ? n : null;
+  }
+  const cmd = npmScriptOf(scriptName);
+  const m = cmd.match(/tcp:(\d+)/);
+  if (m) return Number(m[1]);
+  if (/\bvite\b/.test(cmd)) {
+    try {
+      const cfg = readFileSync(path.join(ROOT, 'vite.config.ts'), 'utf8');
+      const p = cfg.match(/\bport:\s*(\d+)/);
+      if (p) return Number(p[1]);
+    } catch {
+      /* 没有 vite.config 就算了 */
+    }
+  }
+  return null;
+}
+
+// 返回监听该端口的 PID 列表；非 Windows 返回 null 表示不支持（跳过检查）
+// 注意：不能用 netstat -p TCP —— 它只列 IPv4，而 vite 默认监听 [::1]:1420，
+// 加了过滤条件会把真实的占用看漏（会误报「端口空闲」）。
+function listeningPids(port) {
+  if (!IS_WIN) return null;
+  const r = spawnSync('netstat', ['-ano'], { encoding: 'utf8', windowsHide: true });
+  if (r.status !== 0 || !r.stdout) return [];
+  const pids = new Set();
+  for (const line of r.stdout.split(/\r?\n/)) {
+    if (!/^\s*TCP/i.test(line) || !/LISTENING/i.test(line)) continue;
+    const cols = line.trim().split(/\s+/);
+    // 本地地址列形如 0.0.0.0:1420 / 127.0.0.1:1420 / [::1]:1420 / [::]:1420
+    if (!cols[1] || !cols[1].endsWith(`:${port}`)) continue;
+    const pid = Number(cols[cols.length - 1]);
+    if (Number.isInteger(pid) && pid > 0) pids.add(pid);
+  }
+  return [...pids];
+}
+
+// 进程归属怎么判断：本机没有 powershell/wmic 可用（取不到命令行），所以改用
+// 「锁文件」自证身份——启动成功后把监听者 PID 写进 .git/uir-dev.lock，
+// 下次启动时 PID 对得上才认定是自己上次的残留，可以对得上才动手。
+function devLockPath() {
+  return path.join(ROOT, '.git', 'uir-dev.lock');
+}
+
+function readDevLock() {
+  try {
+    const j = JSON.parse(readFileSync(devLockPath(), 'utf8'));
+    return j && Array.isArray(j.pids) ? j : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeDevLock(port, pids) {
+  try {
+    writeFileSync(devLockPath(), JSON.stringify({ port, pids, startedAt: new Date().toISOString() }, null, 2));
+  } catch {
+    /* .git 不可写就放弃记录，不影响启动 */
+  }
+}
+
+function clearDevLock() {
+  try {
+    if (existsSync(devLockPath())) unlinkSync(devLockPath());
+  } catch {
+    /* 忽略 */
+  }
+}
+
+// 端口被占时的收尾：先看锁文件认不认得出「自己人」，认得出才结束；
+// 否则只报错不动手（--force-port 可显式要求强杀）
+function ensurePortFree(port) {
+  const pids = listeningPids(port);
+  if (pids === null) return; // 非 Windows：跳过
+  if (!pids.length) {
+    ok(`端口 ${port} 空闲`);
+    return;
+  }
+
+  const lock = readDevLock();
+  const claimed = lock && lock.port === port ? new Set(lock.pids) : null;
+  const isOurs = !!claimed && pids.every((pid) => claimed.has(pid));
+
+  if (!isOurs && !FORCE_PORT) {
+    bail(
+      `端口 ${port} 已被占用，已停止启动（未结束任何进程）`,
+      [
+        '  占用者不属于「本脚本上一次启动的进程」（锁文件对不上/不存在），所以不替你结束它：',
+        ...pids.map((pid) => `    PID ${pid}`),
+        '  常见原因：另开了一个终端在跑 dev、或本仓库的旧进程被杀后没留下锁文件。',
+        '',
+        '  处理方式（任选其一）：',
+        '    确认是自家进程后强制结束并继续： --force-port',
+        `    手动结束： taskkill /T /F /PID ${pids[0]}`,
+        '    换个端口： --dev-port=<port>',
+        '    跳过检查： --no-port-check',
+      ].join('\n'),
+    );
+  }
+
+  const why = isOurs ? '本脚本上一次启动后残留' : '按 --force-port 要求';
+  warn(`端口 ${port} 被占用（PID ${pids.join(', ')}，判定：${why}），正在结束…`);
+  for (const pid of pids) {
+    info(`结束 PID ${pid}`);
+    spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
+  }
+  clearDevLock();
+
+  // 等系统回收监听套接字，最多 5 秒
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if (!listeningPids(port).length) {
+      ok(`端口 ${port} 已释放`);
+      return;
+    }
+    sleepSync(200);
+  }
+  bail(
+    `端口 ${port} 仍然被占用，无法启动`,
+    '  可能是权限不足（进程属于管理员）或刚结束的进程还在退出中。\n' +
+      '  请稍等再试，或以管理员身份运行；也可先 --no-port-check 观察是否另有原因。',
+  );
+}
+
+// 起来之后把真正的监听者 PID 记进锁文件，供下一次启动辨认
+function rememberDevListener(port, onDone) {
+  const deadline = Date.now() + 20000;
+  const tick = () => {
+    const pids = listeningPids(port);
+    if (pids && pids.length) {
+      writeDevLock(port, pids);
+      info(`已记录 dev 监听进程（PID ${pids.join(', ')}），下次启动可自动清残留`);
+      return;
+    }
+    if (Date.now() > deadline) return;
+    setTimeout(tick, 300).unref?.();
+  };
+  setTimeout(tick, 300).unref?.();
+  if (onDone) onDone();
 }
 
 // ---------------------------------------------------------------- 主流程
@@ -397,6 +574,8 @@ function main() {
     if (UPDATE_DISABLED || SKIPPED_PULL_REASON === 'fetch-failed') {
       info('注意：本次未拉到上游更新，启动的是本地现有版本');
     }
+    const devPort = NO_PORT_CHECK ? null : devPortFor(RUN_SCRIPT);
+    if (devPort) ensurePortFree(devPort);
     info('按 Ctrl+C 结束');
     say('');
     const child = spawn(NPM, ['run', RUN_SCRIPT], {
@@ -406,7 +585,9 @@ function main() {
       windowsHide: false,
     });
     child.on('error', (e) => bail(`启动失败：${e.message}`));
+    if (devPort) rememberDevListener(devPort);
     child.on('exit', (code) => {
+      if (devPort) clearDevLock();
       say('');
       if (code === 0) say(`  运行结束（npm run ${RUN_SCRIPT} 正常退出）`);
       else warn(`npm run ${RUN_SCRIPT} 退出码：${code}`);

@@ -8,9 +8,9 @@
  *    此注释为版权与授权声明，禁止删除。
  * ============================================================
  */
-// 全局类型与常量：五大模块 / 子页面 / 应用配置 / 技能仓库数据结构
+// 全局类型与常量：六大模块 / 子页面 / 应用配置 / 技能仓库数据结构
 // MODULES 是左栏导航的唯一事实源，App.vue 据此装配各模块视图组件
-export type ModuleKey = "skills" | "sync" | "proxy" | "memory" | "prompts";
+export type ModuleKey = "skills" | "sync" | "proxy" | "memory" | "prompts" | "localgw";
 export type Theme = "dark" | "light";
 
 export interface PageDef {
@@ -227,10 +227,10 @@ export type WebDavEvent = { event: "webdav"; stage: string; detail: string; pct?
 
 // ===== 全局设置弹窗：左下角设置按钮打开的模块（弹窗左列按钮切换） =====
 
-export type SettingsTab = "general" | "webdav" | "data" | "models" | "timing" | "feedback" | "plugins";
+export type SettingsTab = "general" | "webdav" | "data" | "models" | "timing" | "feedback" | "update" | "plugins";
 
 export const SETTINGS_TABS: { key: SettingsTab; name: string; icon: string; desc: string }[] = [
-  { key: "general", name: "通用", icon: "ph-sliders-horizontal", desc: "外观 · 模块顺序 · 更新" },
+  { key: "general", name: "通用", icon: "ph-sliders-horizontal", desc: "外观 · 模块顺序 · 关于" },
   { key: "webdav", name: "WebDAV 同步", icon: "ph-cloud", desc: "统一服务器 · 号池同步" },
   { key: "timing", name: "同步时间", icon: "ph-clock-countdown", desc: "各板块自动同步 / 刷新周期" },
   { key: "data", name: "数据与备份", icon: "ph-database", desc: "备份压缩包 · 缓存目录" },
@@ -238,6 +238,8 @@ export const SETTINGS_TABS: { key: SettingsTab; name: string; icon: string; desc
   // 记忆中枢只是当前消费方之一，未来新增板块统一复用这里
   { key: "models", name: "模型与网关", icon: "ph-cpu", desc: "供应商 · 模型池 · 来源优先级" },
   { key: "feedback", name: "反馈与需求", icon: "ph-chat-circle-dots", desc: "问题反馈 · 功能建议" },
+  // 检查更新：软件更新独立成页（原在「通用」内），更新通知 / 托盘跳转落点同步到这里
+  { key: "update", name: "检查更新", icon: "ph-arrow-clockwise", desc: "软件更新 · 自动检查" },
 ];
 
 // ===== 应用配置：框架（主题 / 模块顺序）+ 技能仓库 + 更新 =====
@@ -298,7 +300,252 @@ export interface AppConfig {
   /** 提示词库：内置板块，配置与技能/号池同源（走 app.save() 落 framework config.json）。
    *  字段与 electron/backend/config.cjs 的 defaultConfig().prompts 一一对应 */
   prompts: PromptsConfig;
+  /** 本地网关：内置板块（v2.0 新增），模块 key=localgw，配置段与 electron/backend/localgw/config.cjs 默认值一一对应 */
+  localgw: LocalgwConfig;
 }
+
+// ===== 本地网关：配置结构 =====
+
+export interface LocalgwConfig {
+  /** 模块总开关：写死 true，不出现在设置·通用的启停列表（决策 5，方案 §8.1） */
+  enabled: boolean;
+  /** 开机自启（默认关） */
+  autostart: boolean;
+  /** 监听地址（默认回环；改成 0.0.0.0 需用户在设置页显式确认并保存） */
+  bind: string;
+  /** 固定端口（被占时自动探测 portCandidates 列表） */
+  port: number;
+  /** 端口占用时的候选探测序列 */
+  portCandidates: number[];
+  /** CORS 预填：dev 服务器 + tauri webview */
+  corsOrigins: string[];
+  /** 请求体大小上限（MB） */
+  bodyLimitMb: number;
+  /** 单请求超时（毫秒） */
+  requestTimeoutMs: number;
+  /** 密钥与访问控制 */
+  security: {
+    /** 留空 = 首次启动从 keytar 或 node:crypto 生成 */
+    secret: string;
+    adminToken: string;
+    readonlyToken: string;
+    /** API Key 哈希落库，展示只存 prefix */
+    encryptKeysAtRest: boolean;
+  };
+  /** 渠道路由 */
+  routing: {
+    strategy: "smart" | "fixed" | "round-robin" | "score";
+    fixedChannel: string;
+    failover: boolean;
+    cooldownMs: number;
+    cooldownCapMs: number;
+    maxRetriesPerRequest: number;
+    /** 前端可拖拽排序，默认空走 score */
+    preferChannels: string[];
+    blockedChannels: string[];
+    /** 渠道启闭（本模块的可见集合，与号池 channelEnabled 相互独立）：
+     *  { [渠道 id]: true|false }，缺省 = 启用。由 routing.cjs 的 setChannelEnabled 落盘；
+     *  「路由与渠道」页写的是这个键（读回来的视图字段叫 perChannel，见 api/ipc.ts 的 LocalgwRoute）。
+     *  后端 LOCALGW_DEFAULTS.routing 已声明（默认 {}），normalize 里做「非对象回 {}」纠偏；
+     *  这里保持可选：手改 config.json 删掉该键时，前端读到的仍是稳定形状 */
+    perChannelEnabled?: Record<string, boolean>;
+  };
+  /** 模型目录 */
+  models: {
+    /** { "model": {"real_model":"x", "channel":"y"} } */
+    overrides: Record<string, { real_model: string; channel: string }>;
+    /** { "gpt-4o": "gpt-4o-2024-08-06" } */
+    aliases: Record<string, string>;
+    /** 自定义模型 → 具体渠道 + 实际名 */
+    custom: Record<string, { channel: string; real_model: string }>;
+    exposeInV1Models: boolean;
+    modelDefaultChannel: string;
+  };
+  /** 全局限流（每分钟） */
+  rateLimitPerMin: number;
+  /** 全局并发上限（与号池共用主进程 event loop，压测要控 ≤16） */
+  concurrency: number;
+  /** 超并发排队上限（毫秒） */
+  queueTimeoutMs: number;
+  /** 单 key 每分钟 */
+  apiKeyRatePerMin: number;
+  /** chat/completions 请求双写到记忆中枢 httpapi（默认关，方案 §4.5） */
+  chatToMemoryEnabled: boolean;
+  /** 按 (model, channel) 从提示词库注入 active prompt（默认关，方案 §4.3） */
+  injectPrompt: boolean;
+  injectPromptName: string;
+  /** provider 扩展点预留（决策 2，本期默认关、不打包 exe） */
+  providers: {
+    enabled: boolean;
+    /** 留空 = <dataDir>/providers */
+    dir: string;
+    /** 显式允许的 provider id（pack.json 中的 id） */
+    allowlist: string[];
+  };
+  /** 出站指纹脱敏（默认开） */
+  fingerprintObfuscation: boolean;
+  humanizeJitter: boolean;
+  /** 请求流水保留期（天） */
+  usageRetentionDays: number;
+  logRetentionDays: number;
+  /** 出站伪装与清洗（契约 §2 冻结形状；与后端 LOCALGW_DEFAULTS.outbound 逐字段一致） */
+  outbound: LocalgwOutboundConfig;
+}
+
+// ===== 本地网关 · 出站伪装与清洗（契约 §2 冻结形状，字段名一字不改）=====
+// 后端由 electron/backend/localgw/outbound.cjs + config.cjs 按同一份契约实现，
+// 这里任何改名都会让联调静默失败（字段对不上 → 深合并把补丁当越界入参丢掉）。
+
+/** 规则作用域：按消息角色判定（契约 §2「scope 语义」）。
+ *  tool = role==="tool" 的消息 + assistant.tool_calls[].function.arguments */
+export type LocalgwRuleScope = "all" | "system" | "user" | "assistant" | "tool";
+
+/** 关键词清洗规则（契约 §2 KeywordRule） */
+export interface LocalgwKeywordRule {
+  /** 稳定 id（UI 生成）；缺省时后端按数组下标兜底为 k<i> */
+  id: string;
+  /** 展示名（命中摘要里用它，最长 40 字符） */
+  label: string;
+  enabled: boolean;
+  /** literal = 逐字匹配（split/join，不做 $1 展开）；regex = 编译为 RegExp（允许 $1） */
+  mode: "literal" | "regex";
+  pattern: string;
+  /** 仅 regex 用，只允许 "gimsuy" 的子集，默认 "g" */
+  flags: string;
+  replace: string;
+  scope: LocalgwRuleScope;
+}
+
+/** 文案替换规则（契约 §2 RewriteRule）：整句成对编辑，执行顺序在 keywords 之前 */
+export interface LocalgwRewriteRule {
+  id: string;
+  label: string;
+  enabled: boolean;
+  from: string;
+  to: string;
+  scope: LocalgwRuleScope;
+}
+
+/** agent 软件模拟档案（契约 §2 profiles.custom 的值形状；与 §3 内置档案同构）。
+ *  只描述「请求形态」，绝不含密钥/凭据（契约 §7）。 */
+export interface LocalgwProfile {
+  label: string;
+  userAgent: string;
+  /** 追加/覆盖的请求头：应用方式是 merge 而不是 replace，
+   *  鉴权头（Authorization / x-api-key）与渠道签名头必须原样保留 */
+  headers: Record<string, string>;
+  removeHeaders: string[];
+  note: string;
+}
+
+/** 出站生效策略（契约 §2 Policy）：defaults 与 perChannel[cid] 深合并后的形状 */
+export interface LocalgwOutboundPolicy {
+  /** mimic = 伪装（套官方客户端形态）| passthrough = 全透传（头 + body 都不动，短路一切） */
+  mode: "mimic" | "passthrough";
+  /** 档案 id；"" = 不额外套档案，仅用该渠道 adapter 自带的内置形态 */
+  profile: string;
+  /** 叠加 sanitize.cjs 内置指纹规则 */
+  builtinSanitize: boolean;
+  /** 启用关键词清洗 */
+  keywordSanitize: boolean;
+  /** 启用文案替换 */
+  rewriteSanitize: boolean;
+  /** 启用请求头覆盖 / 移除 */
+  headerOverride: boolean;
+  /** 拟人抖动（沿用 humanizeJitter 语义） */
+  jitter: boolean;
+  /** 请求头覆盖（新增或改写；键大小写不敏感匹配后统一写回原键名） */
+  headers: Record<string, string>;
+  /** 请求头移除（大小写不敏感） */
+  removeHeaders: string[];
+  /** 该渠道内联关键词规则（与全局库叠加，先全局后内联） */
+  keywords: LocalgwKeywordRule[];
+  /** 该渠道内联文案替换（与全局库叠加） */
+  rewrites: LocalgwRewriteRule[];
+}
+
+/** 全局默认策略（契约 §2 defaults）：就是 Policy 去掉「只有渠道级才有意义」的
+ *  headers / removeHeaders / keywords / rewrites 之后的 7 项。
+ *  用 Pick 而不是重抄一遍字段：抄一遍就会在后端加字段时悄悄漂移。 */
+export type LocalgwOutboundDefaults = Pick<
+  LocalgwOutboundPolicy,
+  "mode" | "profile" | "builtinSanitize" | "keywordSanitize" | "rewriteSanitize" | "headerOverride" | "jitter"
+>;
+
+/** 出站伪装与清洗配置段（写入 config.json 的 localgw.outbound） */
+export interface LocalgwOutboundConfig {
+  /** 全局默认策略：未单独配置的渠道继承它 */
+  defaults: LocalgwOutboundDefaults;
+  /** 按渠道覆盖：{ [channelId]: Partial<Policy> }，缺字段继承 defaults。
+   *  形状里**没有** null —— null 只活在 localgw_outbound_set 的补丁里，
+   *  语义是「删除该渠道策略」（回到继承 defaults），见契约 §4.5.1（RFC 7386 JSON Merge Patch）。
+   *  后端 get() 的返回值里绝不含 null，所以读回来的一律是真对象，UI 不必做 null 防御。 */
+  perChannel: Record<string, Partial<LocalgwOutboundPolicy>>;
+  /** 全局共享规则库（所有渠道叠加使用）；数组是整体替换语义，清空发 [] 而不是 null */
+  keywords: LocalgwKeywordRule[];
+  rewrites: LocalgwRewriteRule[];
+  /** agent 软件模拟档案：内置档案只读（后端 BUILTIN_PROFILES），这里只存用户自定义。
+   *  同上：`custom[id] = null` 只是补丁里的删除信号，读回来的形状恒为对象。 */
+  profiles: { custom: Record<string, LocalgwProfile> };
+}
+
+/** 本地网关配置默认值（权威默认值见 electron/backend/localgw/config.cjs） */
+export const LOCALGW_CONFIG_DEFAULTS: LocalgwConfig = {
+  enabled: true,
+  autostart: false,
+  bind: "127.0.0.1",
+  port: 9527,
+  portCandidates: [9527, 9528, 9529, 9530],
+  corsOrigins: ["http://localhost:5174", "tauri://localhost"],
+  bodyLimitMb: 4,
+  requestTimeoutMs: 120000,
+  security: { secret: "", adminToken: "", readonlyToken: "", encryptKeysAtRest: true },
+  routing: {
+    strategy: "score",
+    fixedChannel: "",
+    failover: true,
+    cooldownMs: 120000,
+    cooldownCapMs: 900000,
+    maxRetriesPerRequest: 3,
+    preferChannels: [],
+    blockedChannels: [],
+  },
+  models: {
+    overrides: {},
+    aliases: {},
+    custom: {},
+    exposeInV1Models: true,
+    modelDefaultChannel: "",
+  },
+  rateLimitPerMin: 300,
+  concurrency: 16,
+  queueTimeoutMs: 10000,
+  apiKeyRatePerMin: 120,
+  chatToMemoryEnabled: false,
+  injectPrompt: false,
+  injectPromptName: "",
+  providers: { enabled: false, dir: "", allowlist: [] },
+  fingerprintObfuscation: true,
+  humanizeJitter: true,
+  usageRetentionDays: 90,
+  logRetentionDays: 30,
+  // 出站伪装与清洗：与后端 LOCALGW_DEFAULTS.outbound 逐字段一致（契约 §2 / §4.5）
+  outbound: {
+    defaults: {
+      mode: "mimic",
+      profile: "",
+      builtinSanitize: true,
+      keywordSanitize: true,
+      rewriteSanitize: true,
+      headerOverride: true,
+      jitter: true,
+    },
+    perChannel: {},
+    keywords: [],
+    rewrites: [],
+    profiles: { custom: {} },
+  },
+};
 
 /** 提示词库配置段（契约 §2 冻结字段；新增键由后端 mergeConfig 深合并补默认，缺字段也不炸） */
 export interface PromptsConfig {
@@ -608,6 +855,13 @@ export interface ProxyChannelView {
   health: ProxyChannelHealth | null;
   /** 渠道启闭（「上游启闭」弹窗）：缺省/true = 启用；false = 已关闭（全部页面动态隐藏） */
   enabled?: boolean;
+  /**
+   * 渠道动作类型（2026-10-28 新增）：区分「签到」与「登录领取」——不同渠道要求不同，
+   * 二者不可混为一谈。由 `proxy/store.cjs` 的 `CHANNELS[].checkinKind` 下发；
+   * `unknown` = 未核实（禁止臆断，见 docs/号池签到核对-20261028/13 §0）。
+   * 展示文案用 `src/views/proxy/format.ts` 的 `checkinKindName()`。
+   */
+  checkinKind?: "signin" | "login_grant" | "claim" | "both" | "unknown";
 }
 
 // ===== 自定义提供商（中转站 / 自建 OpenAI 兼容端点） =====
@@ -1081,21 +1335,14 @@ export interface UpdateEvent extends UpdateStatus {
   event: "state" | "focus-update" | "usage-local-synced";
 }
 
-/** 五大模块 → 子页面映射（内置顺序即默认导航顺序，可在「设置 · 通用」中调整）
+/** 六大模块 → 子页面映射（内置顺序即默认导航顺序，可在「设置 · 通用」中调整）
+ *  **内置顺序（产品定义，勿随意改动）**：用量统计 → 记忆中枢 → 提示词库 → 号池管家 → 本地网关 → 技能仓库。
+ *  这是「数据 → 记忆 → 提示词 → 账号 → 对外接口 → 技能资产」的使用链路顺序：
+ *  先看用量，再看记忆与提示词，然后管号池，最后把号池包成对外网关，技能仓库收尾。
+ *  改动这里会同时改变 electron/backend/config.cjs 的默认 moduleOrder 语义（那边有一次性迁移指纹）。
  *  skills 的 skill-detail 为技能详情页：从技能库点卡片进入，不在横条菜单中展示；
  *  各模块的「配置」是隐藏页面（id=config，不走横条菜单），由横条右侧「配置」按钮切换 */
 export const MODULES: ModuleDef[] = [
-  {
-    key: "skills",
-    name: "技能仓库",
-    pages: [
-      { id: "dashboard", name: "仪表盘" },
-      { id: "library", name: "中央技能库" },
-      { id: "dedup", name: "去重与冲突" },
-      { id: "sync", name: "同步中心" },
-      { id: "webdav", name: "WebDAV 同步" },
-    ],
-  },
   {
     key: "sync",
     name: "用量统计",
@@ -1105,19 +1352,6 @@ export const MODULES: ModuleDef[] = [
       { id: "costs", name: "费用" },
       { id: "billing", name: "计费规则" },
       { id: "log", name: "同步日志" },
-    ],
-  },
-  {
-    key: "proxy",
-    name: "号池管家",
-    // 原「反代网关」已停止维护，转发链路（API Keys / 模型目录 / 用量统计 / 自定义提供商 /
-    // 生态接入 / 网络代理）随之上线归档，只保留号池管理相关的五个页面。
-    pages: [
-      { id: "home", name: "总览" },
-      { id: "agents", name: "号池" },
-      { id: "expiry", name: "积分日历" },
-      { id: "poolsync", name: "号池同步" },
-      { id: "proxylog", name: "日志" },
     ],
   },
   {
@@ -1152,6 +1386,56 @@ export const MODULES: ModuleDef[] = [
       // 不做账号/云端收藏/投稿——没有服务端，任何要「用户身份」的能力都得先建后端。
       { id: "online", name: "线上提示词库" },
       { id: "sync", name: "WebDAV 同步" },
+    ],
+  },
+  {
+    key: "proxy",
+    name: "号池管家",
+    // 原「反代网关」已停止维护，转发链路（API Keys / 模型目录 / 用量统计 / 自定义提供商 /
+    // 生态接入 / 网络代理）随之上线归档，只保留号池管理相关的五个页面。
+    // 对外转发能力由下一板块「本地网关」以主进程内嵌形态接替。
+    pages: [
+      { id: "home", name: "总览" },
+      { id: "agents", name: "号池" },
+      { id: "expiry", name: "积分日历" },
+      { id: "poolsync", name: "号池同步" },
+      { id: "proxylog", name: "日志" },
+    ],
+  },
+  {
+    // 本地网关：把号池管家已配置的渠道账号包装成对外 OpenAI/Anthropic 兼容 API。
+    // 账号体系复用号池（只读），不在本模块建第二套账号模型（方案 §4.1）。
+    // 模块不可禁用（方案决策 5）：它是对外 API 的唯一入口，隐藏入口会让用户找不到。
+    key: "localgw",
+    name: "本地网关",
+    // 页面编排照搬 fdb3e55^ 的旧版「反代网关」七页形式（总览 / API Keys / 模型目录 /
+    // 用量统计 / 自定义提供商 / 生态接入 / 网络代理），另把旧版散在总览里的
+    // 「接入引导」独立成页。数据源全部换成现在的实现：
+    //   · 网关自身指标走 localgw_* 通道（server.cjs / keys-store / routing / models / oplog）
+    //   · 渠道与账号一律只读复用号池管家，本模块不建第二套账号模型（方案 4.1）
+    //   · 出站伪装与清洗由 localgw_outbound_* 承载，与旧版「网络代理（出口池）」同页呈现
+    pages: [
+      { id: "dashboard", name: "总览" },
+      { id: "keys", name: "API Keys" },
+      { id: "models", name: "模型目录" },
+      { id: "stats", name: "用量统计" },
+      { id: "routing", name: "路由与渠道" },
+      { id: "providers", name: "自定义提供商" },
+      { id: "ccswitch", name: "生态接入" },
+      { id: "netproxy", name: "网络代理" },
+      { id: "log", name: "请求日志" },
+      { id: "access", name: "接入与文档" },
+    ],
+  },
+  {
+    key: "skills",
+    name: "技能仓库",
+    pages: [
+      { id: "dashboard", name: "仪表盘" },
+      { id: "library", name: "中央技能库" },
+      { id: "dedup", name: "去重与冲突" },
+      { id: "sync", name: "同步中心" },
+      { id: "webdav", name: "WebDAV 同步" },
     ],
   },
 ];

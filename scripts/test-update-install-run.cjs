@@ -7,7 +7,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 
 const SCRIPT = path.join(__dirname, "update-install-run.mjs");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "ah-uir-test-"));
@@ -181,6 +181,108 @@ console.log("⑧ --branch=release 覆盖默认分支");
   git(upstream, ["checkout", "-q", "main"]);
   const r = runScript(work, ["--no-install", "--branch=release"]);
   ok(fs.existsSync(path.join(work, "rel.txt")), "--branch=release 生效");
+}
+
+// ⑨ 端口占用：锁文件认得出的残留自动清理；认不出的只报错不误杀
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+function portInUse(port) {
+  const r = spawnSync("netstat", ["-ano"], { encoding: "utf8", windowsHide: true });
+  return (r.stdout || "")
+    .split(/\r?\n/)
+    .filter((l) => /^\s*TCP/i.test(l) && /LISTENING/i.test(l))
+    .some((l) => (l.trim().split(/\s+/)[1] || "").endsWith(`:${port}`));
+}
+
+function pickFreePort(start) {
+  for (let p = start; p < start + 300; p++) if (!portInUse(p)) return p;
+  throw new Error("找不到空闲端口");
+}
+
+const OCCUPIER = [
+  "const net = require('node:net');",
+  "const port = Number(process.argv[2]);",
+  "const host = process.argv[3] || '127.0.0.1';",
+  "net.createServer(() => {}).listen(port, host);",
+  "setInterval(() => {}, 1 << 30);",
+].join("\n");
+
+// 在 dir 里起一个只监听不干活的进程，模拟「被强杀后变孤儿的 vite」
+function startOccupier(dir, port, host) {
+  const file = path.join(dir, "occupy.cjs");
+  fs.writeFileSync(file, OCCUPIER);
+  const child = spawn(process.execPath, [file, String(port), host || "127.0.0.1"], {
+    cwd: dir,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    if (portInUse(port)) return child;
+    sleepSync(100);
+  }
+  throw new Error(`占用进程没起来（端口 ${port}）`);
+}
+
+const killTree = (pid) => spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], { stdio: "ignore", windowsHide: true });
+
+console.log("⑨ 端口占用：锁文件认得出的自动清理，认不出的只报错");
+{
+  // 9a：锁文件里记着这个 PID → 判定为自己人 → 结束并继续启动
+  const { work } = scenario("port-ours");
+  const port = pickFreePort(14300);
+  const occupier = startOccupier(work, port);
+  fs.writeFileSync(
+    path.join(work, ".git", "uir-dev.lock"),
+    JSON.stringify({ port, pids: [occupier.pid], startedAt: new Date().toISOString() }),
+  );
+  const r = runScript(work, ["--no-install", `--dev-port=${port}`]);
+  ok(/已释放/.test(r.all), "锁文件对得上：结束残留并确认端口释放");
+  ok(r.code === 0 && r.all.includes("<<RAN>>"), "清理后照常启动（退出码 0）");
+  ok(!portInUse(port), "端口确实被释放");
+  ok(!fs.existsSync(path.join(work, ".git", "uir-dev.lock")), "正常退出后锁文件已清理");
+  killTree(occupier.pid);
+
+  // 9b：没有锁文件 → 认不出归属 → 只报错，不动手
+  const s2 = scenario("port-foreign");
+  const port2 = pickFreePort(14600);
+  const occupier2 = startOccupier(TMP, port2);
+  const r2 = runScript(s2.work, ["--no-install", `--dev-port=${port2}`]);
+  ok(r2.code !== 0, "认不出归属时退出码非 0");
+  ok(/已被占用/.test(r2.all), "明确提示端口被占用");
+  ok(!r2.all.includes("<<RAN>>"), "认不出归属时不启动");
+  ok(portInUse(port2), "陌生进程没有被误杀");
+  killTree(occupier2.pid);
+
+  // 9c：--force-port 显式要求强杀
+  const s3 = scenario("port-force");
+  const port3 = pickFreePort(14900);
+  const occupier3 = startOccupier(TMP, port3);
+  const r3 = runScript(s3.work, ["--no-install", `--dev-port=${port3}`, "--force-port"]);
+  ok(r3.code === 0 && r3.all.includes("<<RAN>>"), "--force-port 强杀占用者后照常启动");
+  ok(!portInUse(port3), "--force-port 后端口已释放");
+  killTree(occupier3.pid);
+
+  // 9d：--no-port-check 完全跳过检查
+  const s4 = scenario("port-skip");
+  const port4 = pickFreePort(15200);
+  const occupier4 = startOccupier(TMP, port4);
+  const r4 = runScript(s4.work, ["--no-install", `--dev-port=${port4}`, "--no-port-check"]);
+  ok(r4.code === 0 && r4.all.includes("<<RAN>>"), "--no-port-check 不检查、直接启动");
+  ok(portInUse(port4), "--no-port-check 不碰占用者");
+  killTree(occupier4.pid);
+  // 9e：IPv6 监听（vite 默认绑 [::1]）也必须能看见
+  const s5 = scenario("port-ipv6");
+  const port5 = pickFreePort(15500);
+  const occupier5 = startOccupier(s5.work, port5, "::1");
+  fs.writeFileSync(
+    path.join(s5.work, ".git", "uir-dev.lock"),
+    JSON.stringify({ port: port5, pids: [occupier5.pid], startedAt: new Date().toISOString() }),
+  );
+  const r5 = runScript(s5.work, ["--no-install", `--dev-port=${port5}`]);
+  ok(/已释放/.test(r5.all), "IPv6([::1]) 监听也能识别并清理");
+  ok(r5.code === 0 && r5.all.includes("<<RAN>>"), "IPv6 场景清理后照常启动");
+  killTree(occupier5.pid);
 }
 
 console.log(failed ? `\n✗ ${failed} 项失败，${pass} 项通过` : `\n✓ 全部 ${pass} 项通过`);
