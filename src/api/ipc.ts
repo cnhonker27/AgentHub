@@ -28,6 +28,7 @@ import type {
   CatalogItem, CatalogItemDetail, CatalogTemplate, CatalogCategory, CatalogStats,
   LocalgwOutboundConfig, LocalgwOutboundPolicy, LocalgwOutboundDefaults,
   LocalgwKeywordRule, LocalgwRewriteRule, LocalgwProfile, LocalgwRuleScope,
+  PetConfig,
 } from "../types";
 
 export type {
@@ -48,6 +49,7 @@ export type {
   PromptsEvent,
   LocalgwOutboundConfig, LocalgwOutboundPolicy, LocalgwOutboundDefaults,
   LocalgwKeywordRule, LocalgwRewriteRule, LocalgwProfile, LocalgwRuleScope,
+  PetConfig,
 } from "../types";
 
 import { mock } from "./mock";
@@ -535,6 +537,25 @@ export const memoryProjectConfirm = (id: string, slug: string | null) =>
 /** 关联本地目录到既有项目卡：补全远程地址与本地路径（非 Git 目录只记路径） */
 export const memoryProjectAttach = (slug: string, dir: string) =>
   call<{ ok: boolean; message?: string; isRepo?: boolean; addedRemotes?: string[]; localPath?: string }>("memory_project_attach", { slug, dir });
+/**
+ * 整理项目归档：收口「同一项目多张卡」+ 认领孤儿目录 + 补远程/本地路径。
+ * dryRun=true 只返回计划（不搬任何文件）；false 走与启动整理完全相同的流程。
+ */
+export const memoryProjectOrganize = (dryRun = false) =>
+  call<{
+    ok: boolean;
+    dryRun?: boolean;
+    groups?: number;
+    merged?: number;
+    moved?: number;
+    adopted?: number;
+    healed?: number;
+    pruned?: number;
+    regrouped?: number;
+    normalized?: number;
+    message?: string;
+    plan?: { target: string; targetName: string; sources: { slug: string; name: string; count: number }[] }[];
+  }>("memory_project_organize", { dryRun });
 
 // ===== 记忆中枢：索引 / 检索 =====
 export const memoryIndexStatus = () => call<MemoryIndexStatus>("memory_index_status");
@@ -1243,3 +1264,35 @@ export const proxyNetproxySaveSettings = (args: {
 export const proxyCcSwitchStatus = () => call<CcSwitchStatus>("proxy_ccswitch_status");
 export const proxyCcSwitchRegister = (opts: { appType: CcSwitchAppType; apiKey: string; model: string; port?: number }) =>
   call<CcSwitchRegisterResult>("proxy_ccswitch_register", opts as unknown as Record<string, unknown>);
+
+// ===== 桌宠组件（悬浮桌宠 · 卡冈图雅）=====
+// 桌宠是独立模块（electron/pet/）：主界面只通过这 6 条通道读写它的配置/状态。
+// 桌宠窗口自身有专用 preload（window.petHost），不走这里。
+// 通道名与 electron/pet/pet-ipc.cjs 的 register、electron/preload.cjs 的 ALLOWED_COMMANDS 三处一一对应。
+export type PetStatus = {
+  ok: boolean;
+  config: PetConfig;
+  /** 窗口当前是否可见（隐藏 ≠ 关闭：隐藏后设置页的开关仍是开） */
+  visible: boolean;
+  /** 窗口是否已创建（总开关关掉后是 false） */
+  windowReady: boolean;
+  screenSampleSupported: boolean;
+  version: string;
+};
+
+/** 桌宠状态：设置页打开时拉一次，用于回显开关与窗口状态 */
+export const petStatus = () => call<PetStatus>("pet_status");
+/** 局部写配置（尺寸 / 转速 / 扭曲强度 / 右键菜单项…），主进程归一化后返回完整配置 */
+export const petConfigSave = (patch: Partial<PetConfig>) =>
+  call<{ ok: boolean; config: PetConfig; message?: string }>("pet_config_save", {
+    patch: JSON.parse(JSON.stringify(patch)),
+  });
+/** 显示 / 关闭桌宠（= 配置的 enabled，语义与设置页开关一致） */
+export const petSetEnabled = (enabled: boolean) =>
+  call<{ ok: boolean; visible: boolean; config?: PetConfig; message?: string }>("pet_set_enabled", { enabled });
+/** 把桌宠窗口移回主屏右下角默认位 */
+export const petResetPosition = () => call<{ ok: boolean; message?: string }>("pet_reset_position");
+/** 今日 token 用量（设置页展示用；与托盘「今日用量」同一份统计口径） */
+export const petUsageToday = () => call<{ ok: boolean; tokens: number | null; text: string }>("pet_usage_today");
+/** 提示词优化链路自检（不真调模型，只回报读取方式/键盘模拟/回填/风格） */
+export const petOptimizePreview = () => call<{ ok: boolean; message: string }>("pet_optimize_preview");
