@@ -28,6 +28,7 @@ import type {
   CatalogItem, CatalogItemDetail, CatalogTemplate, CatalogCategory, CatalogStats,
   LocalgwOutboundConfig, LocalgwOutboundPolicy, LocalgwOutboundDefaults,
   LocalgwKeywordRule, LocalgwRewriteRule, LocalgwProfile, LocalgwRuleScope,
+  PetConfig,
 } from "../types";
 
 export type {
@@ -48,6 +49,7 @@ export type {
   PromptsEvent,
   LocalgwOutboundConfig, LocalgwOutboundPolicy, LocalgwOutboundDefaults,
   LocalgwKeywordRule, LocalgwRewriteRule, LocalgwProfile, LocalgwRuleScope,
+  PetConfig,
 } from "../types";
 
 import { mock } from "./mock";
@@ -280,7 +282,7 @@ export const dismissConflict = (id: string) => call<{ ok: boolean }>("dismiss_co
 // ===== 技能仓库：挂载 / 回收站 / 自动感知 =====
 export const toggleMount = (skill: string, toolId: string, enable: boolean) =>
   call<{ ok: boolean; message: string }>("toggle_mount", { skill, toolId, enable });
-export const repairMounts = () => call<{ repaired: number; details: string[] }>("repair_mounts");
+export const repairMounts = () => call<{ repaired: number; details: string[]; reconciled?: number }>("repair_mounts");
 
 export const trashList = () => call<TrashRow[]>("trash_list");
 export const trashRestore = (name: string) => call<{ ok: boolean; message?: string; dest?: string }>("trash_restore", { name });
@@ -535,6 +537,25 @@ export const memoryProjectConfirm = (id: string, slug: string | null) =>
 /** 关联本地目录到既有项目卡：补全远程地址与本地路径（非 Git 目录只记路径） */
 export const memoryProjectAttach = (slug: string, dir: string) =>
   call<{ ok: boolean; message?: string; isRepo?: boolean; addedRemotes?: string[]; localPath?: string }>("memory_project_attach", { slug, dir });
+/**
+ * 整理项目归档：收口「同一项目多张卡」+ 认领孤儿目录 + 补远程/本地路径。
+ * dryRun=true 只返回计划（不搬任何文件）；false 走与启动整理完全相同的流程。
+ */
+export const memoryProjectOrganize = (dryRun = false) =>
+  call<{
+    ok: boolean;
+    dryRun?: boolean;
+    groups?: number;
+    merged?: number;
+    moved?: number;
+    adopted?: number;
+    healed?: number;
+    pruned?: number;
+    regrouped?: number;
+    normalized?: number;
+    message?: string;
+    plan?: { target: string; targetName: string; sources: { slug: string; name: string; count: number }[] }[];
+  }>("memory_project_organize", { dryRun });
 
 // ===== 记忆中枢：索引 / 检索 =====
 export const memoryIndexStatus = () => call<MemoryIndexStatus>("memory_index_status");
@@ -938,12 +959,16 @@ export type LocalgwKeyRow = {
   name: string;
   /** 展示用 sk-lgw-XXXX... */
   keyPrefix: string;
+  /** 完整 Key（后端经系统凭据加密存库、列表解密回传）。
+   *  空串 = 该行创建于旧口径 / 换机后解不开，页面提示「完整 Key 不可恢复」。 */
+  secret?: string;
   /** 渠道 id 数组；["*"] = 全部渠道 */
   scopes: string[];
   expiresAt: number | null;
   concurrency: number;
   ratePerMin: number;
-  status: "active" | "revoked";
+  /** 两态：启用 / 停用（停用可再启用，删除才不可逆） */
+  status: "active" | "disabled";
   createdAt: number;
   lastUsedAt: number | null;
   totalRequests: number;
@@ -951,7 +976,7 @@ export type LocalgwKeyRow = {
 };
 
 export type LocalgwRoute = {
-  strategy: "smart" | "fixed" | "round-robin" | "score";
+  strategy: "smart" | "fixed" | "round-robin" | "score" | "cost-first";
   fixedChannel: string;
   enableFailover: boolean;
   cooldownMs: number;
@@ -959,16 +984,48 @@ export type LocalgwRoute = {
   perChannel: Record<string, { enabled: boolean }>;
 };
 
+export type LocalgwActiveRequest = { id: string; keyPrefix: string; startedAt: number; elapsedMs: number; phase: string; channel: string; model: string; attempts: number };
+export const localgwRequestsList = () => call<LocalgwActiveRequest[]>("localgw_requests_list");
+export const localgwRequestCancel = (id: string) => call<{ ok: boolean }>("localgw_request_cancel", { id });
+
+export type LocalgwAccountPlan = {
+  id: string; name: string; position: number; eligible: boolean; reason: string; bucket: string;
+  credits: number; inFlight: number; limit: number; billingKind: "unknown" | "free" | "paid" | "permanent";
+};
+export const localgwAccountsReorder = (channel: string, ids: string[]) => call<{ ok: boolean }>("localgw_accounts_reorder", { channel, ids });
+export const localgwAccountsPlan = (channel: string, model = "") => call<LocalgwAccountPlan[]>("localgw_accounts_plan", { channel, model });
+export const localgwAccountPolicy = (id: string, policy: { billingKind: string; maxInFlight: number }) => call<{ ok: boolean }>("localgw_account_policy", { id, policy });
+
 export type LocalgwModelRow = {
   id: string;
   /** 应用 overrides / aliases / custom 之后的最终对外可见名 */
   display: string;
   channel: string;
   realModel: string;
-  source: "channel" | "override" | "alias" | "custom";
+  rate?: number | null;
+  capabilities?: Record<string, boolean>;
+  contextLength?: number;
+  maxOutputTokens?: number;
+  metadataScope?: "binding";
+  rateSource?: "provider-config" | "catalog";
+  /** channel-lock = 只锁渠道（v1.82.2「渠道覆盖」语义，不改上游模型名） */
+  source: "channel" | "override" | "alias" | "custom" | "channel-lock";
+  /** 该模型真实存在的渠道（行内「渠道锁定」下拉的选项；单源时前端禁用下拉）。
+   *  不能拿列表自己按 channel 分组反推：同名模型被改名绑定接管后，原渠道行不在列表里。 */
+  sources?: string[];
+  /** 当前渠道锁定值（空 = 未锁定）。锁已失效时也会回传，供前端提示「锁定已失效」。 */
+  lockChannel?: string;
+  /** 该模型被「改名覆盖 / 自定义模型」接管：行内锁必须避让，否则会改错上游模型名。 */
+  renameLocked?: boolean;
 };
 
+/** 某渠道的原生模型清单条目（「覆盖与自定义」表单的「实际模型名」下拉数据源）。
+ *  realModel = 转发时发给上游的实际名字（渠道配了反向映射时与目录条目名 id 不同）；
+ *  id = 渠道目录里的条目名（覆盖 / 自定义的「对外名」默认建议值用它，不要用 realModel）。 */
+export type LocalgwChannelModel = { id: string; realModel: string };
+
 export type LocalgwLogRow = {
+  attempts?: { channel: string; model: string; code: string; ms: number; committed: boolean }[];
   id: string;
   ts: number;
   apiKeyPrefix: string;
@@ -998,7 +1055,7 @@ export const localgwSetAutostart = (enabled: boolean) =>
   call<{ ok: boolean }>("localgw_set_autostart", { enabled });
 export const localgwRestart = () => call<{ ok: boolean; message?: string }>("localgw_restart", {}, 0);
 
-// ---- 密钥（列表永不返回完整 key；rawKey 只在 keys_create 响应里出现一次）----
+// ---- 密钥（完整 key 经系统凭据加密存库，列表可随时查看 / 复制）----
 export const localgwKeysList = () => call<LocalgwKeyRow[]>("localgw_keys_list");
 export const localgwKeysCreate = (payload: {
   name: string;
@@ -1007,9 +1064,15 @@ export const localgwKeysCreate = (payload: {
   concurrency?: number;
   ratePerMin?: number;
 }) => call<{ ok: boolean; rawKey?: string; apiKey?: LocalgwKeyRow; message?: string }>("localgw_keys_create", payload);
-export const localgwKeysRevoke = (id: string) => call<{ ok: boolean }>("localgw_keys_revoke", { id });
-export const localgwKeysRename = (id: string, name: string) =>
-  call<{ ok: boolean }>("localgw_keys_rename", { id, name });
+/** 编辑：只传要改的字段；expiresAt 传 null = 改成永不过期 */
+export const localgwKeysUpdate = (
+  id: string,
+  patch: Partial<Pick<LocalgwKeyRow, "name" | "scopes" | "expiresAt" | "concurrency" | "ratePerMin">>,
+) => call<{ ok: boolean; apiKey?: LocalgwKeyRow; message?: string }>("localgw_keys_update", { id, patch });
+export const localgwKeysSetStatus = (id: string, status: "active" | "disabled") =>
+  call<{ ok: boolean; changed?: boolean; status?: "active" | "disabled"; message?: string }>("localgw_keys_set_status", { id, status });
+export const localgwKeysDelete = (id: string) =>
+  call<{ ok: boolean; changed?: boolean; message?: string }>("localgw_keys_delete", { id });
 
 // ---- 路由 / 渠道 ----
 export const localgwRouteGet = () => call<LocalgwRoute>("localgw_route_get");
@@ -1023,12 +1086,22 @@ export const localgwChannelTest = (channel: string) =>
 
 // ---- 模型目录 ----
 export const localgwModelsList = () => call<LocalgwModelRow[]>("localgw_models_list");
+/** 按渠道取该渠道的原生模型清单（「实际模型名」下拉数据源）。
+ *  ⚠️ 不能拿 localgwModelsList() 过滤渠道代替：合并目录里同名模型被覆盖 / 自定义接管后，
+ *     原渠道那一行就不存在了，会漏掉该渠道真实可选的模型。 */
+export const localgwModelsChannelModels = (channel: string) =>
+  call<LocalgwChannelModel[]>("localgw_models_channel_models", { channel });
 export const localgwModelsSetOverride = (model: string, payload: { real_model: string; channel: string }) =>
   call<{ ok: boolean }>("localgw_models_set_override", { model, payload });
 export const localgwModelsSetAlias = (from: string, to: string) =>
   call<{ ok: boolean }>("localgw_models_set_alias", { from, to });
 export const localgwModelsAddCustom = (model: string, provider: { channel: string; real_model: string }) =>
   call<{ ok: boolean }>("localgw_models_add_custom", { model, provider });
+/** 渠道锁定（v1.82.2「渠道覆盖」的操作通道）：只固定「走哪个渠道」，不改发给上游的模型名。
+ *  channel 传空字符串 = 清除锁定（后端会真删键，不是写 null）。
+ *  与 setOverride 的区别：override 是改名绑定（{real_model, channel}），两者互不覆盖。 */
+export const localgwModelsSetChannelLock = (model: string, channel: string) =>
+  call<{ ok: boolean; message?: string }>("localgw_models_set_channel_lock", { model, channel });
 /** 删除单条模型规则（kind: overrides / aliases / custom）。
  *  为什么不能复用 configPatch：config.cjs 的 mergeDeep 是**加性**合并，
  *  提交一份"少了某个键"的表不会真删（键会从 base 存活），传 null 也只是存下 null。
@@ -1243,3 +1316,35 @@ export const proxyNetproxySaveSettings = (args: {
 export const proxyCcSwitchStatus = () => call<CcSwitchStatus>("proxy_ccswitch_status");
 export const proxyCcSwitchRegister = (opts: { appType: CcSwitchAppType; apiKey: string; model: string; port?: number }) =>
   call<CcSwitchRegisterResult>("proxy_ccswitch_register", opts as unknown as Record<string, unknown>);
+
+// ===== 桌宠组件（悬浮桌宠 · 卡冈图雅）=====
+// 桌宠是独立模块（electron/pet/）：主界面只通过这 6 条通道读写它的配置/状态。
+// 桌宠窗口自身有专用 preload（window.petHost），不走这里。
+// 通道名与 electron/pet/pet-ipc.cjs 的 register、electron/preload.cjs 的 ALLOWED_COMMANDS 三处一一对应。
+export type PetStatus = {
+  ok: boolean;
+  config: PetConfig;
+  /** 窗口当前是否可见（隐藏 ≠ 关闭：隐藏后设置页的开关仍是开） */
+  visible: boolean;
+  /** 窗口是否已创建（总开关关掉后是 false） */
+  windowReady: boolean;
+  screenSampleSupported: boolean;
+  version: string;
+};
+
+/** 桌宠状态：设置页打开时拉一次，用于回显开关与窗口状态 */
+export const petStatus = () => call<PetStatus>("pet_status");
+/** 局部写配置（尺寸 / 转速 / 扭曲强度 / 右键菜单项…），主进程归一化后返回完整配置 */
+export const petConfigSave = (patch: Partial<PetConfig>) =>
+  call<{ ok: boolean; config: PetConfig; message?: string }>("pet_config_save", {
+    patch: JSON.parse(JSON.stringify(patch)),
+  });
+/** 显示 / 关闭桌宠（= 配置的 enabled，语义与设置页开关一致） */
+export const petSetEnabled = (enabled: boolean) =>
+  call<{ ok: boolean; visible: boolean; config?: PetConfig; message?: string }>("pet_set_enabled", { enabled });
+/** 把桌宠窗口移回主屏右下角默认位 */
+export const petResetPosition = () => call<{ ok: boolean; message?: string }>("pet_reset_position");
+/** 今日 token 用量（设置页展示用；与托盘「今日用量」同一份统计口径） */
+export const petUsageToday = () => call<{ ok: boolean; tokens: number | null; text: string }>("pet_usage_today");
+/** 提示词优化链路自检（不真调模型，只回报读取方式/键盘模拟/回填/风格） */
+export const petOptimizePreview = () => call<{ ok: boolean; message: string }>("pet_optimize_preview");

@@ -23,8 +23,9 @@ export {
   // 密钥
   localgwKeysList as keysList,
   localgwKeysCreate as keysCreate,
-  localgwKeysRevoke as keysRevoke,
-  localgwKeysRename as keysRename,
+  localgwKeysUpdate as keysUpdate,
+  localgwKeysSetStatus as keysSetStatus,
+  localgwKeysDelete as keysDelete,
   // 路由 / 渠道
   localgwRouteGet as routeGet,
   localgwRouteSet as routeSet,
@@ -32,7 +33,12 @@ export {
   localgwChannelTest as channelTest,
   // 模型目录
   localgwModelsList as modelsList,
+  // 「覆盖与自定义」表单的「实际模型名」下拉：按渠道取该渠道的原生模型清单
+  // （不能用 modelsList 过滤渠道：合并目录里同名模型被覆盖/自定义接管后原渠道行就没了）
+  localgwModelsChannelModels as modelsChannelModels,
   localgwModelsSetOverride as modelsSetOverride,
+  // 渠道锁定（v1.82.2「渠道覆盖」）：只锁渠道、不改上游模型名；channel 传空 = 清除锁定
+  localgwModelsSetChannelLock as modelsSetChannelLock,
   localgwModelsSetAlias as modelsSetAlias,
   localgwModelsAddCustom as modelsAddCustom,
   // 删除单条模型规则（overrides / aliases / custom）：config_patch 是加性合并删不掉，
@@ -63,6 +69,8 @@ export type {
   LocalgwKeyRow,
   LocalgwRoute,
   LocalgwModelRow,
+  // 某渠道的原生模型清单条目（覆盖与自定义表单的「实际模型名」下拉）
+  LocalgwChannelModel,
   LocalgwLogRow,
   // 出站伪装与清洗（契约 §4.8 的返回形状）
   LocalgwOutboundGetResult,

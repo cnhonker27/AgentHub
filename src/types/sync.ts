@@ -30,7 +30,7 @@ export interface UsageRecord {
   reasoningTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
-  credits?: number; // 额度点（Qoder / Antigravity 系官方模型按 credits 计量，不进 token 总量；其余源无此字段）
+  credits?: number; // 额度点（Qoder / Antigravity 系官方模型按 credits 计量；Qoder 系按 22,000 token/credit 折算进 totalTokens，Antigravity 不折算）
 
   startedAt: number; // epoch ms
   completedAt?: number;
@@ -61,7 +61,8 @@ export interface AggregateRow {
   reasoningTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
-  totalTokens: number; // 按当前口径计算的总量
+  credits?: number; // 额度点（Qoder / Antigravity 系官方模型；Qoder 系折算进 totalTokens）
+  totalTokens: number; // 按当前口径计算的总量（token 五桶 + Qoder 系 credits×22,000）
   count: number; // 记录条数
   cost: number; // 费用（显示币种，Antigravity 配额点不计入）
   unpricedRecords: number; // 未配置价格的记录条数
@@ -69,17 +70,29 @@ export interface AggregateRow {
 
 /** 总览摘要 */
 export interface Summary {
-  totalTokens: number; // 当前范围总量（全部设备或所选设备）
+  totalTokens: number; // 当前范围总量（token 五桶 + Qoder 系 credits×22,000）
   todayTokens: number; // 今日总量
-  cacheHitRate: number; // 缓存命中率（0~1）
-  todayCacheHitRate: number; // 今日缓存命中率（0~1）
-  cacheReadTokens: number; // 缓存命中量
-  inputTokens: number; // 输入总量
+  // 缓存命中率（0~1）；null = 无法计算：无 token 明细（Qoder 官方模型），或该来源本地取不到缓存拆分
+  // （如商汤小浣熊，见 electron/backend/db.cjs 的 noCacheSources）
+  cacheHitRate: number | null;
+  todayCacheHitRate: number | null; // 今日缓存命中率（同上）
+  /** 本范围是否存在「缓存口径可得」的记录：false 时前端文案用「该来源不提供缓存数据」而非「无 token 明细」 */
+  cacheStatsAvailable: boolean;
+  /** 今日是否存在「缓存口径可得」的记录（全期可得但今日只有小浣熊时两者会不一致，文案分开判断） */
+  todayCacheStatsAvailable: boolean;
+  // 以下 4 个是真实总量（含取不到缓存拆分的来源），与明细/费用口径一致
+  cacheReadTokens: number; // 缓存命中量（真实值）
+  inputTokens: number; // 输入总量（真实值；credits 折算不计入）
   outputTokens: number; // 输出总量
   reasoningTokens: number; // 推理总量
   cacheCreationTokens: number; // 缓存写入量
-  todayInputTokens: number; // 今日输入总量
-  todayCacheReadTokens: number; // 今日缓存命中量
+  todayInputTokens: number; // 今日输入总量（真实值）
+  todayCacheReadTokens: number; // 今日缓存命中量（真实值）
+  // 命中率口径的分子/分母：只含缓存口径可得的来源，与 cacheHitRate 同一子集（脚注显示比例用）
+  cacheInputTokens: number;
+  todayCacheInputTokens: number;
+  credits?: number; // 额度点合计（Qoder / Antigravity 系官方模型；Qoder 系已折算进 totalTokens，字段保留供核对）
+  todayCredits?: number; // 今日额度点
   recordCount: number; // 明细条数
   todayRecordCount: number; // 今日调用次数
   totalCost: number; // 累计费用（显示币种）
@@ -101,6 +114,11 @@ export interface DeviceBreakdown {
   reasoningTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
+  /** 设备级缓存命中率（0~1）；null = 该设备在本范围没有可统计的缓存口径（取不到缓存拆分的来源不进分母） */
+  cacheHitRate: number | null;
+  /** 命中率分母（口径值：只含缓存口径可得的来源）；与真实 inputTokens 区分，脚注显示比例用 */
+  cacheInputTokens: number;
+  credits?: number; // 额度点（Qoder / Antigravity 系官方模型；不是 token）
   recordCount: number;
   cost: number; // 费用（显示币种）
 }

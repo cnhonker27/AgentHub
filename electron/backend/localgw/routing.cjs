@@ -64,7 +64,7 @@ function setChannelEnabled(id, enabled) {
 function isCooling(id) {
   const until = cooldownUntil.get(id) || 0;
   if (Date.now() >= until) {
-    if (until) { cooldownUntil.delete(id); failCount.delete(id); }
+    if (until) cooldownUntil.delete(id);
     return false;
   }
   return true;
@@ -88,19 +88,18 @@ function markSucceeded(id) {
   failCount.delete(id);
 }
 
-/** 打分排序（score 策略）：在线账号数 + 余额 / 1000 - 冷却惩罚 */
+/** 渠道打分只比较可用账号数，不跨渠道折算余额。 */
 function score(channel, summary) {
   const acc = summary ? summary.onlineCount : 0;
-  const credits = summary ? (summary.totalCredits || 0) : 0;
   const cool = isCooling(channel) ? -1000 : 0;
-  return acc * 10 + credits / 1000 + cool;
+  return acc * 10 + cool;
 }
 
 /** 当前候选渠道列表（已经过 enabled / blocked / cooling / except 四重过滤）
  *  except: 本轮请求应额外排除的渠道（key scopes 未授权 / 故障转移已尝试）
  *  返回按 preferChannels → 分数 → 渠道 id 稳定排序后的数组（id 兜底保证同分时顺序确定，
  *  否则 round-robin 会在同分渠道间跳来跳去）。 */
-function candidates(except) {
+function candidates(except, model) {
   const c = lgwConfig.get();
   const withAcc = new Set(channelsWithAccounts());
   const prefer = new Set(c.routing.preferChannels || []);
@@ -110,6 +109,9 @@ function candidates(except) {
     if (blocked.has(id)) continue;
     if (!isChannelEnabled(id)) continue;
     if (isCooling(id)) continue;
+    // 可用性判定必须带 model：不带时「账号×模型」冷却中的账号也算可用，会让这个渠道
+    // 选进来、再在转发层以 no_account 失败换渠——多一次无谓尝试。accountPlan 支持该参数。
+    if (!pool.accountPlan(id, undefined, [], 0, String(model || "")).some((r) => r.eligible)) continue;
     out.push(id);
   }
   // 摘要一次算齐：原实现把 channelSummary 放进比较器里，每次比较都查一遍库（N log N 次 DB 查询）
@@ -139,6 +141,20 @@ function channelSummary(id) {
   }
 }
 
+/** 渠道锁定表查找（与 models.cjs 的 lookupChannelLock 同口径）。
+ *  这里内联而不是 require models.cjs：models.cjs 已经 require 本模块，
+ *  反向依赖会形成循环（routing → models → routing），启动期会拿到半初始化的 exports。 */
+function lookupChannelLock(locks, name) {
+  if (!locks || typeof locks !== "object" || Array.isArray(locks)) return "";
+  const exact = locks[name];
+  if (typeof exact === "string" && exact) return exact;
+  const lower = String(name || "").toLowerCase();
+  for (const [key, value] of Object.entries(locks)) {
+    if (key.toLowerCase() === lower && typeof value === "string" && value) return value;
+  }
+  return "";
+}
+
 /** 路由入口：返回选中的渠道 id；返回 null 表示没有可用渠道（调用方回 503）。
  *  except: 本轮请求应额外排除的渠道集合（key scopes / 故障转移已尝试渠道）
  *  策略语义（config.routing.strategy）：
@@ -146,7 +162,8 @@ function channelSummary(id) {
  *   · round-robin 候选内轮转，保证多渠道路由均衡
  *   · smart       preferChannels 优先，其余按 score
  *   · score       纯打分（preferChannels 不参与，用于"只看余额/在线数"的场景）
- *  模型级覆盖（models.overrides[model].channel）在所有策略之前生效——它是用户对单个模型的硬指定。 */
+ *  模型级覆盖（models.overrides[model].channel）在所有策略之前生效——它是用户对单个模型的硬指定。
+ *  渠道锁定（models.channelLocks[model]）同优先级：它是 v1.82.2「渠道覆盖」的语义，只锁渠道。 */
 function pick(model, except) {
   const c = lgwConfig.get();
   const exceptSet = new Set(except || []);
@@ -159,13 +176,26 @@ function pick(model, except) {
     if (!c.routing.failover) return null;
   }
 
+  // 渠道锁定（「渠道覆盖」）：只锁渠道，不改上游模型名，与改名覆盖同优先级。
+  // failover 开且锁渠道冷却/被排除时不直接失败，继续走候选 —— 与 v1.82.2「覆盖失效回落自动路由」一致。
+  const lock = lookupChannelLock(c.models.channelLocks, model);
+  if (lock) {
+    if (usable(lock)) return lock;
+    if (!c.routing.failover) return null;
+  }
+
   if (c.routing.strategy === "fixed" && c.routing.fixedChannel) {
     if (usable(c.routing.fixedChannel)) return c.routing.fixedChannel;
     if (!c.routing.failover) return null;
   }
 
-  let list = candidates([...exceptSet]);
+  let list = candidates([...exceptSet], model);
   if (!list.length) return null;
+
+  if (c.routing.strategy === "cost-first") {
+    const tiers = new Map(proxyStore.listAgents().map((a) => [a.id, a.costTier === "free" ? 0 : a.costTier === "low" ? 1 : 2]));
+    return list.slice().sort((a, b) => (tiers.get(a) ?? 2) - (tiers.get(b) ?? 2) || list.indexOf(a) - list.indexOf(b))[0];
+  }
 
   if (c.routing.strategy === "round-robin") {
     const idx = rrCursor++ % list.length;
@@ -279,35 +309,36 @@ function channelMatrix() {
   return rows;
 }
 
-/** 渠道测试（IPC: localgw_channel_test）
- *  【审查结论·收敛承诺】本函数**不谎报成功**。前端「路由与渠道」页有「测试」按钮、
- *  LocalgwRoute 类型里也声明了 balance?，所以"返回 ok:true 但没做任何探测"是界面承诺了
- *  后端没兑现——用户会以为渠道通了。真实探测需要复用号池的 credits.refreshAccount()
- *  （一次真实上游请求：会写库、会消耗一次调用、可能触发冷却/重登流程），
- *  风险与耗时都超出本次静态审查范围，故按方案 (b) 收敛承诺：
- *  只做**能确定**的本地检查，把结论如实放进 message，ok 恒为 false 直到接线完成。 */
+// 最小对话探测不修改账号冷却和使用统计。
 async function testChannel(id) {
+  if (!id) return { ok: false, message: "缺少渠道 id" };
+  if (!isChannelEnabled(id) || isCooling(id)) return { ok: false, message: "渠道已关闭或正在冷却" };
+  const binding = require("./models.cjs").list().find((m) => m.channel === id);
+  if (!binding) return { ok: false, message: "渠道没有可测试的模型" };
+  const account = pool.accountPlan(id, undefined, [], 0, binding.realModel).find((r) => r.eligible)?.account;
+  if (!account) return { ok: false, message: "没有可用账号" };
+  const adapter = require("../proxy/adapters.cjs").get(id);
+  if (!adapter?.chat) return { ok: false, message: "渠道不支持对话" };
+  const secrets = proxyStore.accountSecrets(proxyStore.getAccount(account.id));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("探测超时")), 30000);
+  const t0 = Date.now();
+  let received = false, error;
+  pool.acquireAccount(account.id);
   try {
-    if (!id) return { ok: false, message: "缺少渠道 id" };
-    const t0 = Date.now();
-    const withAcc = new Set(channelsWithAccounts());
-    if (!withAcc.has(id)) {
-      return { ok: false, message: `渠道 ${id} 在号池里没有可用账号，请先到号池管家添加` };
-    }
-    if (isCooling(id)) {
-      const until = cooldownUntil.get(id) || 0;
-      return { ok: false, message: `渠道 ${id} 正在冷却中（约 ${Math.max(0, Math.ceil((until - Date.now()) / 1000))}s 后重试）` };
-    }
-    const summary = channelSummary(id);
-    const cached = summary && Number.isFinite(summary.totalCredits) ? `，缓存余额 ${summary.totalCredits}` : "";
-    return {
-      ok: false,
-      latencyMs: Date.now() - t0,
-      message: `渠道连通性测试尚未接线（本地检查通过：账号在线、未冷却${cached}）。接线阶段将复用号池 proxy_account_refresh 做真实探测。`,
-    };
+    await require("../proxy/transport-context.cjs").run(controller.signal, () => adapter.chat({
+      account: { ...account, secrets }, secrets, model: binding.realModel,
+      body: { model: binding.realModel, messages: [{ role: "user", content: "ping" }], max_tokens: 16, stream: true },
+      meta: { signal: controller.signal }, emit: (ev) => {
+        if (ev.type === "error") error = ev;
+        if (ev.type === "delta" && require("../proxy/util.cjs").hasConsumableDelta(ev.delta || {})) received = true;
+      },
+    }));
+    controller.signal.throwIfAborted();
+    return { ok: received && !error, latencyMs: Date.now() - t0, message: error ? "上游返回错误，请检查账号及模型" : received ? `模型 ${binding.realModel} 最小对话探测通过` : "上游没有返回内容" };
   } catch (e) {
-    return { ok: false, message: String((e && e.message) || e) };
-  }
+    return { ok: false, latencyMs: Date.now() - t0, message: controller.signal.aborted ? "探测超时" : "上游请求失败，请检查出口及账号" };
+  } finally { clearTimeout(timer); pool.releaseAccount(account.id); }
 }
 
 module.exports = {

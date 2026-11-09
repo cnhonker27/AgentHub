@@ -36,7 +36,7 @@ const { MemoryTasks } = require("./tasks.cjs");
 const { MemoryScheduler, TASK_DEFS } = require("./scheduler.cjs");
 const { MemorySync } = require("./sync.cjs");
 const { DedupEngine } = require("./dedup.cjs");
-const { ImportEngine } = require("./import/engine.cjs");
+const { ImportEngine, migrateLegacySources } = require("./import/engine.cjs");
 const { LlmClient } = require("./llm/client.cjs");
 const agents = require("./agents.cjs");
 const tools = require("./tools.cjs");
@@ -274,6 +274,18 @@ function init() {
     memCfg,
     expandPath: (p) => expandPath(p),
   });
+  // 一次性迁移：WorkBuddy 与 WorkBuddy AI 拆成两个导入来源（2026-10-29）。
+  // 旧默认把 id=workbuddy 的来源指到了 WorkBuddy AI 的目录（~/.workbuddy-ai），两个产品被读成一个；
+  // 只改「路径仍等于旧默认值」的条目（用户自定路径不动），落本机覆盖文件——来源路径是本机事实。
+  // meta 闸门保证只跑一次：否则用户若有意把该来源改回 AI 目录，重启会被反复搬走。
+  try {
+    if (service.index.getMeta("mem_import_workbuddy_split_v1") !== "done") {
+      const raw = memCfg.get("import.sources");
+      const r = migrateLegacySources(Array.isArray(raw) ? JSON.parse(JSON.stringify(raw)) : [], (p) => expandPath(p));
+      if (r.changed) memCfg.set({ "import.sources": r.list }, { local: true });
+      service.index.setMeta("mem_import_workbuddy_split_v1", "done");
+    }
+  } catch { /* 迁移失败不阻塞启动 */ }
   // 写记忆时同步去重（L1/L2 毫秒级）；异步补判交给调度器
   service.dedupHook = (info) => dedupEngine.checkSync(info);
   service.asyncDedupHook = (id) => dedupEngine.resolveQueued(id);
@@ -340,8 +352,16 @@ async function boot() {
     bootTimers = [
       setTimeout(() => {
         try {
-          const r = service && service.reconcileProjectMetadata();
-          if (r && r.healed) emit({ type: "projects", healed: r.healed });
+          // 启动整理：先收口重复项目卡（同一仓库/同一项目多张卡），再认领孤儿目录、补远程与本地路径。
+          // 合并会搬文件，必须进写队列（autoOrganizeProjects 内部已进），且不能阻塞启动——
+          // 放在 6 秒后的定时器里异步跑，期间 UI 正常可用（事件 projects 会在完成后广播）。
+          Promise.resolve(service && service.autoOrganizeProjects())
+            .then((r) => {
+              if (r && (r.healed || r.merged || r.adopted)) {
+                emit({ type: "projects", healed: r.healed, merged: r.merged, adopted: r.adopted });
+              }
+            })
+            .catch((e) => emit({ type: "projects", healed: 0, message: String((e && e.message) || e) }));
         } catch (e) {
           emit({ type: "projects", healed: 0, message: String((e && e.message) || e) });
         }
@@ -654,6 +674,14 @@ function register(ipcMain) {
   ipcMain.handle("memory_project_confirm", handle(({ id, slug }) => need().confirmSuggestion(id, slug)));
   // 正式关联入口：选一个本地目录补全项目卡的远程/路径（不新建卡、不改 slug）
   ipcMain.handle("memory_project_attach", handle(({ slug, dir }) => need().projectAttachPath(slug, dir)));
+  // 整理项目归档：收口重复卡片（同一仓库/同一项目多张卡）+ 元数据自愈；dryRun 只回计划不落盘
+  // 注意：不能在这里再包一层 withWrite——autoOrganizeProjects 内部已进写队列，嵌套会自等待死锁
+  ipcMain.handle("memory_project_organize", handle(async ({ dryRun } = {}) => {
+    const svc = need();
+    const r = dryRun ? await svc.consolidateProjects({ dryRun: true }) : await svc.autoOrganizeProjects();
+    if (!dryRun) emit({ type: "projects", healed: (r && r.healed) || 0 });
+    return ok(r);
+  }));
 
   // ===== 索引与检索 =====
   // 重建完成后随事件带上诊断快照，前端据此即时刷新健康卡，不必再猜修没修好

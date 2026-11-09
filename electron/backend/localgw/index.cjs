@@ -11,7 +11,7 @@
 // 本地网关 · 模块入口
 // 单进程嵌入：与号池 / 记忆 / 提示词同款主进程模块，不另起子进程（方案 §3.1）。
 // 对外四个导出（electron/main.cjs 按此顺序调用）：
-//   register(ipcMain)          注册 33 条 IPC 通道（幂等；与板块开关无关，停用也常驻）
+//   register(ipcMain)          注册全部 localgw IPC 通道（幂等；与板块开关无关，停用也常驻）
 //   setRuntime({ broadcast })  **必须在 boot 之前**：usagehook 的广播器只在 boot 时注入，
 //                              晚注入会丢掉启动初期的落账事件；传 null/{} 可摘除
 //   boot()                     async；内部按 autostart 短路，autostart=false 时**绝不开端口**
@@ -102,6 +102,13 @@ function register(ipcMain) {
     });
     return { ok: true, rawKey: r.rawKey, apiKey: r.apiKey };
   }));
+  // 编辑：只传要改的字段（name / scopes / expiresAt / concurrency / ratePerMin）
+  ipcMain.handle("localgw_keys_update", handle(async ({ id, patch }) => keysStore.update(id, patch || {})));
+  // 启 / 停（status ∈ active | disabled）：停用即时生效，可再启用
+  ipcMain.handle("localgw_keys_set_status", handle(async ({ id, status }) => keysStore.setStatus(id, status)));
+  // 删除：真删行（旧「吊销」只是打标，用户要的是删干净）
+  ipcMain.handle("localgw_keys_delete", handle(async ({ id }) => keysStore.remove(id)));
+  // 以下两条是兼容旧通道（页面已不再调用；吊销 = 停用，改名 = update 的子集）
   ipcMain.handle("localgw_keys_revoke", handle(async ({ id }) => keysStore.revoke(id)));
   ipcMain.handle("localgw_keys_rename", handle(async ({ id, name }) => keysStore.rename(id, name)));
 
@@ -115,9 +122,22 @@ function register(ipcMain) {
   }));
   ipcMain.handle("localgw_channel_test", handle(async ({ channel }) => routing.testChannel(channel)));
 
+  ipcMain.handle("localgw_accounts_reorder", handle(async ({ channel, ids }) => require("./account-policy.cjs").reorder(channel, ids)));
+  ipcMain.handle("localgw_accounts_plan", handle(async ({ channel, model }) => require("./account-policy.cjs").preview(channel, model)));
+  ipcMain.handle("localgw_account_policy", handle(async ({ id, policy }) => require("./account-policy.cjs").save(id, policy)));
+
+  ipcMain.handle("localgw_requests_list", handle(async () => require("./requests.cjs").list()));
+  ipcMain.handle("localgw_request_cancel", handle(async ({ id }) => require("./requests.cjs").cancel(id)));
+
   // ===== 模型目录 =====
   ipcMain.handle("localgw_models_list", handle(async () => models.list()));
+  // 「覆盖与自定义」表单的「实际模型名」下拉：按渠道取该渠道的原生模型清单
+  // （不能拿 models.list() 过滤渠道：合并视图里同名模型被覆盖/自定义接管后原渠道行就没了）
+  ipcMain.handle("localgw_models_channel_models", handle(async ({ channel }) => models.channelModelList(channel)));
   ipcMain.handle("localgw_models_set_override", handle(async ({ model, payload }) => models.setOverride(model, payload)));
+  // 渠道锁定（v1.82.2「渠道覆盖」的接口）：{模型名: 渠道}，只锁渠道不改上游模型名。
+  // channel 传空 = 清除锁定；设置前会校验该渠道确实能转发这个模型名。
+  ipcMain.handle("localgw_models_set_channel_lock", handle(async ({ model, channel }) => models.setChannelLock(model, channel)));
   ipcMain.handle("localgw_models_set_alias", handle(async ({ from, to }) => models.setAlias(from, to)));
   ipcMain.handle("localgw_models_add_custom", handle(async ({ model, provider }) => models.addCustom(model, provider)));
   // 删除单条模型规则（overrides / aliases / custom）。
@@ -176,7 +196,7 @@ function register(ipcMain) {
   ipcMain.handle("localgw_providers_enable", handle(NOT_ENABLED));
   ipcMain.handle("localgw_providers_doctor", handle(NOT_ENABLED));
   ipcMain.handle("localgw_providers_exec", handle(NOT_ENABLED));
-  return { ok: true, channels: 33 };
+  return { ok: true };
 }
 
 /** 统一异常收口：渲染层拿到 { ok:false } 而不是 rejected promise */

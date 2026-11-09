@@ -59,7 +59,8 @@ const SCHEMA = {
   "classify.pathReverse":       { type: "boolean", def: true, label: "会话目录名反解项目", group: "归类", hot: true, tier: "advanced" },
 
   // ===== Agent 接入 =====
-  "agents.enabled":        { type: "multiselect", def: ["zcode", "codex", "workbuddy", "claude", "dsh", "trae-solo", "antigravity"], options: ["zcode", "codex", "workbuddy", "claude", "dsh", "trae-solo", "cursor", "agents", "qoder", "qoder-cn", "antigravity"], label: "启用的 Agent", group: "Agent 接入", hot: true, tier: "basic" },
+  // WorkBuddy（中国版 ~/.workbuddy）与 WorkBuddy AI（国际版 ~/.workbuddy-ai）是两个独立产品，两个 id 各自独立
+  "agents.enabled":        { type: "multiselect", def: ["zcode", "codex", "workbuddy", "workbuddy-ai", "claude", "dsh", "trae-solo", "antigravity"], options: ["zcode", "codex", "workbuddy", "workbuddy-ai", "claude", "dsh", "trae-solo", "cursor", "agents", "qoder", "qoder-cn", "antigravity"], label: "启用的 Agent", group: "Agent 接入", hot: true, tier: "basic" },
   "agents.custom":         { type: "list", def: [], label: "自定义 Agent（本机）", group: "Agent 接入", hot: true, tier: "advanced", desc: "名称 + 配置文件路径 + 格式，用于生成接入片段" },
   "agents.autoVerify":     { type: "boolean", def: true, label: "接入后自动校验", group: "Agent 接入", hot: true, tier: "basic" },
   "agents.verifyInterval": { type: "number", def: 300, min: 30, max: 3600, label: "连接巡检间隔（秒）", group: "Agent 接入", hot: true, tier: "advanced" },
@@ -115,11 +116,12 @@ const SCHEMA = {
   "cleanup.autoDeleteConflict":   { type: "boolean", def: false, label: "自动清理冲突记忆", group: "清理", hot: true, tier: "advanced", desc: "同步冲突未裁决的记忆：整份移入回收站并清掉冲突记录（每日记录类多节文件保守跳过）" },
   "cleanup.autoDeleteInvalid":    { type: "boolean", def: false, label: "自动清理无效记忆", group: "清理", hot: true, tier: "advanced", desc: "内容为空壳、进不了索引的文件（迁移/删除后的残骸）：整份移入回收站" },
 
-  // 待确认收件箱的自动确认三开关：开启后对应建议入队即按推荐执行，不再进收件箱等人
+  // 待确认收件箱的自动确认三开关：开启后对应建议入队即按推荐执行，不再进收件箱等人。
+  // 开启即全自动：不按置信度筛选，任何置信度的建议都按推荐处理。
   "review.autoConfirmSupersede": { type: "boolean", def: false, label: "自动确认事实失效", group: "自动化", hot: true, tier: "advanced", desc: "失效判定建议产生后立即按推荐标记旧事实失效（原文与演化链保留），不再等人工点头" },
   "review.autoConfirmClassify":  { type: "boolean", def: false, label: "自动确认项目归类", group: "自动化", hot: true, tier: "advanced", desc: "归类建议产生后立即按推荐归入对应项目；无推荐项目时直接忽略" },
   "review.autoConfirmDedup":     { type: "boolean", def: false, label: "自动确认去重采纳", group: "自动化", hot: true, tier: "advanced", desc: "去重建议产生后立即按推荐采纳新记忆（旧记忆标失效、保留追溯）；永不物理删除" },
-  "review.autoConfirmMinConfidence": { type: "number", def: 0.8, min: 0.5, max: 1, step: 0.05, label: "自动采纳置信下限", group: "自动化", hot: true, tier: "advanced", desc: "建议的置信度（归类建议为匹配分）低于该值时不自动执行，转人工队列；建议未携带置信度时视为完全可信" },
+  "review.autoConfirmMinConfidence": { type: "number", def: 0.8, min: 0.5, max: 1, step: 0.05, label: "低置信提示阈值", group: "自动化", hot: true, tier: "advanced", desc: "仅用于人工待确认列表：置信度（归类建议为匹配分）低于该值的建议会标红提示「拿不准，建议细看」；自动处理不按置信度筛选" },
 
   // ===== 双时间轴（事实失效） =====
   "timeline.enabled":       { type: "boolean", def: true, label: "启用双时间轴", group: "深层记忆", hot: true, tier: "advanced" },
@@ -174,18 +176,22 @@ const SCHEMA = {
       { id: "zcode-tx", name: "ZCode 实时日志（流式增量，与会话库重复）", kind: "jsonl", path: "~/.zcode/cli/agents", enabled: false, priority: 2 },
       { id: "claude", name: "Claude Code 会话", kind: "jsonl", path: "~/.claude/projects", enabled: true, priority: 3 },
       { id: "codex", name: "Codex 会话", kind: "jsonl", path: "~/.codex/sessions", enabled: true, priority: 4 },
-      { id: "workbuddy", name: "WorkBuddy 会话", kind: "jsonl", path: "~/.workbuddy-ai", enabled: true, priority: 5 },
-      { id: "dsh", name: "DeepSeek Harness 会话", kind: "jsonl", path: "~/.dsh/sessions", enabled: false, priority: 6 },
+      // WorkBuddy（中国版 ~/.workbuddy）与 WorkBuddy AI（国际版 ~/.workbuddy-ai）是两个独立产品：
+      // 目录名前缀关系要求逐条精确到 /projects，禁止合并成一个来源（旧版正是把 id 叫 workbuddy 的
+      // 来源指到了 .workbuddy-ai，两个产品的会话被读成一个）
+      { id: "workbuddy", name: "WorkBuddy 会话（中国版）", kind: "jsonl", path: "~/.workbuddy/projects", enabled: true, priority: 5 },
+      { id: "workbuddy-ai", name: "WorkBuddy AI 会话（国际版）", kind: "jsonl", path: "~/.workbuddy-ai/projects", enabled: true, priority: 6 },
+      { id: "dsh", name: "DeepSeek Harness 会话", kind: "jsonl", path: "~/.dsh/sessions", enabled: false, priority: 7 },
       // Qoder 会话转录：与 Claude Code 同构（type/user/assistant/message/uuid），
       // 目录名同样把 cwd 编码进去（如 d--workspace-FOC）。默认关——首次使用建议先跑一次导入预览。
-      { id: "qoder-cn", name: "Qoder CN 会话", kind: "jsonl", path: "~/.qoder-cn/projects", enabled: false, priority: 7 },
-      { id: "qoder", name: "Qoder 国际版会话", kind: "jsonl", path: "~/.qoder/projects", enabled: false, priority: 8 },
+      { id: "qoder-cn", name: "Qoder CN 会话", kind: "jsonl", path: "~/.qoder-cn/projects", enabled: false, priority: 8 },
+      { id: "qoder", name: "Qoder 国际版会话", kind: "jsonl", path: "~/.qoder/projects", enabled: false, priority: 9 },
       // Trae 系（Trae / Trae CN / TRAE SOLO / SOLO CN）：库是 SQLCipher 整库加密，
       // 路径填父目录即可，解析器自动识别 <应用>/ModularData/ai-agent/database.db
-      { id: "trae", name: "Trae 系会话（Trae / CN / SOLO）", kind: "trae", path: "%APPDATA%", enabled: true, priority: 9 },
+      { id: "trae", name: "Trae 系会话（Trae / CN / SOLO）", kind: "trae", path: "%APPDATA%", enabled: true, priority: 10 },
       // Antigravity 与 Antigravity IDE 的会话日志都在 ~/.gemini 下，一个来源统管
-      { id: "antigravity", name: "Antigravity 会话（Antigravity / IDE）", kind: "antigravity", path: "~/.gemini", enabled: true, priority: 10 },
-      { id: "notes-md", name: "Markdown 笔记目录", kind: "md", path: "", enabled: false, priority: 11 },
+      { id: "antigravity", name: "Antigravity 会话（Antigravity / IDE）", kind: "antigravity", path: "~/.gemini", enabled: true, priority: 11 },
+      { id: "notes-md", name: "Markdown 笔记目录", kind: "md", path: "", enabled: false, priority: 12 },
     ],
     label: "导入来源清单",
     desc: "路径/格式/启用/优先级/表映射；「Markdown 笔记目录」默认关，选好路径再开",

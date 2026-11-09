@@ -210,6 +210,15 @@ const ALLOWED_COMMANDS = new Set([
   "webdav_shared_clear",
   // ===== 四大板块启用开关（issue #91） =====
   "module_toggle",
+  // ===== 桌宠组件（悬浮桌宠 · 卡冈图雅）=====
+  // 只有「设置 · 桌宠组件」页用这 6 条；桌宠窗口自身有独立 preload（electron/pet/preload-pet.cjs），
+  // 它走 pet:ipc / pet:rpc 两条聚合通道，不在这里铺开（见 docs/桌宠/01-模块契约.md §4）
+  "pet_status",
+  "pet_config_save",
+  "pet_set_enabled",
+  "pet_reset_position",
+  "pet_usage_today",
+  "pet_optimize_preview",
   // ===== 记忆中枢：配置 / 根目录 =====
   "memory_config_get",
   "memory_config_save",
@@ -246,6 +255,8 @@ const ALLOWED_COMMANDS = new Set([
   "memory_project_suggest",
   "memory_project_confirm",
   "memory_project_attach",
+  // 整理项目归档：收口重复卡片 + 认领孤儿目录 + 补远程/路径；dryRun 只回计划
+  "memory_project_organize",
   // ===== 记忆中枢：索引 / 检索 =====
   "memory_index_status",
   "memory_index_build",
@@ -414,14 +425,26 @@ const ALLOWED_COMMANDS = new Set([
   "localgw_restart",
   "localgw_keys_list",
   "localgw_keys_create",
+  "localgw_keys_update",
+  "localgw_keys_set_status",
+  "localgw_keys_delete",
   "localgw_keys_revoke",
   "localgw_keys_rename",
   "localgw_route_get",
   "localgw_route_set",
   "localgw_channel_toggle",
   "localgw_channel_test",
+  "localgw_requests_list",
+  "localgw_request_cancel",
+  "localgw_accounts_plan",
+  "localgw_accounts_reorder",
+  "localgw_account_policy",
   "localgw_models_list",
+  // 按渠道取该渠道的原生模型清单（「覆盖与自定义」表单的「实际模型名」下拉数据源）
+  "localgw_models_channel_models",
   "localgw_models_set_override",
+  // 渠道锁定（v1.82.2「渠道覆盖」的接口）：只锁渠道、不改上游模型名；channel 传空 = 清除
+  "localgw_models_set_channel_lock",
   "localgw_models_set_alias",
   "localgw_models_add_custom",
   // 删除单条模型规则（无法用 config_patch 实现删除，见 models.cjs 的 removeRule）

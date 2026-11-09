@@ -12,14 +12,14 @@
 
 AgentHub is a locally-run control center (Electron + Vue 3 + TypeScript). It ships no model of its own; it simply takes what is scattered across your AI coding tools and puts it under one roof: duplicate skill installs, where this month's tokens actually went, whether your subscription quota can be used by other clients, agents that never remember your project, the same prompt you keep rewriting in every new session, and quota you hold but cannot plug into your own IDE. Those six problems map to the six sections below.
 
-The **Windows desktop app** carries all six sections (see [Windows download & install](#windows-download--install)). The former **Docker image** has been retired together with the Proxy Gateway module; its API forwarding capability is succeeded by the new **Local Gateway** section, embedded in the main process and read-only over the pool.
+The **Windows desktop app** carries all six sections (see [Windows download & install](#windows-download--install)) and the **Docker image** (four-module headless + Web console, see [Docker deployment](#docker-deployment)). The former **Proxy Gateway** module is retired; its API forwarding capability is succeeded by the new **Local Gateway** section. The Docker image was restored in Nov 2026 in the new form.
 
 | Section | In one line | Who it's for |
 | --- | --- | --- |
 | **Usage Stats** | Aggregate token usage and cost from 21 data sources, sliced by day / project / model | Anyone who wants to know what this month actually cost |
 | **Memory Hub** | A local Markdown memory store plus an MCP server, so agents remember your project and preferences | Anyone tired of re-explaining context in every new session |
 | **Prompt Library** | Expand a one-liner into a well-formed prompt, keep the good ones, plus a curated catalogue of 60 | Anyone rewriting the same prompt, or unsure how to state a request clearly |
-| **Pool Keeper** | Collect accounts from every channel into one pool: balances, check-ins, cross-device sync | People holding quota across channels (Trae / WorkBuddy / Raccoon / ModelScope / ZCode / Qoder / Cline and 14 channels in total) who want to know what is left |
+| **Pool Keeper** | Collect accounts from every channel into one pool: balances, check-ins, cross-device sync | People holding quota across channels (Trae / WorkBuddy / Raccoon / ModelScope / ZCode / Qoder / Cline and 21 channels in total) who want to know what is left |
 | **Local Gateway** | Wrap your pool accounts into one local OpenAI / Anthropic compatible endpoint — change a single `base_url` | Anyone who wants their IDE, scripts or own services to use the pool's quota |
 | **Skill Library** | Collect every tool's skills into one central library, maintain once, mount back everywhere | People running Codex / Claude Code / ZCode / Cursor side by side |
 
@@ -39,6 +39,7 @@ Full details are in [SPONSOR.md](./SPONSOR.md).
 
 ## Table of Contents
 
+- [Docker deployment](#docker-deployment)
 - [Windows download & install](#windows-download--install)
 - [Section 1: Usage Stats](#section-1-usage-stats)
 - [Section 2: Memory Hub](#section-2-memory-hub)
@@ -50,6 +51,80 @@ Full details are in [SPONSOR.md](./SPONSOR.md).
 - [Development & self-test](#development--self-test)
 - [Disclaimer](#disclaimer)
 - [Full statement](#full-statement)
+
+---
+
+## Docker deployment
+
+The Docker image is a headless form of four modules (Pool Keeper + Local Gateway + Prompt Library + Memory Hub) with a full Web console and REST admin API. It is designed for server deployment behind a reverse proxy (Nginx/Caddy) that terminates TLS.
+
+### Quick start
+
+```bash
+# ① Clone the repository
+git clone https://github.com/HUIdada1/AgentHub.git
+cd AgentHub
+
+# ② Copy the environment template and edit it
+cp gateway/.env.example gateway/.env
+# Edit gateway/.env and fill in your own keys and tokens:
+#   AGENTHUB_SECRET_KEY=your credential encryption key (user-defined, 32+ chars recommended)
+#   AGENTHUB_ADMIN_TOKEN=your admin password (user-defined, something memorable)
+
+# ③ Start (compose reads gateway/.env automatically)
+docker compose --env-file gateway/.env -f gateway/docker-compose.yml up -d --build
+```
+
+- Gateway: `http://<host>:9527/v1` (OpenAI / Anthropic / Responses compatible)
+- Admin API: `http://127.0.0.1:9528/api` (binds to loopback by default)
+- Web console: `http://<host>:9528/` (log in with `AGENTHUB_ADMIN_TOKEN`)
+
+### Environment variables
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `AGENTHUB_SECRET_KEY` | Yes | Credential encryption key (enc:v2 AES-256-GCM). **User-defined** — pick a long random string (32+ chars, alphanumeric). Entry refuses to start if unset. |
+| `AGENTHUB_ADMIN_TOKEN` | No | Admin API full token / Web console login password. **User-defined** — pick something memorable. If unset, admin UI binds to loopback only. |
+| `AGENTHUB_ADMIN_READONLY_TOKEN` | No | Read-only token (user-defined, different from full token): only read commands are allowed. |
+| `AGENTHUB_PROXY_PORT` / `AGENTHUB_HOST` | 9527 / 0.0.0.0 | Local gateway listen address. |
+| `AGENTHUB_ADMIN_PORT` | 9528 | Admin API port. |
+| `TZ` | Asia/Shanghai | Business timezone (check-in and daily quota reset use local time). |
+
+> **Keys and tokens are user-defined**: you do not need `openssl` or any random generator. Pick a password you can remember (e.g. `MySecretKey2024` or `MyAdminPass-AgentHub`). The `.env` file is in `.gitignore` and will never be committed.
+
+### Where accounts come from (Docker ↔ desktop)
+
+**Principle: desktop credentials are DPAPI-encrypted and the container cannot decrypt them — never share data volumes between the two forms. Accounts are transferred only via pool sync (WebDAV/S3).**
+
+1. **Recommended**: point the container at the same WebDAV/S3 as the desktop:
+   `PUT /api/config/webdav` writes the config and pool sync starts automatically (the passphrase envelope can be decrypted on both sides if `AGENTHUB_SECRET_KEY` is identical).
+2. Alternative: `POST /api/accounts/import` to import JSON (desktop export or hand-written credentials; metadata-only exports without tokens are rejected with a clear message).
+
+The desktop can also register the container as a "self-hosted OpenAI-compatible provider": `http://<container-host>:9527/v1` + an API key created inside the container (`localgw_keys_create` via admin RPC).
+
+### Admin API overview
+
+- `GET /api/livez` (always 200, for HEALTHCHECK) · `GET /api/readyz` (200 only when at least one account is online)
+- `GET /api/status` · `GET /api/channels` · `GET /api/accounts` · `GET /api/models`
+- `GET/PUT /api/config` · `GET/PUT /api/config/webdav` · `GET /api/backup`
+- `GET /api/capabilities`: full command table with read/write/deny annotations (277 commands = proxy 66 + localgw 43 + prompts 43 + memory 125)
+- `POST /api/rpc/:cmd`: remote command channel, envelope identical to desktop IPC
+- `GET /api/events`: SSE event stream (proxy + localgw)
+
+**Not available in container** (DENY, with reason and workaround): service start/stop, OAuth web login, SMS login, captcha, CC Switch / IDE account switching, export to local directory, ZCode device fingerprint operations, pet, window operations, manual WebDAV trigger (handled by poolsync scheduler).
+
+### Security baseline
+
+- If no admin token is set, the admin API binds to loopback only; put a TLS-terminating reverse proxy in front for remote management
+- Token comparison uses constant-time comparison; read-only and full tokens are separate
+- Single-instance lock: only one gateway process per data directory
+- Logs are redacted; `.dockerignore` excludes `*.db`, `.env`, `gateway-data/`
+- Qoder dual-region requires a local WASM signer; it is disabled on first container start with a log note
+
+### More docs
+
+- Deployment manual: [`gateway/README.md`](gateway/README.md)
+- Design & progress: [`docs/docker-上线/`](docs/docker-上线/)
 
 ---
 
@@ -247,6 +322,13 @@ Subscription quota is scattered across a dozen clients: how much is left, when i
 | **AutoClaw International** | AutoGLM international | OAuth login (with risk check) / import from local | Daily points |
 | **Cline Free** | Cline free pool | WorkOS device authorization (confirm in browser, **no client needed**) / import from local Cline / paste credentials | No check-in |
 | **Cline Pass** | ClinePass subscription pool | Same as above (one Cline login can be imported into both channels) | No check-in |
+| **Accio** | Alibaba Accio international | OAuth consent page + loopback callback (**no client install needed**) | Not verified |
+| **Accio CN** | Alibaba Accio mainland site | Same as above (accounts and quota are separate per region) | Not verified |
+| **CodeArts (Huawei Cloud)** | Huawei Cloud AI code assistant | Huawei Cloud consent page login (temporary credentials auto-renewed) | Daily login welfare |
+| **Loomy (iFlytek)** | iFlytek Loomy | Phone + SMS code login (login state is not in a readable file, so no local import) | Daily first-login point refresh |
+| **KukuAI (Baidu Wenku)** | GenFlowPro free quota | Paste login cookies (must include BDUSS / STOKEN / PTOKEN; **the upstream has no refresh endpoint**) | Daily task claim |
+| **MonkeyCode CN** | Chaitin MonkeyCode hosted edition | Paste the session cookie (30-day hard limit, **no refresh endpoint**; image id auto-discovered) | No check-in |
+| **MonkeyCode Intl** | MonkeyCode international site | Same as above (accounts and quota are separate per site, hence two channels) | No check-in |
 
 Each channel's pool, check-in and policies are fully independent: switch channels at the top of the pool page and everything below shows only that channel's accounts.
 
@@ -282,11 +364,13 @@ The pool exists to **manage your own accounts**, not to manufacture activity on 
 
 ### What changed from Proxy Gateway
 
-**Retired** (code archived, no longer maintained): the standalone Proxy Gateway process and its external-plugin form, the Docker image and remote instances, custom providers, CC Switch integration, network proxy (egress pool), hot-reloaded rules.
+**Retired** (code archived, no longer maintained): the standalone Proxy Gateway process and its external-plugin form, remote instances, custom providers, CC Switch integration, network proxy (egress pool), hot-reloaded rules.
 
 **Kept**: pool account management, balance queries, check-in, pool sync, operation log, IDE account switching.
 
-**Succeeded**: API forwarding (OpenAI / Anthropic), API keys, model catalog and gateway request stats are reimplemented by the new [Section 5: Local Gateway](#section-5-local-gateway) as a main-process-embedded module that talks to the pool read-only — no separate gateway process, no Docker form.
+**Succeeded**: API forwarding (OpenAI / Anthropic), API keys, model catalog and gateway request stats are reimplemented by the new [Section 5: Local Gateway](#section-5-local-gateway) as a main-process-embedded module that talks to the pool read-only — no separate gateway process.
+
+**Docker image restored** (Nov 2026): relaunched as a headless form with four modules (Pool Keeper + Local Gateway + Prompts Library + Memory Hub), providing a full Web console and REST admin API. See [Docker deployment](#docker-deployment).
 
 ### Maintenance notice
 
@@ -392,7 +476,7 @@ You installed the same skill separately in Codex, Claude Code, ZCode and Cursor,
 
 ### How to use
 
-1. Open **Skill Library · Dashboard** and confirm your tools are detected (ZCode / Codex / Claude Code / Antigravity / the generic `~/.agents` are built in; other tools are suggested from local directories)
+1. Open **Skill Library · Dashboard** and confirm your tools are detected (ZCode / Codex / Claude Code / DeepSeek Harness / WorkBuddy / WorkBuddy AI / Antigravity / the generic `~/.agents` are built in; other tools are suggested from local directories)
 2. Go to **Sync center**, run a scan first — previews write nothing, so you can see what will be collected and where it will be mounted
 3. Run it. Skills are mounted back from the central repository as junctions, so they take almost no extra space
 4. When you add or change a skill somewhere, run the sync center again; conflicts land in **Dedupe & conflicts** for you to decide
@@ -475,7 +559,7 @@ All product names, trademarks, service names and protocol names appearing here b
 
 The Pool Keeper reuses the login state of **your own accounts** on your own machine for balance queries, check-ins and account management. It does not crack or bypass any payment or permission check, and the quota it reads always comes from what your own account already has.
 
-The Local Gateway adds a **loopback-only** API forwarding layer on top: it exposes your own account's quota as an **OpenAI / Anthropic compatible endpoint** on `127.0.0.1` (off by default, loopback-only by default, credentials never leave the local process). The old standalone "reverse proxy gateway" process and its Docker form are no longer maintained and have been removed; the Local Gateway replaces them, and it likewise **no longer tracks upstream protocol or risk-control changes**, with no availability guarantee.
+The Local Gateway adds a **loopback-only** API forwarding layer on top: it exposes your own account's quota as an **OpenAI / Anthropic compatible endpoint** on `127.0.0.1` (off by default, loopback-only by default, credentials never leave the local process). The old standalone "reverse proxy gateway" process is no longer maintained and has been removed; the Local Gateway replaces it, and it likewise **no longer tracks upstream protocol or risk-control changes**, with no availability guarantee. The Docker form was restored in Nov 2026 as a four-module headless image — see [Docker deployment](#docker-deployment).
 
 Be clear about this, however: reusing a login state **in the shape of a non-official client** **may not comply with the upstream service's user agreement or terms of use**; whether you use it, and every consequence that follows (including but not limited to rate limiting, risk control, downgrading, freezing or banning of your account, termination of a subscription, or zeroing of points/quota), **is borne solely by you, and the author accepts no responsibility**.
 
@@ -503,6 +587,7 @@ This project needs to read and write account credentials (accessToken / refreshT
 - Never commit exported credential files to a public repository, upload them to cloud storage, send them to a chat group or share them with others
 - If you bind the service to `0.0.0.0` (for LAN access), every device on the same network can reach it — assess the risk yourself and set per-key daily quotas and rate limits
 - "Switch to IDE" closes and rewrites the local client's login state; save your work first
+- In Docker form, the credential encryption key (`AGENTHUB_SECRET_KEY`) is the only way to decrypt stored credentials; losing it means losing access to all stored accounts
 - Any loss caused by credential leakage, someone else using your device, misconfiguration or a wrong operation **is borne solely by you, and the author accepts no responsibility**
 - Uninstalling **does not delete** `%APPDATA%\AgentHub`; delete that directory yourself if you want it gone
 

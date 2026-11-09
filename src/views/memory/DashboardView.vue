@@ -32,7 +32,7 @@ import MemFirstRun from "../../components/memory/MemFirstRun.vue";
 import MemMorePanel from "../../components/memory/MemMorePanel.vue";
 import { agentLabel, projectLabel } from "../../components/memory/labels";
 import { coalesceAsync } from "../../utils/timing";
-import { sortAgentCards } from "../../utils/agent-card-sort";
+import { sortAgentCards, isInjectedCalled } from "../../utils/agent-card-sort";
 
 const app = useAppStore();
 const mem = useMemoryStore();
@@ -43,8 +43,15 @@ const trendRaw = ref<{ day: string; count: number }[]>([]);
 const trendRange = ref(30);
 const recent = ref<MemoryRow[]>([]);
 const agents = ref<MemoryAgentCard[]>([]);
-/** 列表排序与「Agent 接入」页同一套：已接入在前、其余默认序、「通用（~/.agents）」垫底 */
+/** 列表排序与「Agent 接入」页同一套：有真实调用的在前 → 已配置未调用 → 未配置（组内默认序），
+    「通用（~/.agents）」扩展位没有真实调用时垫底（判据见 utils/agent-card-sort） */
 const sortedAgents = computed(() => sortAgentCards(agents.value));
+/** 「已配置」口径 = injected（配置文件里真的有 MCP 条目），与卡片排序/徽标同一判据。
+    agents.length 是探测到的卡片总数（含未配置），不能当已配置数显示 */
+const injectedCount = computed(() => agents.value.filter((a) => a.injected).length);
+/** 「真实调用过」只算**已配置**的卡片（KPI 的分母是已配置数，分子不能含已卸载的残留心跳）；
+    列表里未配置但调用过的卡按硬规则仍排最前，所以标题文案写成「其中 N 个真实调用过」 */
+const calledCount = computed(() => agents.value.filter(isInjectedCalled).length);
 const healthOpen = ref(false);
 const lastSyncAt = ref(0);
 const busy = ref("");
@@ -67,7 +74,9 @@ const kpi = computed(() => {
     },
     {
       label: "已连通 Agent",
-      value: mem.beats.length ? `${mem.verifiedAgents}/${mem.beats.length}` : `0/${agents.value.filter((a) => a.injected).length}`,
+      // 分子/分母都取卡片列表（已接入 = injected），与下方 Agent 连接状态卡片的标题、徽标同一判据；
+      // 不用 mem.beats.length 当分母：那是全库心跳行数，含已卸载 Agent 的残留，会与列表数自相矛盾
+      value: `${calledCount.value}/${injectedCount.value}`,
       foot: "真实调用过 / 已配置",
       page: "hub",
       hubSub: "agents",
@@ -86,7 +95,7 @@ const kpi = computed(() => {
       foot: "事实失效 / 归类 / 去重",
       warn: !!s && s.pending > 0,
       page: "review",
-      help: "需要你点头的事：AI 判定的「事实失效」建议、名称模糊的项目归类建议、去重队列里低置信的重复判定。AI 只建议，不自动改。",
+      help: "需要你点头的事：AI 判定的「事实失效」建议、名称模糊的项目归类建议、去重队列里低置信的重复判定。默认只建议、不自动改；可在待确认页开启「按照建议自动处理」全自动化。",
     },
   ];
 });
@@ -263,7 +272,7 @@ watch(active, (v) => {
       <div class="mem-card mem-card-hug">
         <div class="mem-card-title">
           Agent 连接状态
-          <span class="mem-hint">{{ agents.length }} 个已接入 · {{ mem.verifiedAgents }} 个真实调用过</span>
+          <span class="mem-hint">{{ injectedCount }} 个已配置 · 其中 {{ calledCount }} 个真实调用过</span>
         </div>
         <!-- 定高滚动：后续接入的 Agent 变多时列表自己滚，不把卡片越撑越高 -->
         <div v-if="agents.length" class="mem-scroll mem-scroll-sm">
@@ -271,7 +280,7 @@ watch(active, (v) => {
             <span class="mem-dot" :class="a.beat ? 'ok' : a.injected ? 'warn' : 'bad'"></span>
             <span class="n-title">{{ a.name }}</span>
             <span style="margin-left: auto" class="mem-chip" :class="a.beat ? 'accent' : a.injected ? 'warn' : ''">
-              {{ a.beat ? `真实调用 · ${timeAgo(a.beat.lastCall)}` : a.injected ? "已配置未调用" : "未注入" }}
+              {{ a.beat ? `真实调用 · ${timeAgo(a.beat.lastCall)}` : a.injected ? "已配置未调用" : "未配置" }}
             </span>
           </div>
         </div>

@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
   display TEXT NOT NULL DEFAULT '',
   domain TEXT NOT NULL DEFAULT '',
-  pool_strategy TEXT NOT NULL DEFAULT 'expire_first',
+  pool_strategy TEXT NOT NULL DEFAULT 'optimal',
   cost_tier TEXT NOT NULL DEFAULT '',
   updated_at INTEGER NOT NULL DEFAULT 0
 );
@@ -265,6 +265,18 @@ const CHANNELS = [
   // （POST /api/v1/points/first-login，14 §3.5 客户端全包检索零命中「签到/checkin」）
   // ⇒ 上面那半句「每日签到」是旧注释的措辞，实际类型以本列为准（不改既有注释，避免超范围改动）。
   { id: "loomy", display: "Loomy（讯飞）", domain: "loomyad.xunfei.cn", costTier: "low", checkinKind: "login_grant" },
+  // KukuAI（百度文库「库库 AI / GenFlowPro」）：上游是「换会话三件套 → 建会话 → 分配算力 → SSE 取回」
+  // 的四跳链式协议，不是 OpenAI 兼容；登录态就是百度通行证 Cookie（BDUSS/STOKEN/PTOKEN），上游**没有
+  // 续期接口**，过期只能重新登录或重新粘贴。免费额度池（每日任务领积分），cost-first 路由应优先。
+  // checkinKind "signin"：freepoint 每日任务领取（LOGIN / CHAT 两项，动作幂等，见 kuku/checkin.cjs）。
+  { id: "kuku", display: "KukuAI（百度文库）", domain: "kuku.baidu.com", costTier: "free", checkinKind: "signin" },
+  // MonkeyCode（长亭科技）双站：同套协议、两个站点，因此是两个渠道而不是一个渠道的开关项——
+  // 账号池与模型清单都按站点分份，合成一格会让两站同名模型互相覆盖（与 Qoder / AutoClaw 双区同口径）。
+  // 上游是「建任务 + WebSocket 任务流（ACP 事件）」，凭据只有粘贴 session（30 天硬上限、无续期接口）。
+  // checkinKind "unknown"：本家没有签到类活动，但取值表里没有「无签到」这一档（不新增枚举以免改动
+  // 共享的展示分类逻辑），因此按既有口径留 "unknown"，事实记在本行注释与 monkeycode/adapter.cjs 里。
+  { id: "monkeycode", display: "MonkeyCode 国内版", domain: "monkeycode-ai.com", checkinKind: "unknown" },
+  { id: "monkeycode_intl", display: "MonkeyCode 国际版", domain: "monkeycode-ai.net", checkinKind: "unknown" },
 ];
 
 // 内置渠道 id 的只读名单：凡是「这一行是不是提供商」的判定都走它，而不是看 kind 列——
@@ -371,7 +383,7 @@ function open() {
   // （守卫 cost_tier=''，用户手动改过的档位永不覆盖）
   const updTier = db.prepare("UPDATE agents SET cost_tier=? WHERE id=? AND cost_tier=''");
   for (const c of CHANNELS) {
-    ins.run(c.id, c.display, c.domain, "expire_first", c.costTier || "", Date.now());
+    ins.run(c.id, c.display, c.domain, "optimal", c.costTier || "", Date.now());
     updDisplay.run(c.display, c.id);
     if (c.costTier) updTier.run(c.costTier, c.id);
   }
@@ -664,7 +676,7 @@ function listAgents() {
 
 function setPoolStrategy(channel, strategy) {
   open();
-  if (!["expire_first", "credit_first", "round_robin"].includes(strategy)) return false;
+  if (!["optimal", "expire_first", "credit_first", "round_robin", "manual"].includes(strategy)) return false;
   db.prepare("UPDATE agents SET pool_strategy=?, updated_at=? WHERE id=?").run(strategy, Date.now(), String(channel));
   invalidateChannels();
   return true;
@@ -777,7 +789,8 @@ function isBuiltinChannel(id) { return BUILTIN_IDS.has(String(id)); }
  *  所以改完配置不必重启网关。 */
 function saveProvider(p) {
   open();
-  const now = Date.now();
+  const previous = db.prepare("SELECT updated_at FROM agents WHERE id=?").get(String(p.id));
+  const now = Math.max(Date.now(), Number(previous?.updated_at || 0) + 1);
   db.prepare(
     `INSERT INTO agents (id, display, domain, pool_strategy, updated_at, kind, base_url, models_json, extra_headers, extra_body, enabled)
      VALUES (?,?,?,?,?,?,?,?,?,?,?)
@@ -789,7 +802,7 @@ function saveProvider(p) {
     String(p.id),
     String(p.display || p.id).slice(0, 64),
     String(p.domain || ""),
-    ["expire_first", "credit_first", "round_robin"].includes(p.poolStrategy) ? p.poolStrategy : "round_robin",
+    ["optimal", "expire_first", "credit_first", "round_robin", "manual"].includes(p.poolStrategy) ? p.poolStrategy : "optimal",
     now,
     String(p.kind),
     String(p.baseUrl || ""),
@@ -1327,9 +1340,11 @@ function listCreditPackages(accountId) {
  * 本文件 listKeys() 统计每把 Key 的今日用量走的也是「一次全量 + Map join」同一形态。
  * 只按 ord,rowid 排序：分桶后各桶内部天然有序，跨账号的相对顺序没人看（变异验证过，加 account_id 不承重）。
  */
-function listAllCreditPackages() {
+function listAllCreditPackages(channel) {
   open();
-  const rows = db.prepare("SELECT * FROM credit_packages ORDER BY ord, rowid").all();
+  const rows = channel
+    ? db.prepare("SELECT * FROM credit_packages WHERE account_id IN (SELECT id FROM accounts WHERE channel=?) ORDER BY ord, rowid").all(String(channel))
+    : db.prepare("SELECT * FROM credit_packages ORDER BY ord, rowid").all();
   const byAccount = new Map();
   for (const r of rows) {
     const list = byAccount.get(r.account_id);

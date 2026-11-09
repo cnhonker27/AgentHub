@@ -14,15 +14,16 @@
       390-432 的 .models-head 一条线、434-613 的 .table.table-bare + colgroup 定宽表、599-609 的空态），
      数据源换成现在的 localgw_models_list / _set_alias / _set_override / _add_custom。 -->
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { useAppStore } from "../../stores/app";
 import { useLocalgwStore } from "../../stores/localgw";
 import * as localgwApi from "../../api/localgw";
+import type { LocalgwModelRow } from "../../api/ipc";
 // 渠道名称与图标必须与「上游启闭」弹窗逐项一致：直接复用同一份实现
 // （ProxyUpstreamDialog.vue:109-113 用 CHANNEL_ICONS[row.id] / channelInitial(row.id, row.display)，
 //  名称用 row.display || channelName(row.id)），本页不再自己拼名字或另存一张图标表
-import { channelName } from "../proxy/format";
+import { channelName, fmtRate } from "../proxy/format";
 import { CHANNEL_ICONS, channelInitial } from "../proxy/channelIcons";
 
 const app = useAppStore();
@@ -44,6 +45,8 @@ const SOURCE_META: Record<string, { label: string; cls: string }> = {
   override: { label: "覆盖", cls: "tag-info" },
   alias: { label: "别名", cls: "tag-warn" },
   custom: { label: "自定义", cls: "tag-ok" },
+  // v1.82.2「渠道覆盖」的语义：只锁渠道、不改上游模型名
+  "channel-lock": { label: "渠道锁", cls: "tag-info" },
 };
 const sourceLabel = (s: string) => SOURCE_META[s]?.label || s || "—";
 const sourceCls = (s: string) => SOURCE_META[s]?.cls || "tag-dim";
@@ -89,7 +92,13 @@ const rows = computed(() => {
   const q = filter.value.trim().toLowerCase();
   return lgw.models.filter((m) => {
     if (channelTab.value && text(m.channel) !== channelTab.value) return false;
-    if (sourceFilter.value !== "all" && text(m.source) !== sourceFilter.value) return false;
+    // 「渠道锁」筛选按 lockChannel 算而不是 source：锁失效后行会回落成 channel 来源，
+    // 但用户仍然锁着它，按 source 筛会"配了却搜不到"。
+    if (sourceFilter.value === "channel-lock") {
+      if (!text(m.lockChannel)) return false;
+    } else if (sourceFilter.value !== "all" && text(m.source) !== sourceFilter.value) {
+      return false;
+    }
     if (!q) return true;
     return (
       text(m.display).toLowerCase().includes(q) ||
@@ -104,8 +113,87 @@ const stats = computed(() => {
   const overrides = lgw.models.filter((m) => m.source === "override").length;
   const aliases = lgw.models.filter((m) => m.source === "alias").length;
   const customs = lgw.models.filter((m) => m.source === "custom").length;
-  return { total, overrides, aliases, customs };
+  // 渠道锁统计按 lockChannel 算（含"锁已失效、已回落自动路由"的行）——
+  // 只按 source === "channel-lock" 会漏掉失效锁，用户会以为自己没配过。
+  const locks = lgw.models.filter((m) => text(m.lockChannel)).length;
+  return { total, overrides, aliases, customs, locks };
 });
+
+// ---- 行内「渠道锁定」：v1.82.2「渠道覆盖」的操作逻辑 ----
+// 口径（与旧版 ProxyModelsView 逐条对齐）：
+//  · 选项 =「自动（按路由策略）」+ 该模型真实存在的渠道（row.sources）；
+//  · 多源才可改，单源禁用（单源强制走所属渠道，锁了也没意义）；
+//  · 即改即存，不弹二次确认；
+//  · 只锁渠道，**绝不改发给上游的模型名**（改名走第 3 个 Tab 的「改名覆盖」）。
+// 两条新版才需要的避让：被改名绑定接管的行不给锁（否则会把上游模型名改错）；
+// 别名 / 自定义行自带渠道，也不给锁。
+const savingLock = ref(false);
+
+/** 渠道展示名：与「上游启闭」弹窗同源（display 优先，缺省回落静态名表） */
+function channelDisplay(channel: string): string {
+  return channelDisplayById.value.get(channel) || channelName(channel);
+}
+
+/** 下拉当前值：已锁的行显示锁值（即使锁已失效），未锁显示空 = 自动 */
+function lockValue(m: LocalgwModelRow): string {
+  return text(m.lockChannel) || (m.source === "channel-lock" ? text(m.channel) : "");
+}
+
+/** 可选项：来源渠道；锁已失效时把失效渠道补回来，让用户能看见并取消它 */
+function lockCandidates(m: LocalgwModelRow): { value: string; label: string; unavailable: boolean }[] {
+  const list = (m.sources || []).map((ch) => ({ value: ch, label: channelDisplay(ch), unavailable: false }));
+  const lock = text(m.lockChannel);
+  if (lock && !list.some((o) => o.value === lock)) {
+    list.push({ value: lock, label: `${channelDisplay(lock)}（当前锁定，渠道不可用）`, unavailable: true });
+  }
+  return list;
+}
+
+/** 是否允许行内改锁 */
+function canLock(m: LocalgwModelRow): boolean {
+  if (savingLock.value) return false;
+  if (m.renameLocked) return false;
+  if (m.source === "alias" || m.source === "custom") return false;
+  // 已有锁一定可操作（至少要能改回「自动」）；未锁时按旧版口径：多源才给锁
+  return !!text(m.lockChannel) || (m.sources || []).length > 1;
+}
+
+/** 禁用原因（空串 = 可操作）*/
+function lockTip(m: LocalgwModelRow): string {
+  if (m.renameLocked) return "该模型已被「改名覆盖」接管，渠道由第 3 个 Tab 决定，请到那里修改";
+  if (m.source === "alias") return "别名模型自带目标渠道，不支持行内锁定";
+  if (m.source === "custom") return "自定义模型自带渠道，不支持行内锁定";
+  if (!text(m.lockChannel) && (m.sources || []).length <= 1) return "单源模型强制走所属渠道，无需覆盖";
+  if (text(m.lockChannel) && m.source !== "channel-lock") {
+    return "锁定的渠道当前不可用（已关闭 / 无账号），请求会回落自动路由；重新选择或改回「自动」即可";
+  }
+  return "";
+}
+
+/** 改锁：选渠道 = 锁定；选「自动」= 清空（后端真删键，不是写 null） */
+async function changeLock(m: LocalgwModelRow, channel: string) {
+  const name = text(m.display) || text(m.id);
+  if (!name || savingLock.value) return;
+  const next = text(channel);
+  if (next === lockValue(m)) return;
+  savingLock.value = true;
+  try {
+    const r = await localgwApi.modelsSetChannelLock(name, next);
+    if (r && r.ok) {
+      ElMessage.success(next ? `已锁定走「${channelDisplay(next)}」` : "已恢复自动路由");
+      await lgw.refreshModels();
+    } else {
+      await lgw.refreshModels().catch(() => {});
+      ElMessage.error(r?.message || "保存失败");
+    }
+  } catch (e) {
+    // 失败也要重拉：el-select 受控模式下内部可能已切到新值，列表不变会停在错误状态
+    await lgw.refreshModels().catch(() => {});
+    ElMessage.error(`保存失败：${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    savingLock.value = false;
+  }
+}
 
 /** 有没有生效中的筛选：空态据此决定是否给「清空筛选」（旧版 599-609 行的双分支） */
 const hasFilter = computed(() => !!filter.value.trim() || !!channelTab.value || sourceFilter.value !== "all");
@@ -143,8 +231,17 @@ async function exposeToggle(v: unknown) {
 /** 别名表从本地配置副本读（写成功后后端会回读，这里以配置为准） */
 const aliasList = computed(() => {
   const map = app.config.localgw?.models?.aliases || {};
-  return Object.entries(map).map(([from, to]) => ({ from, to: String(to) }));
+  return Object.entries(map).map(([from, to]) => ({ from, to: String(to), enabled: !app.config.localgw?.models?.disabledAliases?.includes(from) }));
 });
+async function toggleAlias(from: string, enabled: boolean) {
+  const disabled = new Set(app.config.localgw?.models?.disabledAliases || []);
+  if (enabled) disabled.delete(from); else disabled.add(from);
+  try {
+    await localgwApi.configPatch({ models: { disabledAliases: [...disabled] } });
+    await reloadConfig(); await lgw.refreshModels();
+  } catch (e) { ElMessage.error(e instanceof Error ? e.message : String(e)); }
+}
+
 const aliasFrom = ref("");
 const aliasTo = ref("");
 
@@ -234,6 +331,68 @@ const channelOptions = computed(() => {
     display: channelDisplayById.value.get(c.id) || channelName(c.id),
   }));
 });
+
+// ---- 「实际模型名」下拉：选项来自「后方所选渠道」的原生模型清单 ----
+// 需求口径：实际模型名不再是自由文本，而是**跟着渠道走的单选下拉**（带输入筛选）——
+// 选中哪个渠道就只列那个渠道的模型；渠道没选时先置灰，因为「有哪些模型」是渠道的属性。
+// 数据源用 localgw_models_channel_models（渠道适配器原生目录），**不能**拿 lgw.models 过滤渠道：
+// 合并目录里同名模型被覆盖 / 自定义接管后，原渠道那一行就不在列表里，会漏掉可选模型。
+/** 渠道 id → 该渠道的原生模型清单；按需拉取后缓存（同渠道切来切回不重复打 IPC） */
+const channelModels = ref<Record<string, localgwApi.LocalgwChannelModel[]>>({});
+/** 渠道 id → 正在拉取（驱动 el-select 的 loading 转圈） */
+const modelsLoading = ref<Record<string, boolean>>({});
+/** 请求序号：连点切换渠道时晚到的旧响应不许盖掉新结果（与 store 里轮询的竞态处理同口径） */
+const modelsSeq = new Map<string, number>();
+
+/** 取某渠道清单：已缓存直接返回；失败不写缓存（后端重启 / 通道补齐后切回来能重试） */
+async function loadChannelModels(channel: string) {
+  const ch = channel.trim();
+  if (!ch || channelModels.value[ch]) return;
+  const seq = (modelsSeq.get(ch) || 0) + 1;
+  modelsSeq.set(ch, seq);
+  modelsLoading.value = { ...modelsLoading.value, [ch]: true };
+  try {
+    const rows = await localgwApi.modelsChannelModels(ch);
+    if (seq !== modelsSeq.get(ch)) return;
+    const list = (Array.isArray(rows) ? rows : []).filter((r) => r && typeof r.realModel === "string" && r.realModel);
+    channelModels.value = { ...channelModels.value, [ch]: list };
+  } catch {
+    // 通道未接线 / 后端异常：保持空清单即可 —— 下拉仍允许手输，不能因为目录拿不到就把表单锁死
+  } finally {
+    if (seq === modelsSeq.get(ch)) modelsLoading.value = { ...modelsLoading.value, [ch]: false };
+  }
+}
+
+/** 渠道变了就按需拉该渠道清单（缓存命中则同步出选项，不闪 loading） */
+watch(ovChannel, (ch) => { void loadChannelModels(ch); });
+watch(cuChannel, (ch) => { void loadChannelModels(ch); });
+
+/** 某渠道的下拉选项：value 必须是 realModel（localgw 转发时原样发给上游），label 用同一个名字 */
+function realModelOptions(channel: string) {
+  return (channelModels.value[channel] || []).map((r) => ({ value: r.realModel, label: r.realModel }));
+}
+const ovRealOptions = computed(() => realModelOptions(ovChannel.value));
+const cuRealOptions = computed(() => realModelOptions(cuChannel.value));
+
+/** 当前值不在该渠道清单里（切过渠道 / 手输过）：补一条占位选项，
+ *  否则下拉会显示一个看不出处境的裸值，用户不知道它到底还对不对。 */
+function staleValue(value: string, options: { value: string }[]) {
+  const v = value.trim();
+  return v && !options.some((o) => o.value === v) ? v : "";
+}
+const ovRealStale = computed(() => staleValue(ovReal.value, ovRealOptions.value));
+const cuRealStale = computed(() => staleValue(cuReal.value, cuRealOptions.value));
+
+/** 选完实际模型名后，对外名还空着就补成该渠道目录条目名：
+ *  覆盖最常见的用法是「对外名沿用渠道原名」，不补的话用户得把同一个名字再敲一遍。
+ *  ⚠️ 只在对外名空着时补，绝不覆盖用户已经写好的对外名。
+ *  ⚠️ 自定义模型**不**自动补：它的对外名本来就该是新名字，自动补只会造出一条与渠道行重复的规则。 */
+function onOvRealChange(v: unknown) {
+  const real = typeof v === "string" ? v : "";
+  if (!real || ovModel.value.trim()) return;
+  const hit = (channelModels.value[ovChannel.value] || []).find((r) => r.realModel === real);
+  ovModel.value = hit?.id || real;
+}
 
 async function submitOverride() {
   const model = ovModel.value.trim();
@@ -369,6 +528,7 @@ onMounted(async () => {
                   <button class="seg-item" :class="{ active: sourceFilter === 'override' }" @click="sourceFilter = 'override'">覆盖</button>
                   <button class="seg-item" :class="{ active: sourceFilter === 'alias' }" @click="sourceFilter = 'alias'">别名</button>
                   <button class="seg-item" :class="{ active: sourceFilter === 'custom' }" @click="sourceFilter = 'custom'">自定义</button>
+                  <button class="seg-item" :class="{ active: sourceFilter === 'channel-lock' }" @click="sourceFilter = 'channel-lock'">渠道锁</button>
                 </div>
               </div>
               <label class="search-box">
@@ -392,27 +552,61 @@ onMounted(async () => {
                 <colgroup>
                   <col style="width: auto; min-width: 180px" />
                   <col style="width: 220px" />
+                  <col style="width: 150px" />
                   <col style="width: 110px" />
-                  <col style="width: 130px" />
+                  <col style="width: 100px" />
+                  <!-- 渠道锁定列：select 固定 104px + 单元格左右 padding 各 12px = 128px 起步 -->
+                  <col style="width: 128px" />
                 </colgroup>
                 <thead>
                   <tr>
                     <th>对外模型名</th>
                     <th>实际模型</th>
+                    <th>倍率 / 上下文</th>
                     <th>渠道</th>
                     <th>来源</th>
+                    <th>渠道锁定</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr v-for="m in rows" :key="`${m.id}|${m.source}`">
                     <td class="mono">{{ text(m.display) || "—" }}</td>
                     <td class="mono">{{ text(m.realModel) || "—" }}</td>
+                    <td class="mono" :title="`${m.rateSource === 'provider-config' ? '提供商配置' : '渠道目录'}；仅表示此绑定的声明，未知值不估算`">{{ fmtRate(m.rate) }} / {{ m.contextLength || "未知" }}</td>
                     <td>{{ text(m.channel) || "—" }}</td>
                     <td><span class="tag" :class="sourceCls(text(m.source))">{{ sourceLabel(text(m.source)) }}</span></td>
+                    <!-- 行内渠道锁定（v1.82.2「渠道覆盖」）：只锁渠道，不改上游模型名。
+                         自动 = 空值（清锁）；锁已失效时把失效渠道补成一条醒目的选项，方便取消。 -->
+                    <td>
+                      <el-tooltip :content="lockTip(m)" :disabled="!lockTip(m)" placement="top">
+                        <!-- title 兜底：el-select 在 disabled 态下不冒泡 hover，原生 title 仍能看到禁用原因 -->
+                        <span :title="lockTip(m) || undefined">
+                          <el-select
+                            class="f-el-select lock-select"
+                            popper-class="glass-popper"
+                            :persistent="false"
+                            :model-value="lockValue(m)"
+                            :disabled="!canLock(m)"
+                            :loading="savingLock"
+                            placeholder="自动"
+                            @update:model-value="(v: string) => changeLock(m, v)"
+                          >
+                            <el-option value="" label="自动（按路由策略）" />
+                            <el-option
+                              v-for="o in lockCandidates(m)"
+                              :key="o.value"
+                              :value="o.value"
+                              :label="o.label"
+                              :disabled="o.unavailable"
+                            />
+                          </el-select>
+                        </span>
+                      </el-tooltip>
+                    </td>
                   </tr>
                   <!-- 空态双分支：有筛选给「清空筛选」，没筛选给引导（旧版 599-609 行） -->
                   <tr v-if="!rows.length">
-                    <td colspan="4" class="empty-cell">
+                    <td colspan="6" class="empty-cell">
                       <template v-if="hasFilter">
                         当前筛选没有匹配的模型
                         <button class="btn-link" style="margin-left: 6px" @click="clearFilter">清空筛选 →</button>
@@ -451,6 +645,7 @@ onMounted(async () => {
                     <td class="mono">{{ a.from }}</td>
                     <td class="mono">{{ a.to }}</td>
                     <td class="col-act">
+                      <button class="btn btn-sm" @click="toggleAlias(a.from, !a.enabled)">{{ a.enabled ? "停用" : "启用" }}</button>
                       <button class="btn-link" :disabled="saving" @click="removeRule('aliases', a.from, '映射')">移除</button>
                     </td>
                   </tr>
@@ -465,15 +660,37 @@ onMounted(async () => {
 
         <!-- ===== Tab 3：覆盖与自定义 ===== -->
         <template v-else>
-          <!-- 覆盖：把某个模型固定路由到指定渠道 -->
+          <!-- 改名覆盖：把对外模型名固定到某渠道的「另一个」实际模型名。
+               与 Tab1 行内「渠道锁定」分工：那个只换渠道、不改模型名；这里才改上游名。 -->
           <div class="card">
             <div class="card-title">
-              模型覆盖
-              <span class="right">{{ overrides.length }} 条 · 指定渠道优先于自动路由</span>
+              改名覆盖
+              <span class="right">{{ overrides.length }} 条 · 对外名 → 某渠道的另一个实际模型名</span>
+            </div>
+            <div class="s-desc" style="margin-bottom: 8px">
+              只换渠道、不改模型名 → 用 Tab1 表格的「渠道锁定」列即可；需要把对外名指向渠道里另一个模型名时，才用这里的改名覆盖。
             </div>
             <div class="alias-form">
               <input v-model="ovModel" class="f-input" placeholder="对外模型名" spellcheck="false" />
-              <input v-model="ovReal" class="f-input" placeholder="实际模型名" spellcheck="false" />
+              <!-- 实际模型名：单选下拉 + 输入筛选，选项 =「后方所选渠道」的原生模型清单。
+                   渠道没选时置灰（有哪些模型是渠道的属性）；清单外的名字仍可直接输入、回车创建 -->
+              <el-select
+                v-model="ovReal"
+                class="f-el-select model-pick"
+                popper-class="glass-popper"
+                :disabled="!ovChannel"
+                :loading="!!modelsLoading[ovChannel]"
+                :placeholder="ovChannel ? '选择实际模型（可输入筛选）' : '请先选择渠道'"
+                no-data-text="目录里没有匹配项 —— 直接输入后回车即可"
+                filterable
+                allow-create
+                default-first-option
+                clearable
+                @change="onOvRealChange"
+              >
+                <el-option v-if="ovRealStale" :key="ovRealStale" :label="ovRealStale + '（已不在渠道目录）'" :value="ovRealStale" />
+                <el-option v-for="o in ovRealOptions" :key="o.value" :label="o.label" :value="o.value" />
+              </el-select>
               <el-select v-model="ovChannel" placeholder="选择渠道" popper-class="glass-popper" class="f-el-select" style="width: 180px">
                 <el-option v-for="c in channelOptions" :key="c.id" :label="c.display" :value="c.id" />
               </el-select>
@@ -509,7 +726,23 @@ onMounted(async () => {
             </div>
             <div class="alias-form">
               <input v-model="cuModel" class="f-input" placeholder="对外模型名" spellcheck="false" />
-              <input v-model="cuReal" class="f-input" placeholder="实际模型名" spellcheck="false" />
+              <!-- 实际模型名：同「模型覆盖」——跟着渠道走的单选下拉（可输入筛选 / 可输入清单外名字） -->
+              <el-select
+                v-model="cuReal"
+                class="f-el-select model-pick"
+                popper-class="glass-popper"
+                :disabled="!cuChannel"
+                :loading="!!modelsLoading[cuChannel]"
+                :placeholder="cuChannel ? '选择实际模型（可输入筛选）' : '请先选择渠道'"
+                no-data-text="目录里没有匹配项 —— 直接输入后回车即可"
+                filterable
+                allow-create
+                default-first-option
+                clearable
+              >
+                <el-option v-if="cuRealStale" :key="cuRealStale" :label="cuRealStale + '（已不在渠道目录）'" :value="cuRealStale" />
+                <el-option v-for="o in cuRealOptions" :key="o.value" :label="o.label" :value="o.value" />
+              </el-select>
               <el-select v-model="cuChannel" placeholder="选择渠道" popper-class="glass-popper" class="f-el-select" style="width: 180px">
                 <el-option v-for="c in channelOptions" :key="c.id" :label="c.display" :value="c.id" />
               </el-select>
@@ -544,7 +777,7 @@ onMounted(async () => {
           <div class="s-desc">
             开启「在 /v1/models 中暴露」：<code class="mono">GET /v1/models</code> 返回全部启用渠道的合并视图；
             关闭则只返回覆盖 / 别名 / 自定义三张表的显式声明。
-            当前共 {{ stats.total }} 个模型：覆盖 {{ stats.overrides }} · 别名 {{ stats.aliases }} · 自定义 {{ stats.customs }}。
+            当前共 {{ stats.total }} 个模型：改名覆盖 {{ stats.overrides }} · 别名 {{ stats.aliases }} · 自定义 {{ stats.customs }} · 渠道锁 {{ stats.locks }}。
           </div>
         </div>
       </template>
@@ -559,6 +792,10 @@ onMounted(async () => {
 .page {
   --surface-2: var(--bg-soft);
   --surface-3: var(--code-bg);
+}
+/* 行内「渠道锁定」下拉：固定 104px，与旧版「渠道覆盖」列同宽（select 100px + 单元格内边距） */
+.lock-select {
+  width: 104px;
 }
 /* 错误红卡（旧版 6 页各自声明一份，照旧版做法保留页内） */
 .err-card {
@@ -743,6 +980,13 @@ onMounted(async () => {
   color: var(--text-3);
   font-size: 12px;
   flex: none;
+}
+/* 「实际模型名」下拉：与行内 .f-input 同权限伸缩。
+   el-select 根默认 width:100%，在 flex 行里必须显式给 flex-basis，
+   否则它以 100% 当基准、和旁边输入框互相挤压 */
+.model-pick {
+  flex: 1 1 200px;
+  min-width: 200px;
 }
 /* ===== 列表统一走用量统计同款表格（.table.table-bare + .table-scroll）=====
    这几张表只是只读展示 + 行内操作，不点行看详情：照 LogView 的做法去掉

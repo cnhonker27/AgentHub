@@ -8,14 +8,7 @@
  *    此注释为版权与授权声明，禁止删除。
  * ============================================================
  */
-// 本地网关 · 模型目录
-// 合并四源：渠道适配器清单 + models.overrides + models.aliases + models.custom。
-// 与号池的 proxy.modelOverrides / modelAliases 是两套独立配置：号池那套是"网关内部转发映射"，
-// 本模块这套是"对外暴露给客户端的模型名"——刻意分开，用户可以只改对外可见名而不影响号池。
-// 【口径说明·审查修正】原注释声称本模块会过滤 display_name 为空 / is_invisible_to_user /
-// config_switch=false 的内部模型——实际并不会：adapters.ADAPTERS[ch].models() 返回的是
-// string[] 纯模型名，那些字段级的可见性过滤由号池的 discovery/adapters 侧负责。
-// 本模块只做三件事：空名剔除、同渠道去重、按 override/alias/custom 改名。注释已按事实改正。
+// 本地网关模型绑定与对外目录。
 "use strict";
 const lgwConfig = require("./config.cjs");
 const config = require("../config.cjs");
@@ -27,122 +20,146 @@ const routing = require("./routing.cjs");
  *  只展示号池已有账号（status online/cooling）的渠道，与决策 1 默认启集同口径；
  *  同名模型多渠共存时，以号池已配置渠道优先（routing.pick 候选集内最靠前的一个）。 */
 function channelModels() {
+  const withAcc = new Set(routing.channelsWithAccounts());
   const out = [];
-  const seen = new Set();
-  try {
-    const withAcc = new Set(routing.channelsWithAccounts());
-    for (const [ch, ad] of Object.entries(adapters.ADAPTERS || {})) {
-      if (!withAcc.has(ch)) continue;
-      let ms = [];
-      try { ms = typeof ad.models === "function" ? ad.models() : []; } catch { /* 渠道适配器炸了不拖垮整个目录 */ }
-      for (const name of ms || []) {
-        const id = String(name || "").trim();
-        if (!id) continue;
-        const key = `${ch}::${id}`;
-        if (seen.has(key)) continue; // 适配器清单里重复项（同一模型两种写法）只留一条
-        seen.add(key);
-        out.push({ id, display: id, channel: ch, realModel: id, source: "channel" });
-      }
+  const metadata = new Map();
+  for (const m of adapters.listableModels()) {
+    for (const channel of m.sources || []) {
+      if (!withAcc.has(channel) || !routing.isChannelEnabled(channel) || !adapters.channelOn(channel)) continue;
+      const realModel = adapters.resolveModelTarget(m.id, channel) || m.id;
+      out.push({ id: m.id, display: m.id, channel, realModel, source: "channel", ...adapters.modelMetadata(realModel, channel, metadata) });
     }
-  } catch {
-    /* 号池未起或未接入：返回空列表，页面显示"暂无模型"而不是报错 */
   }
   return out;
 }
 
-/** 合并视图：应用 overrides / aliases / custom 后的最终对外目录
- *  冲突优先级（对外可见名相同时）：channel 原始 < overrides < custom，
- *  aliases 单独占一个"别名"命名空间（它的 from 是新名字，通常与渠道模型不同名）。 */
+/** 某渠道的原生模型清单（「覆盖与自定义」表单里「实际模型名」下拉的数据源）。
+ *
+ *  为什么不拿 list() 过滤渠道代替：list() 是**对外合并视图**——同名模型被 overrides / custom
+ *  抢先接管后，原渠道那一行就不再出现（bindings() 对同名只回一张绑定），拿它反推某渠道的模型
+ *  会漏项。这里直接读该渠道适配器的原生目录，回答的是「这个渠道实际能用哪些模型名」。
+ *
+ *  口径与 list() 对齐：
+ *   · realModel 用 resolveModelTarget() 的命中值 —— localgw 转发是把 real_model 原样交给
+ *     adapter.chat()，所以下拉里给出的必须是这个名字，而不是渠道客户端名；
+ *   · 停用模型（proxy.disabledModels）剔除 —— bindings() 判定绑到停用模型的规则不生效；
+ *   · 只读，且不看渠道当前是否启用/有账号：本函数只回答「有哪些模型」，能不能路由是路由层的事
+ *     （渠道下拉里能选到无账号渠道，选中后就该看到它的目录，而不是一个无解释的空下拉）。 */
+function channelModelList(channel) {
+  const ch = String(channel || "").trim();
+  if (!ch) return [];
+  const proxy = (config.loadConfig() || {}).proxy || {};
+  const disabled = new Set((proxy.disabledModels || []).map((m) => String(m).toLowerCase()));
+  const out = [];
+  const seen = new Set();
+  for (const id of adapters.channelModelIds(ch)) {
+    const realModel = adapters.resolveModelTarget(id, ch) || id;
+    const key = String(realModel || "").toLowerCase();
+    if (!key || disabled.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    // id 是渠道目录里的条目名（覆盖/自定义的「对外名」默认建议值），realModel 才是发上游的名字
+    out.push({ id, realModel });
+  }
+  return out;
+}
+
+/** 渠道锁定表查找：精确优先，回落大小写不敏感。
+ *  v1.82.2 的 modelOverrides 是大小写敏感的，这里刻意放宽：开源用户在不同客户端里
+ *  写 "Kimi-K3" / "kimi-k3" 是常态，「锁不上」比「锁错」更让人困惑；
+ *  而渠道 id 本身来自固定枚举，不存在大小写歧义。 */
+function lookupChannelLock(locks, name) {
+  if (!locks || typeof locks !== "object" || Array.isArray(locks)) return "";
+  const exact = locks[name];
+  if (typeof exact === "string" && exact) return exact;
+  const lower = String(name || "").toLowerCase();
+  for (const [key, value] of Object.entries(locks)) {
+    if (key.toLowerCase() === lower && typeof value === "string" && value) return value;
+  }
+  return "";
+}
+
+function bindings(model, visited = new Set(), snapshot) {
+  const name = String(model || "").trim();
+  if (!name || visited.has(name)) return [];
+  const proxy = snapshot?.proxy || config.loadConfig()?.proxy || {};
+  const isDisabled = (v) => (proxy.disabledModels || []).some((m) => String(m).toLowerCase() === String(v).toLowerCase());
+  if (isDisabled(name)) return [];
+  visited.add(name);
+  const c = snapshot?.config || lgwConfig.get();
+  const base = snapshot?.base || channelModels();
+  const d = c.models.custom?.[name] || c.models.overrides?.[name];
+  if (d && typeof d === "object") {
+    const target = d.real_model || name;
+    if (isDisabled(target)) return [];
+    const channel = d.channel || c.models.modelDefaultChannel;
+    if (channel) return adapters.channelOn(channel) && routing.isChannelEnabled(channel) ? [{ id: name, display: name, channel, realModel: target, source: c.models.custom?.[name] ? "custom" : "override", ...adapters.modelMetadata(target, channel) }] : [];
+    return base.filter((m) => m.id === target).map((m) => ({ ...m, id: name, display: name, source: "override" }));
+  }
+  if (c.models.disabledAliases?.includes(name)) return [];
+  const alias = c.models.aliases?.[name];
+  if (typeof alias === "string") return bindings(alias, visited, { proxy, config: c, base }).map((m) => ({ ...m, id: name, display: name, source: "alias" }));
+  // ===== 渠道锁定（v1.82.2「渠道覆盖」的语义：只锁渠道，不改发给上游的模型名） =====
+  // 位置刻意在 custom/overrides 之后、渠道目录兜底之前：
+  //  · custom/overrides 是「改名绑定」，语义更强，命中即生效；
+  //  · 别名是「这个名字代表另一个模型」，解析目标再走本分支才能让锁定作用到真正的模型上。
+  const lockChannel = lookupChannelLock(c.models.channelLocks, name);
+  if (lockChannel) {
+    const target = adapters.resolveModelTarget(name, lockChannel);
+    const lockUsable = !!target && !isDisabled(target) && adapters.channelOn(lockChannel) && routing.isChannelEnabled(lockChannel);
+    if (lockUsable) {
+      const locked = { id: name, display: name, channel: lockChannel, realModel: target, source: "channel-lock", ...adapters.modelMetadata(target, lockChannel) };
+      // 「尽力锁」：锁行排第一，其余同名来源行作为回落候选一起返回。
+      // 为什么不是只回锁行：v1.82.2 的覆盖失效（渠道关闭/冷却/无号）会回落自动路由，
+      // 单行绑定会让锁定渠道一失败就整模型 503，跟旧版体验不一致。
+      // /v1/models 只展示锁行（见 list()），重复行不会外泄。
+      const others = base.filter((m) => m.id.toLowerCase() === name.toLowerCase() && m.channel !== lockChannel);
+      return [locked, ...others];
+    }
+    // 配置失效（渠道关了/该渠道没有这个模型名/模型被停用）→ 当作没锁，回落自动路由
+  }
+  return base.filter((m) => m.id.toLowerCase() === name.toLowerCase());
+}
+
 function list() {
   const c = lgwConfig.get();
   const base = channelModels();
-  const seen = new Set();
-  const out = [];
-
-  // 1) 渠道模型（被 override 的用实际模型名替换）
+  const names = new Set(base.map((m) => m.id));
+  for (const table of [c.models.overrides, c.models.aliases, c.models.custom, c.models.channelLocks]) {
+    for (const name of Object.keys(table || {})) names.add(name);
+  }
+  const snapshot = { base, config: c, proxy: config.loadConfig()?.proxy || {} };
+  /** 模型名（小写）→ 该模型的全部来源渠道（用于行内下拉与单源判定） */
+  const sourcesByLower = new Map();
   for (const m of base) {
-    const ov = c.models.overrides[m.display] || c.models.overrides[m.id];
-    const channel = ov && ov.channel ? ov.channel : m.channel;
-    const key = `${channel}::${m.display}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({
-      id: m.id,
-      display: m.display,
-      channel,
-      realModel: ov && ov.real_model ? ov.real_model : m.realModel,
-      source: ov ? "override" : "channel",
-    });
+    const key = m.id.toLowerCase();
+    if (!sourcesByLower.has(key)) sourcesByLower.set(key, []);
+    const chList = sourcesByLower.get(key);
+    if (!chList.includes(m.channel)) chList.push(m.channel);
   }
-
-  // 2) overrides 里指向不存在模型的（用户手填的）也要出现
-  for (const [model, ov] of Object.entries(c.models.overrides || {})) {
-    if (!ov || typeof ov !== "object") continue; // 手改 config 写坏的条目直接跳过，不让它污染目录
-    const channel = ov.channel || c.models.modelDefaultChannel || "";
-    const key = `${channel}::${model}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ id: model, display: model, channel, realModel: ov.real_model || model, source: "override" });
-  }
-
-  // 3) aliases：别名 → 目标模型（对外暴露别名，实际打目标）
-  for (const [from, to] of Object.entries(c.models.aliases || {})) {
-    if (typeof to !== "string" || !to) continue;
-    const target = base.find((m) => m.display === to || m.id === to);
-    const key = `${target ? target.channel : "alias"}::${from}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({
-      id: from,
-      display: from,
-      channel: target ? target.channel : c.models.modelDefaultChannel || "",
-      realModel: target ? target.realModel : to,
-      source: "alias",
-    });
-  }
-
-  // 4) custom：渠道都不认识的自定义模型
-  for (const [model, def] of Object.entries(c.models.custom || {})) {
-    if (!def || typeof def !== "object") continue;
-    const channel = def.channel || c.models.modelDefaultChannel || "";
-    const key = `${channel}::${model}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ id: model, display: model, channel, realModel: def.real_model || model, source: "custom" });
-  }
-
-  return out;
+  return [...names].flatMap((name) => {
+    const rows = bindings(name, new Set(), snapshot);
+    // 锁生效时目录只留锁行：bindings 为「尽力锁」额外返回的来源行只是转发回落候选，
+    // 让它们在 /v1/models 里出现会造成同名模型重复。
+    const locked = rows.find((m) => m.source === "channel-lock");
+    const visible = locked ? [locked] : rows;
+    const sources = sourcesByLower.get(name.toLowerCase()) || [];
+    const lockChannel = lookupChannelLock(c.models.channelLocks, name);
+    return visible.map((m) => ({
+      ...m,
+      // 行内「渠道锁定」下拉的数据源：
+      //  · sources = 这个模型真实存在的渠道（旧版 m.sources 的新对应物），单源时前端禁用下拉；
+      //  · lockChannel = 当前锁值（即使锁已失效也回传，前端据此提示「锁定已失效」）；
+      //  · renameLocked = 该模型被改名绑定接管，行内锁必须避让（否则会改错上游模型名）。
+      sources,
+      lockChannel,
+      renameLocked: m.source === "override" || m.source === "custom",
+    }));
+  });
 }
 
-/** 解析请求模型名 → { channel, realModel }；未知模型返回 null（由调用方决定 400 还是回落） */
-function resolve(model) {
-  const c = lgwConfig.get();
-  const m = String(model || "").trim();
-  if (!m) return null;
-
-  // 顺序：custom > overrides > aliases > 渠道同名
-  if (c.models.custom && c.models.custom[m] && typeof c.models.custom[m] === "object") {
-    const d = c.models.custom[m];
-    return { channel: d.channel || c.models.modelDefaultChannel || "", realModel: d.real_model || m };
-  }
-  if (c.models.overrides && c.models.overrides[m] && typeof c.models.overrides[m] === "object") {
-    const d = c.models.overrides[m];
-    return { channel: d.channel || c.models.modelDefaultChannel || "", realModel: d.real_model || m };
-  }
-  if (c.models.aliases && c.models.aliases[m]) {
-    const target = c.models.aliases[m];
-    // 别名链只解一层（避免 A→B→A 死循环）
-    if (c.models.overrides && c.models.overrides[target] && typeof c.models.overrides[target] === "object") {
-      const d = c.models.overrides[target];
-      return { channel: d.channel || c.models.modelDefaultChannel || "", realModel: d.real_model || target };
-    }
-    const hit = channelModels().find((x) => x.display === target || x.id === target);
-    if (hit) return { channel: hit.channel, realModel: hit.realModel };
-    return null;
-  }
-  const hit = channelModels().find((x) => x.display === m || x.id === m);
-  if (hit) return { channel: hit.channel, realModel: hit.realModel };
-  return null;
+function resolve(model, channel) {
+  const rows = bindings(model);
+  return channel ? rows.find((m) => m.channel === channel) || null : rows[0] || null;
 }
 
 /** 写 override（model 与 payload 都可能来自渲染层，必须逐字段校验，否则会写出 undefined 字段的坏配置） */
@@ -155,6 +172,44 @@ function setOverride(model, payload) {
   cur[name] = { real_model: String(payload.real_model || name), channel: String(payload.channel || "") };
   const r = lgwConfig.patch({ models: { ...c.models, overrides: cur } });
   return r && r.ok === false ? { ok: false, message: r.message } : { ok: true };
+}
+
+/** 写 / 清「渠道锁定」（{ [模型名]: 渠道 id }）——v1.82.2「渠道覆盖」的存储层。
+ *
+ *  为什么不像 setOverride 那样走 lgwConfig.patch：**删除**是 patch 表达不了的
+ *  （mergeDeep 是加性合并，提交"少了某个键"的表不会真删，见 removeRule 的实测结论）。
+ *  「自动（不锁定）」必须真删键，所以这里一律在**原始配置层**重建整张表。
+ *
+ *  顺带收敛大小写同义键：Tab1 的模型名来自请求/目录、用户手写时大小写随意，
+ *  "Kimi-K3" 与 "kimi-k3" 各锁一个渠道会让 lookup 命中哪条取决于插入顺序，这里统一成一条。
+ *
+ *  channel 为空 = 清除锁定（幂等：本来没锁也回 ok）。
+ *  channel 非空 = 先校验该渠道确实能转发这个名字（resolveModelTarget 命中），
+ *  否则拒绝——写进去也是转发 404，不如当场说清楚。 */
+function setChannelLock(model, channel) {
+  const name = String(model || "").trim();
+  const ch = String(channel || "").trim();
+  if (!name) return { ok: false, message: "缺少模型名" };
+  if (ch && !adapters.resolveModelTarget(name, ch)) {
+    return { ok: false, message: `渠道「${ch}」没有模型 ${name}，不能锁定` };
+  }
+  const c = config.loadConfig();
+  if (!c || typeof c !== "object") {
+    return { ok: false, message: "配置读取失败，已放弃写入以免覆盖其它模块配置" };
+  }
+  const m = (c.localgw && c.localgw.models) || {};
+  const table = { ...(m.channelLocks || {}) };
+  for (const key of Object.keys(table)) {
+    if (key.toLowerCase() === name.toLowerCase()) delete table[key];
+  }
+  if (ch) table[name] = ch;
+  c.localgw = lgwConfig.normalize(lgwConfig.mergeDeep(lgwConfig.LOCALGW_DEFAULTS, { ...(c.localgw || {}), models: { ...m, channelLocks: table } }));
+  try {
+    config.saveConfig(c);
+  } catch (e) {
+    return { ok: false, message: `配置写入失败：${String((e && e.message) || e)}` };
+  }
+  return { ok: true };
 }
 
 /** 写 alias */
@@ -220,4 +275,4 @@ function removeRule(kind, name) {
   return { ok: true };
 }
 
-module.exports = { list, resolve, setOverride, setAlias, addCustom, removeRule };
+module.exports = { list, channelModelList, bindings, resolve, setOverride, setAlias, addCustom, setChannelLock, removeRule };

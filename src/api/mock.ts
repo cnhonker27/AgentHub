@@ -15,8 +15,9 @@ import type {
   PromptItem, PromptStyle, PromptHistoryItem, PromptConflict, PromptSyncStatus, PromptStats,
   CatalogItemDetail, CatalogCategory, CatalogTemplate,
 } from "../types";
-import { MODULES, LOCALGW_CONFIG_DEFAULTS } from "../types";
+import { MODULES, LOCALGW_CONFIG_DEFAULTS, PET_CONFIG_DEFAULTS } from "../types";
 import type { LocalgwOutboundConfig, LocalgwKeywordRule, LocalgwRewriteRule } from "../types";
+import type { PetConfig } from "../types";
 import type { CcSwitchStatus } from "../types";
 
 const KEY = "agenthub-config";
@@ -43,6 +44,9 @@ function defaultConfig(): AppConfig {
       zcode: { enabled: true, paths: [".zcode/skills"] },
       codex: { enabled: true, paths: [".codex/skills"] },
       claude: { enabled: true, paths: [".claude/skills"] },
+      dsh: { enabled: true, paths: [".dsh/skills"] },
+      workbuddy: { enabled: true, paths: [".workbuddy/skills"] },
+      "workbuddy-ai": { enabled: true, paths: [".workbuddy-ai/skills"] },
       antigravity: { enabled: true, paths: [".gemini/antigravity/skills", ".gemini/config/skills"] },
       agents: { enabled: false, paths: [".agents/skills"] },
       cursor: { name: "Cursor", icon: "ph-robot", enabled: true, paths: ["C:\\Users\\demo\\.cursor\\skills"] },
@@ -123,6 +127,9 @@ function defaultConfig(): AppConfig {
     // 抄第二遍必然与 LOCALGW_CONFIG_DEFAULTS 漂移，而预览里读到的字段名/默认值
     // 正是页面「后端未接入时的渲染基线」，漂了就等于预览给了假绿灯。
     localgw: JSON.parse(JSON.stringify(LOCALGW_CONFIG_DEFAULTS)) as LocalgwConfig,
+    // 桌宠组件：与上面 localgw 同款——直接克隆 types 里的权威默认值，不再手抄一份，
+    // 否则设置页在浏览器预览里读 app.config.pet.size 会拿到 undefined
+    pet: JSON.parse(JSON.stringify(PET_CONFIG_DEFAULTS)) as PetConfig,
   };
 }
 
@@ -140,6 +147,19 @@ function read(): AppConfig {
   } catch {
     return def;
   }
+}
+
+/** 桌宠配置的深合并补全：localStorage 里可能是旧结构（缺字段），
+ *  与 electron/pet/pet-config.cjs 的 normalize 同口径——预览里也不能出现 undefined.size */
+function mergePet(base: Partial<PetConfig> | undefined, patch: Partial<PetConfig> = {}): PetConfig {
+  return {
+    ...structuredClone(PET_CONFIG_DEFAULTS),
+    ...(base || {}),
+    ...patch,
+    pos: { ...PET_CONFIG_DEFAULTS.pos, ...(base?.pos || {}), ...(patch.pos || {}) },
+    rightMenu: { ...PET_CONFIG_DEFAULTS.rightMenu, ...(base?.rightMenu || {}), ...(patch.rightMenu || {}) },
+    optimize: { ...PET_CONFIG_DEFAULTS.optimize, ...(base?.optimize || {}), ...(patch.optimize || {}) },
+  };
 }
 
 /** 预览用更新状态：模拟「检测到新版本」，让设置页更新卡片各分支可被查看 */
@@ -164,6 +184,9 @@ const TOOLS = [
   { id: "zcode", name: "ZCode", icon: "ph-terminal-window", builtin: true, deletable: false, enabled: true, dir: "C:\\Users\\demo\\.zcode\\skills", candidatePaths: ["~/.zcode/skills"] },
   { id: "codex", name: "Codex CLI", icon: "ph-command", builtin: true, deletable: false, enabled: true, dir: "C:\\Users\\demo\\.codex\\skills", candidatePaths: ["~/.codex/skills"] },
   { id: "claude", name: "Claude Code", icon: "ph-sparkle", builtin: true, deletable: false, enabled: true, dir: "C:\\Users\\demo\\.claude\\skills", candidatePaths: ["~/.claude/skills"] },
+  { id: "dsh", name: "DeepSeek Harness", icon: "ph-brain", builtin: true, deletable: false, enabled: true, dir: "C:\\Users\\demo\\.dsh\\skills", candidatePaths: ["~/.dsh/skills"] },
+  { id: "workbuddy", name: "WorkBuddy", icon: "ph-chat-circle", builtin: true, deletable: false, enabled: true, dir: "C:\\Users\\demo\\.workbuddy\\skills", candidatePaths: ["~/.workbuddy/skills"] },
+  { id: "workbuddy-ai", name: "WorkBuddy AI", icon: "ph-chat-circle-text", builtin: true, deletable: false, enabled: true, dir: "C:\\Users\\demo\\.workbuddy-ai\\skills", candidatePaths: ["~/.workbuddy-ai/skills"] },
   { id: "antigravity", name: "Antigravity", icon: "ph-airplane-tilt", builtin: true, deletable: false, enabled: false, dir: null, candidatePaths: ["~/.gemini/antigravity/skills", "~/.gemini/config/skills"] },
   { id: "agents", name: "通用 ~/.agents", icon: "ph-package", builtin: true, deletable: false, enabled: false, dir: null, candidatePaths: ["~/.agents/skills"] },
   { id: "cursor", name: "Cursor", icon: "ph-robot", builtin: false, deletable: true, enabled: true, dir: "C:\\Users\\demo\\.cursor\\skills", candidatePaths: ["C:\\Users\\demo\\.cursor\\skills"] },
@@ -652,7 +675,7 @@ const MOCK_CFG: Record<string, unknown> = {
   index: { dualIndex: true, titleBoost: 3, debounceMs: 2000 },
   search: { recallTopK: 20, finalTopK: 8, timeDecayHalfLife: 30, synonymsEnabled: true, graphExpansionDepth: 1, graphExpansionMax: 5 },
   classify: { fuzzyThreshold: 0.62, gitPreferred: true, autoCreateProject: false, pathReverse: true },
-  agents: { enabled: ["zcode", "codex", "workbuddy", "claude"], custom: [], autoVerify: true, verifyInterval: 300, injectAgentsMd: true, coreMaxTokens: 800, digestMaxLines: 200, searchMaxTokens: 1200 },
+  agents: { enabled: ["zcode", "codex", "workbuddy", "workbuddy-ai", "claude"], custom: [], autoVerify: true, verifyInterval: 300, injectAgentsMd: true, coreMaxTokens: 800, digestMaxLines: 200, searchMaxTokens: 1200 },
   deep: { enabled: true, batchSize: 50, personaEnabled: true, personaMinMemories: 30, evidenceRequired: true, distillMaxPerProject: 200 },
   timeline: { enabled: true, autoDetect: true, requireConfirm: true },
   auto: { enabled: true, dailyTokenLimit: 200000, overBudgetAction: "pause", logKeepDays: 30, logKeepCount: 200, tasks: {} },
@@ -781,9 +804,11 @@ const MEM_DIGEST_TEXT = [
 const MEM_AGENTS = [
   { id: "zcode", name: "ZCode", enabled: true, note: "", configPath: "C:\\Users\\demo\\.zcode\\cli\\config.json", configExists: true, format: "json-mcp.servers", snippetHint: "写入 ~/.zcode/cli/config.json 的 mcp.servers", instructionPath: "C:\\Users\\demo\\.zcode\\AGENTS.md", instructionExists: true, injected: true, verifyConfig: { ok: true, message: "已配置" }, beat: { lastCall: NOW - 600000, calls: 8, writes: 12, searches: 31, errors: 0, lastTool: "memory_search" }, pathReady: true },
   { id: "codex", name: "Codex CLI", enabled: true, note: "", configPath: "C:\\Users\\demo\\.codex\\config.toml", configExists: true, format: "toml-mcp_servers", snippetHint: "写入 ~/.codex/config.toml 的 [mcp_servers.agenthub-memory]", instructionPath: "C:\\Users\\demo\\.codex\\AGENTS.md", instructionExists: true, injected: true, verifyConfig: { ok: true, message: "已配置" }, beat: null, pathReady: true },
-  { id: "workbuddy", name: "WorkBuddy", enabled: true, note: "", configPath: "C:\\Users\\demo\\.workbuddy-ai\\mcp.json", configExists: true, format: "json-mcpServers", snippetHint: "写入 ~/.workbuddy-ai/mcp.json 的 mcpServers", instructionPath: "C:\\Users\\demo\\.workbuddy-ai\\AGENTS.md", instructionExists: false, injected: false, verifyConfig: { ok: false, message: "配置文件中没有 agenthub-memory 条目" }, beat: null, pathReady: true },
+  { id: "workbuddy", name: "WorkBuddy", enabled: true, note: "", configPath: "C:\\Users\\demo\\.workbuddy\\mcp.json", configExists: true, format: "json-mcpServers", snippetHint: "写入 ~/.workbuddy/mcp.json 的 mcpServers（中国版，与 WorkBuddy AI 分开配置）", instructionPath: "C:\\Users\\demo\\.workbuddy\\AGENTS.md", instructionExists: false, injected: false, verifyConfig: { ok: false, message: "配置文件中没有 agenthub-memory 条目" }, beat: null, pathReady: true },
+  // WorkBuddy AI 是独立产品（国际版 ~/.workbuddy-ai）：旧版注入残留的 workbuddy 归属在预览里也复现一次
+  { id: "workbuddy-ai", name: "WorkBuddy AI", enabled: true, note: "", configPath: "C:\\Users\\demo\\.workbuddy-ai\\mcp.json", configExists: true, format: "json-mcpServers", snippetHint: "写入 ~/.workbuddy-ai/mcp.json 的 mcpServers（国际版，与 WorkBuddy 分开配置）", instructionPath: "C:\\Users\\demo\\.workbuddy-ai\\AGENTS.md", instructionExists: true, injected: true, verifyConfig: { ok: true, message: "已配置", warning: "配置里的 AGENTHUB_AGENT 是「workbuddy」而不是「workbuddy-ai」：真实调用会记到 workbuddy 名下，请重新注入以修正归属" }, beat: null, pathReady: true },
   { id: "claude", name: "Claude Code", enabled: true, note: "Claude Code 不直接读 AGENTS.md，受控块写 CLAUDE.md", configPath: "C:\\Users\\demo\\.claude.json", configExists: true, format: "json-mcpServers", snippetHint: "写入 ~/.claude.json 的 mcpServers", instructionPath: "C:\\Users\\demo\\.claude\\CLAUDE.md", instructionExists: true, injected: false, verifyConfig: { ok: false, message: "配置文件中没有 agenthub-memory 条目" }, beat: null, pathReady: true },
-  // 真实机器上已接入 8 个；预览也凑够 8 个，才看得出「列表长过图表高度」时的卡片表现
+  // 预览凑够 9 张卡，才看得出「列表长过图表高度」时的卡片表现
   { id: "dsh", name: "DeepSeek Harness", enabled: true, note: "", configPath: "C:\\Users\\demo\\.dsh\\mcp.json", configExists: true, format: "json-mcpServers", snippetHint: "写入 ~/.dsh/mcp.json 的 mcpServers", instructionPath: "C:\\Users\\demo\\.dsh\\AGENTS.md", instructionExists: true, injected: false, verifyConfig: { ok: false, message: "配置文件中没有 agenthub-memory 条目" }, beat: null, pathReady: true },
   { id: "trae-solo", name: "Trae Solo", enabled: true, note: "", configPath: "C:\\Users\\demo\\.trae-solo\\mcp.json", configExists: true, format: "json-mcpServers", snippetHint: "写入 ~/.trae-solo/mcp.json 的 mcpServers", instructionPath: "C:\\Users\\demo\\.trae-solo\\AGENTS.md", instructionExists: true, injected: false, verifyConfig: { ok: false, message: "配置文件中没有 agenthub-memory 条目" }, beat: null, pathReady: true },
   { id: "trae", name: "Trae", enabled: true, note: "", configPath: "C:\\Users\\demo\\.trae\\mcp.json", configExists: true, format: "json-mcpServers", snippetHint: "写入 ~/.trae/mcp.json 的 mcpServers", instructionPath: "C:\\Users\\demo\\.trae\\AGENTS.md", instructionExists: true, injected: false, verifyConfig: { ok: false, message: "配置文件中没有 agenthub-memory 条目" }, beat: null, pathReady: true },
@@ -1069,26 +1094,60 @@ const LGW_ROUTE_STATE = {
 };
 
 const LGW_KEYS: {
-  id: string; name: string; keyPrefix: string; scopes: string[]; expiresAt: number | null;
-  concurrency: number; ratePerMin: number; status: "active" | "revoked";
+  id: string; name: string; keyPrefix: string; secret?: string; scopes: string[]; expiresAt: number | null;
+  concurrency: number; ratePerMin: number; status: "active" | "disabled";
   createdAt: number; lastUsedAt: number | null; totalRequests: number; totalTokens: number;
 }[] = [
-  { id: "lk1", name: "IDE 主 Key", keyPrefix: "sk-lgw-9f2c", scopes: ["*"], expiresAt: null, concurrency: 8, ratePerMin: 120, status: "active", createdAt: NOW - 6 * 86400000, lastUsedAt: NOW - 4 * 60000, totalRequests: 1284, totalTokens: 312400 },
-  { id: "lk2", name: "Trae 专用", keyPrefix: "sk-lgw-31bc", scopes: ["trae"], expiresAt: NOW + 30 * 86400000, concurrency: 4, ratePerMin: 60, status: "active", createdAt: NOW - 3 * 86400000, lastUsedAt: NOW - 42 * 60000, totalRequests: 403, totalTokens: 96400 },
-  // 已吊销：列表里能看到"已吊销"态与「吊销后不可用」的视觉
-  { id: "lk3", name: "旧测试 Key", keyPrefix: "sk-lgw-4419", scopes: ["workbuddy"], expiresAt: null, concurrency: 8, ratePerMin: 120, status: "revoked", createdAt: NOW - 20 * 86400000, lastUsedAt: null, totalRequests: 12, totalTokens: 2100 },
+  { id: "lk1", name: "IDE 主 Key", keyPrefix: "sk-lgw-9f2c", secret: "sk-lgw-9f2cQ3zR7mK2pV8xT4nB6cD1fG5hJ0a", scopes: ["*"], expiresAt: null, concurrency: 8, ratePerMin: 120, status: "active", createdAt: NOW - 6 * 86400000, lastUsedAt: NOW - 4 * 60000, totalRequests: 1284, totalTokens: 312400 },
+  { id: "lk2", name: "Trae 专用", keyPrefix: "sk-lgw-31bc", secret: "sk-lgw-31bcH7tY2nL5qW9sR3eA8uZ6vD4mK0pX", scopes: ["trae"], expiresAt: NOW + 30 * 86400000, concurrency: 4, ratePerMin: 60, status: "active", createdAt: NOW - 3 * 86400000, lastUsedAt: NOW - 42 * 60000, totalRequests: 403, totalTokens: 96400 },
+  // 已停用 + 完整值不可恢复（旧口径创建的存量行）：预览里同时能看到「停用」标签与「不可恢复」兜底
+  { id: "lk3", name: "旧测试 Key", keyPrefix: "sk-lgw-4419", secret: "", scopes: ["workbuddy"], expiresAt: null, concurrency: 8, ratePerMin: 120, status: "disabled", createdAt: NOW - 20 * 86400000, lastUsedAt: null, totalRequests: 12, totalTokens: 2100 },
 ];
 
-const LGW_MODELS: { id: string; display: string; channel: string; realModel: string; source: "channel" | "override" | "alias" | "custom" }[] = [
-  { id: "deepseek-v4-flash", display: "deepseek-v4-flash", channel: "trae", realModel: "deepseek-v4-flash", source: "channel" },
-  { id: "glm-4.6", display: "glm-4.6", channel: "trae", realModel: "glm-4.6", source: "channel" },
+const LGW_MODELS: {
+  id: string;
+  display: string;
+  channel: string;
+  realModel: string;
+  source: "channel" | "override" | "alias" | "custom" | "channel-lock";
+  /** 该模型真实存在的渠道（行内渠道锁定下拉的选项；真机由 models.list() 计算） */
+  sources?: string[];
+}[] = [
+  { id: "deepseek-v4-flash", display: "deepseek-v4-flash", channel: "trae", realModel: "deepseek-v4-flash", source: "channel", sources: ["trae"] },
+  // 多源模型：用来演示「行内渠道锁定」可选渠道来自 sources，以及单源行下拉禁用
+  { id: "glm-4.6", display: "glm-4.6", channel: "trae", realModel: "glm-4.6", source: "channel", sources: ["trae", "zcode"] },
   // override：对外名不变，实际打到别的渠道
-  { id: "claude-sonnet-4.5", display: "claude-sonnet-4.5", channel: "workbuddy", realModel: "claude-sonnet-4.5-20250929", source: "override" },
+  { id: "claude-sonnet-4.5", display: "claude-sonnet-4.5", channel: "workbuddy", realModel: "claude-sonnet-4.5-20250929", source: "override", sources: ["workbuddy"] },
   // alias：对外暴露别名，实际打目标模型
-  { id: "gpt-4o", display: "gpt-4o", channel: "workbuddy", realModel: "gpt-5", source: "alias" },
+  { id: "gpt-4o", display: "gpt-4o", channel: "workbuddy", realModel: "gpt-5", source: "alias", sources: ["workbuddy"] },
   // custom：渠道都不认识的自定义模型
-  { id: "my-local-llm", display: "my-local-llm", channel: "trae", realModel: "qwen3-max", source: "custom" },
+  { id: "my-local-llm", display: "my-local-llm", channel: "trae", realModel: "qwen3-max", source: "custom", sources: ["trae"] },
+  // 另一条多源模型（未锁）：和 glm-4.6 对出「已锁 / 未锁」两态
+  { id: "qwen3-max", display: "qwen3-max", channel: "trae", realModel: "qwen3-max", source: "channel", sources: ["trae", "zcode"] },
 ];
+
+/** 渠道原生模型清单（localgw_models_channel_models 的预览数据）：真机来自各渠道适配器的原生目录，
+ *  这里按 mock 渠道造几条，够验「切渠道 → 模型下拉清单跟着换」这条交互。未显式列出的渠道
+ *  回落到 LGW_MODELS 里该渠道的现存行；两者都没有 = 空清单（与真机「该渠道暂无模型」同语义）。 */
+const LGW_CHANNEL_MODELS: Record<string, { id: string; realModel: string }[]> = {
+  trae: [
+    { id: "deepseek-v4-flash", realModel: "deepseek-v4-flash" },
+    { id: "glm-4.6", realModel: "glm-4.6" },
+    { id: "qwen3-max", realModel: "qwen3-max" },
+  ],
+  workbuddy: [
+    { id: "claude-sonnet-4.5", realModel: "claude-sonnet-4.5-20250929" },
+    { id: "gpt-5", realModel: "gpt-5" },
+    { id: "gpt-5-mini", realModel: "gpt-5-mini" },
+  ],
+  zcode: [
+    { id: "glm-5.3", realModel: "glm-5.3" },
+    { id: "glm-5.3-air", realModel: "glm-5.3-air" },
+    // 多源模型的第二来源（验证行内渠道锁可选到另一个渠道）
+    { id: "glm-4.6", realModel: "glm-4.6" },
+    { id: "qwen3-max", realModel: "qwen3-max" },
+  ],
+};
 
 /** 最近请求流水（倒序，与后端 ORDER BY ts DESC 同序）：给日志页 + 侧栏「网关流量」聚合用 */
 const LGW_LOGS = [
@@ -1146,6 +1205,32 @@ const LGW_STATE = { running: false, port: 9527, bind: "127.0.0.1", autostart: fa
 
 /** 配置段的预览副本：以 defaultConfig().localgw 为初值，patch 深合并写回（与后端 config.cjs 的 normalize 同语义） */
 const LGW_CONFIG: Record<string, unknown> = JSON.parse(JSON.stringify(defaultConfig().localgw));
+
+/** 预览预置一条渠道锁：一进 Tab1 就能同时看到「已锁 / 未锁」两种行 */
+{
+  const lgwModels = LGW_CONFIG.models as Record<string, unknown>;
+  const locks = (lgwModels.channelLocks as Record<string, string> | undefined) || ({} as Record<string, string>);
+  locks["glm-4.6"] = "zcode";
+  lgwModels.channelLocks = locks;
+}
+
+/** 行内「渠道锁定」的预览视图：与 electron/backend/localgw/models.cjs 的 list() 同口径——
+ *  锁生效时该行改成 source=channel-lock、channel/realModel 指向锁渠道；
+ *  锁失效（目标渠道没有该模型）时只回传 lockChannel（前端据此提示并允许取消）；
+ *  被改名绑定接管的行（override/custom）锁不生效。 */
+function lgwModelsView() {
+  const lgwModels = LGW_CONFIG.models as Record<string, unknown>;
+  const locks = (lgwModels.channelLocks as Record<string, string> | undefined) || ({} as Record<string, string>);
+  return LGW_MODELS.map((m) => {
+    const lock = locks[m.display] || locks[m.id] || "";
+    const sources = m.sources || [m.channel];
+    const base = { ...m, sources, lockChannel: lock, renameLocked: m.source === "override" || m.source === "custom" };
+    if (!lock || base.renameLocked) return base;
+    const target = (LGW_CHANNEL_MODELS[lock] || []).find((r) => r.id === m.id);
+    if (!target) return base;
+    return { ...base, channel: lock, realModel: target.realModel, source: "channel-lock" as const };
+  });
+}
 
 /** 深合并（数组整体覆盖）：与 electron/backend/localgw/config.cjs 的 mergeDeep 同语义 */
 function lgwMergeDeep(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
@@ -1434,14 +1519,14 @@ export const mock = {
             "review.autoConfirmSupersede": { type: "boolean", def: false, label: "自动确认事实失效", group: "自动化", hot: true, tier: "advanced" },
             "review.autoConfirmClassify": { type: "boolean", def: false, label: "自动确认项目归类", group: "自动化", hot: true, tier: "advanced" },
             "review.autoConfirmDedup": { type: "boolean", def: false, label: "自动确认去重采纳", group: "自动化", hot: true, tier: "advanced" },
-            "review.autoConfirmMinConfidence": { type: "number", def: 0.8, min: 0.5, max: 1, step: 0.05, label: "自动采纳置信下限", group: "自动化", hot: true, tier: "advanced" },
+            "review.autoConfirmMinConfidence": { type: "number", def: 0.8, min: 0.5, max: 1, step: 0.05, label: "低置信提示阈值", group: "自动化", hot: true, tier: "advanced" },
             "dedup.l2.autoMergeThreshold": { type: "number", def: 0.9, min: 0.5, max: 1, step: 0.01, label: "L2 自动合并阈值", group: "去重", hot: true },
             // 后端 schema 默认即 false（避免无意耗 token），mock 同口径
             "dedup.l4.enabled": { type: "boolean", def: false, label: "L4 语义判定（耗 token）", group: "去重", hot: true },
             "import.dryRunFirst": { type: "boolean", def: true, label: "导入前必须干跑预览", group: "导入", hot: true },
             "import.batchSize": { type: "number", def: 200, min: 20, max: 2000, label: "每批写入条数", group: "导入", hot: true },
             "import.maxBatchBytes": { type: "number", def: 8388608, min: 1048576, max: 8388608, label: "单批/解压字节上限（单批上限 8MB）", group: "导入", hot: true, desc: "解析器单批/单块字节上限，引擎内部硬顶 8MB，调大无效" },
-            "agents.enabled": { type: "multiselect", def: ["zcode", "codex", "workbuddy", "claude"], options: ["zcode", "codex", "workbuddy", "claude", "cursor", "agents"], label: "启用的 Agent", group: "Agent 接入", hot: true },
+            "agents.enabled": { type: "multiselect", def: ["zcode", "codex", "workbuddy", "workbuddy-ai", "claude"], options: ["zcode", "codex", "workbuddy", "workbuddy-ai", "claude", "cursor", "agents"], label: "启用的 Agent", group: "Agent 接入", hot: true },
             "privacy.redact": { type: "boolean", def: false, label: "写入前脱敏", group: "隐私", hot: true },
             "privacy.pause": { type: "boolean", def: false, label: "隐私模式（暂停一切采集）", group: "隐私", hot: true },
             "sync.auto": { type: "boolean", def: true, label: "自动定时同步", group: "同步", hot: true },
@@ -1529,6 +1614,8 @@ export const mock = {
         return { ok: true, moved: 0 };
       case "memory_project_attach":
         return { ok: true, isRepo: true, addedRemotes: ["example/demo-repo"], localPath: "C:/tmp/work/demo-repo" };
+      case "memory_project_organize":
+        return { ok: true, dryRun: true, groups: 1, merged: 0, moved: 0, adopted: 0, healed: 0, pruned: 0, regrouped: 0, normalized: 0, plan: [{ target: "huidada1--agenthub", targetName: "AgentHub", sources: [{ slug: "agenthub", name: "AgentHub", count: 312 }] }] };
       case "memory_project_suggest":
         return { items: [{ id: "rq_1", slug: "HUIdada1--AgentHub", name: "AgentHub", score: 0.79, candidate: "记忆中枢设计", memoryId: MEM_ROWS[1].id, title: MEM_ROWS[1].title, path: MEM_ROWS[1].path }] };
       case "memory_index_status":
@@ -1805,7 +1892,8 @@ export const mock = {
           { id: "zcode-tx", name: "ZCode 实时日志", kind: "jsonl", path: "C:\\Users\\demo\\.zcode\\cli\\agents", enabled: true, exists: true, items: 62, sizeBytes: 81920, note: "", estimate: "已读字节水位合计 80 KB，本次按增量续读", cursor: { files: {} } },
           { id: "claude", name: "Claude Code 会话", kind: "jsonl", path: "C:\\Users\\demo\\.claude\\projects", enabled: true, exists: true, items: 38, sizeBytes: 40960, note: "", estimate: "首次导入，将全量扫描", cursor: null },
           { id: "codex", name: "Codex 会话", kind: "jsonl", path: "C:\\Users\\demo\\.codex\\sessions", enabled: true, exists: true, items: 12, sizeBytes: 20480, note: "", estimate: "首次导入，将全量扫描", cursor: null },
-          { id: "workbuddy", name: "WorkBuddy 会话", kind: "jsonl", path: "C:\\Users\\demo\\.workbuddy-ai", enabled: true, exists: true, items: 5, sizeBytes: 10240, note: "", estimate: "首次导入，将全量扫描", cursor: null },
+          { id: "workbuddy", name: "WorkBuddy 会话（中国版）", kind: "jsonl", path: "C:\\Users\\demo\\.workbuddy\\projects", enabled: true, exists: true, items: 22, sizeBytes: 245760, note: "", estimate: "首次导入，将全量扫描", cursor: null },
+          { id: "workbuddy-ai", name: "WorkBuddy AI 会话（国际版）", kind: "jsonl", path: "C:\\Users\\demo\\.workbuddy-ai\\projects", enabled: true, exists: true, items: 75, sizeBytes: 838860, note: "", estimate: "首次导入，将全量扫描", cursor: null },
           { id: "trae", name: "Trae 系会话（Trae / CN / SOLO）", kind: "trae", path: "C:\\Users\\demo\\AppData\\Roaming", enabled: true, exists: true, items: 2, sizeBytes: 424673280, note: "已识别 Trae / Trae CN 的加密会话库", estimate: "Trae 已读到 id=1798 · Trae CN 已读到 id=920，本次按增量续读", cursor: { files: { Trae: { lastId: 1798 }, "Trae CN": { lastId: 920 } } } },
           { id: "antigravity", name: "Antigravity 会话（Antigravity / IDE）", kind: "antigravity", path: "C:\\Users\\demo\\.gemini", enabled: true, exists: true, items: 322, sizeBytes: 24117248, note: "已识别 antigravity / antigravity-ide 的 322 份会话日志", estimate: "已记录 89 份会话日志的读取水位，本次只读新增内容", cursor: { files: {} } },
           { id: "notes-md", name: "Markdown 笔记目录", kind: "md", path: "", enabled: false, exists: false, items: 0, sizeBytes: 0, note: "未配置路径", estimate: "", cursor: null },
@@ -2693,13 +2781,14 @@ export const mock = {
       case "localgw_keys_create": {
         const name = String(args?.name || "").trim();
         if (!name) return { ok: false, message: "请填写密钥名称" };
-        // rawKey 只在这一条响应里出现一次（决策 3）：落"库"的只有前缀，预览同样不回显明文
+        // 与真机同口径：完整 Key 加密落"库"，列表可随时查看 / 复制
         const body = Math.random().toString(36).slice(2, 10);
         const rawKey = `sk-lgw-${body}${Math.random().toString(36).slice(2, 10)}`;
         const row = {
           id: `lk_${Date.now()}`,
           name,
           keyPrefix: rawKey.slice(0, 12),
+          secret: rawKey,
           scopes: Array.isArray(args?.scopes) && (args?.scopes as string[]).length ? (args?.scopes as string[]) : ["*"],
           expiresAt: (args?.expiresAt as number) || null,
           concurrency: Number(args?.concurrency) || 8,
@@ -2714,10 +2803,37 @@ export const mock = {
         return { ok: true, rawKey, apiKey: JSON.parse(JSON.stringify(row)) };
       }
 
+      case "localgw_keys_update": {
+        const hit = LGW_KEYS.find((k) => k.id === args?.id);
+        if (!hit) return { ok: false, message: "密钥不存在（可能已被删除）" };
+        const p = (args?.patch || {}) as Record<string, unknown>;
+        if (p.name !== undefined) hit.name = String(p.name || "").trim() || "未命名";
+        if (p.scopes !== undefined) hit.scopes = Array.isArray(p.scopes) && p.scopes.length ? (p.scopes as string[]) : ["*"];
+        // null = 改成永不过期（与真机同一语义：undefined 不动、null 清空）
+        if (p.expiresAt !== undefined) hit.expiresAt = Number(p.expiresAt) > 0 ? Number(p.expiresAt) : null;
+        if (p.concurrency !== undefined) hit.concurrency = Math.max(1, Math.min(64, Math.round(Number(p.concurrency) || 8)));
+        if (p.ratePerMin !== undefined) hit.ratePerMin = Math.max(1, Math.round(Number(p.ratePerMin) || 120));
+        return { ok: true, apiKey: JSON.parse(JSON.stringify(hit)) };
+      }
+
+      case "localgw_keys_set_status": {
+        const hit = LGW_KEYS.find((k) => k.id === args?.id);
+        if (!hit) return { ok: false, message: "密钥不存在（可能已被删除）" };
+        hit.status = args?.status === "active" ? "active" : "disabled";
+        return { ok: true, changed: true, status: hit.status };
+      }
+
+      case "localgw_keys_delete": {
+        const idx = LGW_KEYS.findIndex((k) => k.id === args?.id);
+        if (idx < 0) return { ok: true, changed: false };
+        LGW_KEYS.splice(idx, 1);
+        return { ok: true, changed: true };
+      }
+
       case "localgw_keys_revoke": {
         const hit = LGW_KEYS.find((k) => k.id === args?.id);
         if (!hit) return { ok: false, message: "密钥不存在（可能已被删除）" };
-        hit.status = "revoked";
+        hit.status = "disabled";
         return { ok: true };
       }
 
@@ -2758,7 +2874,17 @@ export const mock = {
         return { ok: true, latencyMs: 320, note: "浏览器预览 mock：未真实打上游" };
 
       case "localgw_models_list":
-        return JSON.parse(JSON.stringify(LGW_MODELS));
+        // 行内渠道锁在预览里也要生效：视图层按 channelLocks 改写，与真机 models.list() 同口径
+        return JSON.parse(JSON.stringify(lgwModelsView()));
+
+      // 某渠道的原生模型清单（「覆盖与自定义」表单的「实际模型名」下拉）：
+      // 真机读的是该渠道适配器目录，预览用 LGW_CHANNEL_MODELS 造几条，切渠道即换清单
+      case "localgw_models_channel_models": {
+        const channel = String(args?.channel || "");
+        const rows = LGW_CHANNEL_MODELS[channel]
+          || LGW_MODELS.filter((m) => m.channel === channel).map((m) => ({ id: m.id, realModel: m.realModel }));
+        return JSON.parse(JSON.stringify(rows));
+      }
 
       case "localgw_models_set_override": {
         const model = String(args?.model || "");
@@ -2779,6 +2905,25 @@ export const mock = {
         const hit = LGW_MODELS.find((m) => m.id === from);
         if (hit) Object.assign(hit, row);
         else LGW_MODELS.push(row);
+        return { ok: true };
+      }
+
+      // 渠道锁定（v1.82.2「渠道覆盖」）：channel 传空 = 清除；与真机同校验「该渠道有没有这个模型」
+      case "localgw_models_set_channel_lock": {
+        const model = String(args?.model || "").trim();
+        const channel = String(args?.channel || "").trim();
+        if (!model) return { ok: false, message: "缺少模型名" };
+        const lgwModels = (LGW_CONFIG.models || {}) as Record<string, unknown>;
+        const locks = { ...((lgwModels.channelLocks as Record<string, string>) || {}) };
+        for (const key of Object.keys(locks)) {
+          if (key.toLowerCase() === model.toLowerCase()) delete locks[key];
+        }
+        if (channel) {
+          const known = LGW_MODELS.some((m) => (m.id === model || m.display === model) && (m.sources || [m.channel]).includes(channel));
+          if (!known) return { ok: false, message: `渠道「${channel}」没有模型 ${model}，不能锁定` };
+          locks[model] = channel;
+        }
+        lgwModels.channelLocks = locks;
         return { ok: true };
       }
 
@@ -3042,6 +3187,44 @@ export const mock = {
         }
         return { ok: true, action: existed ? "updated" : "inserted", appType, dbPath: CCS_STATE.dbPath, name: `AgentHub 网关（${appType}）`, backupPath: "C:\\Users\\demo\\.cc-switch\\backups\\cc-switch.db.bak_agenthub_demo" };
       }
+      // ===== 桌宠组件（悬浮桌宠 · 卡冈图雅）=====
+      // 浏览器预览没有真实悬浮窗，只把配置读写跑通；窗口状态按 enabled 推导，
+      // 页面据此显示「已显示 / 已关闭」，让设置页各分支都能被看到。
+      case "pet_status": {
+        const cfg = read();
+        const pet = mergePet(cfg.pet);
+        return {
+          ok: true,
+          config: pet,
+          visible: !!pet.enabled,
+          windowReady: !!pet.enabled,
+          screenSampleSupported: false, // 预览里拿不到屏幕捕获源，设置页据此提示「仅桌面端生效」
+          version: "0.1.0",
+        };
+      }
+      case "pet_config_save": {
+        const cfg = read();
+        const pet = mergePet(cfg.pet, (args?.patch as Partial<PetConfig>) || {});
+        cfg.pet = pet;
+        localStorage.setItem(KEY, JSON.stringify(cfg));
+        return { ok: true, config: pet };
+      }
+      case "pet_set_enabled": {
+        const cfg = read();
+        const pet = mergePet(cfg.pet, { enabled: !!args?.enabled });
+        cfg.pet = pet;
+        localStorage.setItem(KEY, JSON.stringify(cfg));
+        return { ok: true, visible: !!pet.enabled, config: pet };
+      }
+      case "pet_reset_position":
+        return { ok: true };
+      case "pet_usage_today":
+        return { ok: true, tokens: 184230, text: "今日用量 18.42 万 token" };
+      case "pet_optimize_preview":
+        return {
+          ok: true,
+          message: "读取方式：自动读前台输入框 · 键盘模拟：浏览器预览不可用 · 回填：开启 · 风格：跟随默认",
+        };
       default:
         if (String(cmd).startsWith("memory_")) {
           throw new Error(`记忆中枢命令 ${cmd} 在浏览器预览下未实现`);

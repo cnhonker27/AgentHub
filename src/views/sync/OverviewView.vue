@@ -58,7 +58,7 @@ watch(
       today: s.todayTokens,
       records: s.recordCount,
     });
-    anim.value.hit = s.cacheHitRate * 100;
+    anim.value.hit = s.cacheHitRate == null ? 0 : s.cacheHitRate * 100;
   },
   { immediate: true }
 );
@@ -69,7 +69,17 @@ const activeSourceEnabled = computed(() => app.activeSourceEnabled);
 
 const selectedDev = computed(() => usage.selectedDevice);
 const isFiltered = computed(() => usage.isFiltered);
-const todayHitPct = computed(() => (usage.summary?.todayCacheHitRate || 0) * 100);
+const todayHitPct = computed(() => (usage.summary?.todayCacheHitRate ?? null));
+const hasHitRate = computed(() => usage.summary != null && usage.summary.cacheHitRate != null);
+const hasTodayHitRate = computed(() => usage.summary != null && usage.summary.todayCacheHitRate != null);
+// 本范围是否有「缓存口径可得」的记录：false 表示来源本身取不到缓存拆分（如商汤小浣熊），
+// 命中率显示「-」并用专门文案，不能笼统说成「无 token 明细」
+const cacheStatsAvailable = computed(() => usage.summary?.cacheStatsAvailable !== false);
+// 今日同理：全期可能可得（别的日子用过有缓存的源），但今天只有取不到缓存的来源
+const todayCacheStatsAvailable = computed(() => usage.summary?.todayCacheStatsAvailable !== false);
+
+const hasRecords = computed(() => (usage.summary?.recordCount ?? 0) > 0);
+const hasTodayRecords = computed(() => (usage.summary?.todayRecordCount ?? 0) > 0);
 
 onMounted(() => {
   if (activeSourceEnabled.value) usage.loadOverview();
@@ -162,28 +172,50 @@ function showSettings() {
           </div>
           <div class="kpi"><i class="k-line-glow"></i>
             <div class="k-label"><span class="kdot"></span>总计缓存命中率</div>
-            <div class="k-value mono">{{ (anim.hit || 0).toFixed(1) }}<span class="unit">%</span></div>
-            <div class="k-foot">命中 {{ formatToken(usage.summary?.cacheReadTokens || 0) }} / 输入 {{ formatToken(usage.summary?.inputTokens || 0) }}</div>
+            <div class="k-value mono">
+              <template v-if="hasHitRate">{{ (anim.hit || 0).toFixed(1) }}<span class="unit">%</span></template>
+              <template v-else>-</template>
+            </div>
+            <div class="k-foot">
+              <template v-if="hasHitRate">命中 {{ formatToken(usage.summary?.cacheReadTokens || 0) }} / 输入 {{ formatToken(usage.summary?.cacheInputTokens || 0) }}</template>
+              <template v-else-if="hasRecords && !cacheStatsAvailable">该来源不提供缓存数据，不计算命中率</template>
+              <template v-else>无 token 明细，不计算命中率</template>
+            </div>
           </div>
           <div class="kpi"><i class="k-line-glow"></i>
             <div class="k-label"><span class="kdot"></span>今日缓存命中率</div>
-            <div class="k-value mono">{{ todayHitPct.toFixed(1) }}<span class="unit">%</span></div>
-            <div class="k-foot">今日命中 {{ formatToken(usage.summary?.todayCacheReadTokens || 0) }} / 输入 {{ formatToken(usage.summary?.todayInputTokens || 0) }}</div>
+            <div class="k-value mono">
+              <template v-if="hasTodayHitRate">{{ ((todayHitPct || 0) * 100).toFixed(1) }}<span class="unit">%</span></template>
+              <template v-else>-</template>
+            </div>
+            <div class="k-foot">
+              <template v-if="hasTodayHitRate">今日命中 {{ formatToken(usage.summary?.todayCacheReadTokens || 0) }} / 输入 {{ formatToken(usage.summary?.todayCacheInputTokens || 0) }}</template>
+              <template v-else-if="!hasTodayRecords">今日无调用</template>
+              <template v-else-if="!todayCacheStatsAvailable">该来源不提供缓存数据，不计算命中率</template>
+              <template v-else>今日无 token 明细</template>
+            </div>
           </div>
           <div class="kpi"><i class="k-line-glow"></i>
             <div class="k-label"><span class="kdot"></span>总计调用次数</div>
-            <div class="k-value mono">{{ (anim.records || 0).toLocaleString("en-US") }}</div>
-            <div class="k-foot">{{ isFiltered ? '该机累计请求记录' : '全部设备累计请求记录' }}</div>
+            <div class="k-value mono">{{ hasRecords ? (anim.records || 0).toLocaleString("en-US") : "-" }}</div>
+            <div class="k-foot">{{ hasRecords ? (isFiltered ? '该机累计请求记录' : '全部设备累计请求记录') : '暂无请求记录' }}</div>
           </div>
           <div class="kpi"><i class="k-line-glow"></i>
             <div class="k-label"><span class="kdot"></span>今日调用次数</div>
-            <div class="k-value mono">{{ (usage.summary?.todayRecordCount || 0).toLocaleString("en-US") }}</div>
-            <div class="k-foot">今日 0 点起请求记录</div>
+            <div class="k-value mono">{{ hasTodayRecords ? (usage.summary?.todayRecordCount || 0).toLocaleString("en-US") : "-" }}</div>
+            <div class="k-foot">{{ hasTodayRecords ? '今日 0 点起请求记录' : '今日暂无请求记录' }}</div>
           </div>
         </div>
 
         <div class="top-heatmap-wrapper">
-          <Heatmap :data="usage.heatmap" @pick="pickedDay = $event" />
+          <Heatmap
+            :data="usage.heatmap"
+            :mode="usage.heatmapMode"
+            :year="usage.heatmapYear"
+            @pick="pickedDay = $event"
+            @change-mode="usage.setHeatmapMode($event)"
+            @change-year="usage.setHeatmapYear($event)"
+          />
         </div>
       </div>
 
