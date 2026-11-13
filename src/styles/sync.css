@@ -838,6 +838,32 @@ html[data-theme="light"] .sync-scope .icon-btn:hover {
   letter-spacing: 0;
 }
 
+/* Qoder/Qoder CN 额度点：卡片右下角小字，与 .k-label 同字号/字重/颜色；
+   脚注占左侧、点数占右侧，窄卡时脚注省略，点数不换行不溢出 */
+.sync-scope .top-kpis-grid .kpi .k-foot-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px;
+  min-width: 0;
+  margin-top: 1px;
+}
+
+.sync-scope .top-kpis-grid .kpi .k-foot-row .k-foot {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
+}
+
+.sync-scope .top-kpis-grid .kpi .k-foot-row .k-points {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.1;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
 .sync-scope .top-kpis-grid .kpi .k-foot {
   font-size: 10.5px;
   color: var(--text-3);

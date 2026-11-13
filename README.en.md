@@ -12,15 +12,15 @@
 
 AgentHub is a locally-run control center (Electron + Vue 3 + TypeScript). It ships no model of its own; it simply takes what is scattered across your AI coding tools and puts it under one roof: duplicate skill installs, where this month's tokens actually went, whether your subscription quota can be used by other clients, agents that never remember your project, the same prompt you keep rewriting in every new session, and quota you hold but cannot plug into your own IDE. Those six problems map to the six sections below.
 
-The **Windows desktop app** carries all six sections (see [Windows download & install](#windows-download--install)) and the **Docker image** (four-module headless + Web console, see [Docker deployment](#docker-deployment)). The former **Proxy Gateway** module is retired; its API forwarding capability is succeeded by the new **Local Gateway** section. The Docker image was restored in Nov 2026 in the new form.
+The **Windows desktop app** carries all six sections (see [Windows download & install](#windows-download--install)) and the **Docker image** (four-module headless + Web console, see [Docker deployment](#docker-deployment)). The **Local Gateway** exposes your upstream model services as an OpenAI / Anthropic compatible endpoint on the loopback interface, with upstreams added as custom providers.
 
 | Section | In one line | Who it's for |
 | --- | --- | --- |
-| **Usage Stats** | Aggregate token usage and cost from 21 data sources, sliced by day / project / model | Anyone who wants to know what this month actually cost |
+| **Usage Stats** | Aggregate token usage and cost from 22 data sources, sliced by day / project / model | Anyone who wants to know what this month actually cost |
 | **Memory Hub** | A local Markdown memory store plus an MCP server, so agents remember your project and preferences | Anyone tired of re-explaining context in every new session |
 | **Prompt Library** | Expand a one-liner into a well-formed prompt, keep the good ones, plus a curated catalogue of 60 | Anyone rewriting the same prompt, or unsure how to state a request clearly |
 | **Pool Keeper** | Collect accounts from every channel into one pool: balances, check-ins, cross-device sync | People holding quota across channels (Trae / WorkBuddy / Raccoon / ModelScope / ZCode / Qoder / Cline and 21 channels in total) who want to know what is left |
-| **Local Gateway** | Wrap your pool accounts into one local OpenAI / Anthropic compatible endpoint — change a single `base_url` | Anyone who wants their IDE, scripts or own services to use the pool's quota |
+| **Local Gateway** | Wrap your upstream model services into one local OpenAI / Anthropic compatible endpoint — change a single `base_url` | Anyone who wants their IDE, scripts or own services to reach several providers through one endpoint |
 | **Skill Library** | Collect every tool's skills into one central library, maintain once, mount back everywhere | People running Codex / Claude Code / ZCode / Cursor side by side |
 
 > The table order is the default left-sidebar navigation order (Usage Stats → Memory Hub → Prompt Library → Pool Keeper → Local Gateway → Skill Library). It can be dragged in **Settings · General**; once changed, the section numbers in this document no longer match the sidebar position — trust the sidebar.
@@ -56,7 +56,7 @@ Full details are in [SPONSOR.md](./SPONSOR.md).
 
 ## Docker deployment
 
-The Docker image is a headless form of four modules (Pool Keeper + Local Gateway + Prompt Library + Memory Hub) with a full Web console and REST admin API. It is designed for server deployment behind a reverse proxy (Nginx/Caddy) that terminates TLS.
+The Docker image is a headless form of four modules (Pool Keeper + Local Gateway + Prompt Library + Memory Hub) with a full Web console and REST admin API. It is designed for server deployment behind TLS termination (Nginx/Caddy), with upstream model services added as custom providers.
 
 ### Quick start
 
@@ -69,26 +69,38 @@ cd AgentHub
 cp gateway/.env.example gateway/.env
 # Edit gateway/.env and fill in your own keys and tokens:
 #   AGENTHUB_SECRET_KEY=your credential encryption key (user-defined, 32+ chars recommended)
-#   AGENTHUB_ADMIN_TOKEN=your admin password (user-defined, something memorable)
+#   AGENTHUB_ADMIN_TOKEN=your admin password (user-defined; required for remote access)
 
-# ③ Start (compose reads gateway/.env automatically)
+# ③ Prepare the data directory (owner must be uid 1000: the container runs as USER node)
+mkdir -p gateway-data && sudo chown 1000:1000 gateway-data
+
+# ④ Start (compose reads gateway/.env automatically)
 docker compose --env-file gateway/.env -f gateway/docker-compose.yml up -d --build
 ```
 
-- Gateway: `http://<host>:9527/v1` (OpenAI / Anthropic / Responses compatible)
-- Admin API: `http://127.0.0.1:9528/api` (binds to loopback by default)
-- Web console: `http://<host>:9528/` (log in with `AGENTHUB_ADMIN_TOKEN`)
+- Gateway: `http://<host>:19527/v1` (OpenAI / Anthropic / Responses compatible)
+- Admin API: `http://127.0.0.1:19528/api` (binds to host loopback by default)
+- Web console: `http://127.0.0.1:19528/` (log in with `AGENTHUB_ADMIN_TOKEN`)
+
+> The ports are **19527 / 19528**, not 9527 / 9528: the desktop app pins its local gateway to
+> `9527/127.0.0.1`, so reusing them on the same machine collides — and the collision shows up as
+> "the desktop gateway won't start". To keep the old ports, set `AGENTHUB_PROXY_PORT=9527` and
+> `AGENTHUB_ADMIN_PORT=9528` explicitly in `gateway/.env`.
 
 ### Environment variables
 
 | Variable | Required | Description |
 | --- | --- | --- |
 | `AGENTHUB_SECRET_KEY` | Yes | Credential encryption key (enc:v2 AES-256-GCM). **User-defined** — pick a long random string (32+ chars, alphanumeric). Entry refuses to start if unset. |
-| `AGENTHUB_ADMIN_TOKEN` | No | Admin API full token / Web console login password. **User-defined** — pick something memorable. If unset, admin UI binds to loopback only. |
-| `AGENTHUB_ADMIN_READONLY_TOKEN` | No | Read-only token (user-defined, different from full token): only read commands are allowed. |
-| `AGENTHUB_PROXY_PORT` / `AGENTHUB_HOST` | 9527 / 0.0.0.0 | Local gateway listen address. |
-| `AGENTHUB_ADMIN_PORT` | 9528 | Admin API port. |
+| `AGENTHUB_ADMIN_TOKEN` | Required for remote access | Admin API full token / Web console login password. **User-defined.** If unset the entry **forces the admin bind back to the container loopback** and prints a WARN (console unreachable, but the container still starts and HEALTHCHECK stays green); if you also set `AGENTHUB_ADMIN_PUBLIC=0.0.0.0` it **refuses to start**. |
+| `AGENTHUB_ADMIN_READONLY_TOKEN` | No | Read-only token (user-defined, different from full token): only read commands are allowed. Counts as a credential for the safety gate. |
+| `AGENTHUB_ADMIN_HOST` | 0.0.0.0 | Admin bind address **inside the container**. Leave it as is; the entry downgrades it to `127.0.0.1` when no token is set. |
+| `AGENTHUB_ADMIN_PUBLIC` | 127.0.0.1 | Address the admin plane is published on **on the host**: `127.0.0.1` = this machine only (default); `0.0.0.0` = all interfaces (raw port exposed — set a token first). |
+| `AGENTHUB_PROXY_PORT` / `AGENTHUB_HOST` | 19527 / 0.0.0.0 | Local gateway listen address. |
+| `AGENTHUB_ADMIN_PORT` | 19528 | Admin API port. |
+| `AGENTHUB_DATA_DIR_HOST` | `../gateway-data` | Host data directory (resolved relative to `gateway/`), mounted at `/data`. |
 | `TZ` | Asia/Shanghai | Business timezone (check-in and daily quota reset use local time). |
+
 
 > **Keys and tokens are user-defined**: you do not need `openssl` or any random generator. Pick a password you can remember (e.g. `MySecretKey2024` or `MyAdminPass-AgentHub`). The `.env` file is in `.gitignore` and will never be committed.
 
@@ -97,17 +109,23 @@ docker compose --env-file gateway/.env -f gateway/docker-compose.yml up -d --bui
 **Principle: desktop credentials are DPAPI-encrypted and the container cannot decrypt them — never share data volumes between the two forms. Accounts are transferred only via pool sync (WebDAV/S3).**
 
 1. **Recommended**: point the container at the same WebDAV/S3 as the desktop:
-   `PUT /api/config/webdav` writes the config and pool sync starts automatically (the passphrase envelope can be decrypted on both sides if `AGENTHUB_SECRET_KEY` is identical).
+   `PUT /api/config/webdav` persists the config; **the poolsync scheduler then picks it up**
+   (saving does not trigger an immediate sync in this build — "sync on save" ships with stage 3;
+   until then trigger `proxy_poolsync_run` to pull accounts right away).
+   **What makes the two forms interoperate is an identical WebDAV/S3 passphrase** on both sides
+   (passphrase envelope, magic `AHPPOOL1`, scrypt + AES-256-GCM). `AGENTHUB_SECRET_KEY` only
+   encrypts data **at rest inside the container** — it plays no part in cross-form decryption,
+   so the desktop works without it, and matching SECRET_KEYs still cannot open safeStorage blobs.
 2. Alternative: `POST /api/accounts/import` to import JSON (desktop export or hand-written credentials; metadata-only exports without tokens are rejected with a clear message).
 
-The desktop can also register the container as a "self-hosted OpenAI-compatible provider": `http://<container-host>:9527/v1` + an API key created inside the container (`localgw_keys_create` via admin RPC).
+The desktop can also register the container as a "self-hosted OpenAI-compatible provider": `http://<container-host>:19527/v1` + an API key created inside the container (`localgw_keys_create` via admin RPC).
 
 ### Admin API overview
 
-- `GET /api/livez` (always 200, for HEALTHCHECK) · `GET /api/readyz` (200 only when at least one account is online)
+- `GET /api/livez` (always 200, for HEALTHCHECK) · `GET /api/readyz` (200 only when at least one account is online; **an empty pool returning 503 is a legal state**)
 - `GET /api/status` · `GET /api/channels` · `GET /api/accounts` · `GET /api/models`
 - `GET/PUT /api/config` · `GET/PUT /api/config/webdav` · `GET /api/backup`
-- `GET /api/capabilities`: full command table with read/write/deny annotations (277 commands = proxy 66 + localgw 43 + prompts 43 + memory 125)
+- `GET /api/capabilities`: full command table with read/write/deny annotations. **Measured 290+ registered commands** (the count drifts with parallel work — observed 277→296→297 this round; per-module breakdown is whatever `gateway/src/commands.cjs` actually registers, and exact reconciliation belongs to gates T3/T4, not to this document). Several dozen more commands are unregistered yet explicitly DENIED (`skills_*` / `webdav_*` / `pet_*` / `window_*` …): their reasons ship with the response, but they are not keys of `commands`.
 - `POST /api/rpc/:cmd`: remote command channel, envelope identical to desktop IPC
 - `GET /api/events`: SSE event stream (proxy + localgw)
 
@@ -115,11 +133,12 @@ The desktop can also register the container as a "self-hosted OpenAI-compatible 
 
 ### Security baseline
 
-- If no admin token is set, the admin API binds to loopback only; put a TLS-terminating reverse proxy in front for remote management
-- Token comparison uses constant-time comparison; read-only and full tokens are separate
+- **Admin safety gate (four states)**: no token + explicit public intent (`AGENTHUB_ADMIN_PUBLIC=0.0.0.0`) → **refuses to start**; no token + default → starts but the bind is **forced back to the container loopback** with a WARN (same behaviour as before the upgrade, zero breakage); with a token → binds `0.0.0.0` and the host prefix decides exposure. See the 「安全闸」 table in [`gateway/README.md`](gateway/README.md).
+- Put a TLS-terminating reverse proxy in front for remote management; token comparison is constant-time (both sides hashed to equal length first, so length leaks no timing); read-only and full tokens are separate
 - Single-instance lock: only one gateway process per data directory
-- Logs are redacted; `.dockerignore` excludes `*.db`, `.env`, `gateway-data/`
+- Logs are redacted; request body capped at 4mb; `.dockerignore` excludes `*.db`, `.env`, `gateway-data/`, `tools/`
 - Qoder dual-region requires a local WASM signer; it is disabled on first container start with a log note
+
 
 ### More docs
 
@@ -156,11 +175,11 @@ The desktop can also register the container as a "self-hosted OpenAI-compatible 
 
 ### The problem
 
-Usage is scattered across each tool's own local database, and nobody tells you what the month cost in total. Usage Stats reads **local client data files** directly, normalises 21 sources onto one schema, and gives you totals, trends, cost and cross-device comparison.
+Usage is scattered across each tool's own local database, and nobody tells you what the month cost in total. Usage Stats reads **local client data files** directly, normalises 22 sources onto one schema, and gives you totals, trends, cost and cross-device comparison.
 
 ### Supported sources (21)
 
-ZCode, SenseTime Raccoon, Xiaomi MiMo, Codex, DeepSeek Harness, WorkBuddy, WorkBuddy AI, Reasonix, CodeBuddy, Qoder, Qoder CN, Antigravity, Antigravity IDE, Antigravity legacy recovery, Trae, Trae CN, TRAE SOLO, TRAE SOLO CN, OpenSquilla, Grok, AutoClaw.
+ZCode, SenseTime Raccoon, Xiaomi MiMo, Codex, DeepSeek Harness, WorkBuddy, WorkBuddy AI, Reasonix, CodeBuddy, Qoder, Qoder CN, Antigravity, Antigravity IDE, Antigravity legacy recovery, Trae, Trae CN, TRAE SOLO, TRAE SOLO CN, OpenSquilla, Grok, AutoClaw, Loomy.
 
 Under **Configure · Usage stats** you can toggle each source and point it at a custom data directory — sources you never installed are skipped silently.
 
@@ -288,7 +307,7 @@ Two design points behind **Multi-angle**:
 
 ## Section 4: Pool Keeper
 
-> The former **Proxy Gateway** module is no longer maintained and has been turned into **Pool Keeper**: account management, balances, check-ins and cross-device sync stay. Its API forwarding capability has been succeeded by the new **Section 5: Local Gateway** (embedded in the main process, read-only over the pool). The full maintenance notice is at the end of this section.
+> The Pool Keeper handles accounts, balances, check-ins and cross-device sync. Exposing model capability as an API is what **Section 5: Local Gateway** does (embedded in the main process, loopback-only by default, upstreams added as custom providers); the two sections are independent.
 
 ### The problem
 
@@ -362,27 +381,13 @@ The pool exists to **manage your own accounts**, not to manufacture activity on 
 - **Balance polling can be turned off on its own** (on by default, 15-minute minimum interval): balance queries are outbound requests, so **Settings · Pool Keeper** has a dedicated switch; turning it off leaves only manual refresh.
 - **No qualification circumvention**: the app does not lend a device fingerprint across accounts to get around "one device, one claim per week" style limits. The **fingerprint repair** in the pool only restores a colliding account to **its own** stable fingerprint, never borrowing from another account.
 
-### What changed from Proxy Gateway
+### How it relates to the Local Gateway
 
-**Retired** (code archived, no longer maintained): the standalone Proxy Gateway process and its external-plugin form, remote instances, custom providers, CC Switch integration, network proxy (egress pool), hot-reloaded rules.
+Pool Keeper stays on the account side: account management, balance queries, check-in, pool sync, operation log and IDE account switching. It exposes no API of its own.
 
-**Kept**: pool account management, balance queries, check-in, pool sync, operation log, IDE account switching.
+[Section 5: Local Gateway](#section-5-local-gateway) is a separate matter: embedded in the main process, loopback-only by default, exposing OpenAI / Anthropic compatible endpoints plus API keys, model catalog, routing and request stats. Its upstreams are configured in the gateway's own **Custom Providers** page (base URL / key / model list), switched and configured independently.
 
-**Succeeded**: API forwarding (OpenAI / Anthropic), API keys, model catalog and gateway request stats are reimplemented by the new [Section 5: Local Gateway](#section-5-local-gateway) as a main-process-embedded module that talks to the pool read-only — no separate gateway process.
-
-**Docker image restored** (Nov 2026): relaunched as a headless form with four modules (Pool Keeper + Local Gateway + Prompts Library + Memory Hub), providing a full Web console and REST admin API. See [Docker deployment](#docker-deployment).
-
-### Maintenance notice
-
-> The **Proxy Gateway** module is now in maintenance-stop state and has been reworked into the **Pool Keeper** module.
->
-> Scope: no further feature work or code updates; upstream protocol changes and anti-bot strategies will no longer be tracked; new issues and pull requests for this module will not be accepted.
->
-> Reason: this is a personal tool without the capacity for long-term protocol adaptation or anti-bot work. Upstream changes make the stability and usable lifetime of the forwarding path unpredictable, so continued adaptation work has limited value.
->
-> Repository state: the repository stays in its current usable state; merged fixes will not be reverted.
->
-> Risk notice: please assess the risk yourself. Affected by upstream policy changes, the feature may stop working at any time; any account risk control, restriction or ban resulting from using unofficial clients is the user's own responsibility.
+The Docker image is the headless four-module form (Pool Keeper + Local Gateway + Prompts Library + Memory Hub) with a full Web console and REST admin API. See [Docker deployment](#docker-deployment).
 
 ---
 
@@ -390,9 +395,9 @@ The pool exists to **manage your own accounts**, not to manufacture activity on 
 
 ### The problem
 
-Your pool already holds a pile of channel accounts, but when your IDE, a script or your own service wants to call a model, you still have to dig up each channel's login state and hand-build its request format. The Local Gateway wraps the accounts **already configured in the pool** into **one local OpenAI / Anthropic compatible endpoint**: point `base_url` at `http://127.0.0.1:9527/v1` and leave the rest as it is.
+Model services are scattered across providers: official APIs, self-hosted inference, third-party OpenAI-compatible endpoints — each with its own auth, request shape and model naming. Calling several of them from your IDE, a script or your own service means writing an adapter per client. The Local Gateway collects those upstreams into **one local OpenAI / Anthropic compatible endpoint**: point `base_url` at `http://127.0.0.1:9527/v1` and leave the rest as it is.
 
-It does not create a second account model — **Pool Keeper** remains the single source of truth for accounts, and the gateway reads it read-only.
+It does not create a second model system — upstreams are added under **Custom Providers** (base URL / key / model list), and the gateway only handles protocol translation, routing and forwarding.
 
 ### Pages
 
@@ -425,8 +430,8 @@ Both `Authorization: Bearer <key>` and Anthropic's `x-api-key` header are accept
 
 ### Key design points
 
-- **Credentials never leave the process**: upstream credentials are read from the pool vault only — never written into the gateway config, never into logs
-- **Disabled in the pool means circuit-broken here**: an account disabled in Pool Keeper is equally unusable through the gateway
+- **Credentials never leave the process**: upstream credentials are read from local encrypted config only — never written into logs, never exported with the config file
+- **A disabled channel is circuit-broken here**: once an upstream is turned off or judged unavailable, the gateway stops sending to it and moves traffic to the remaining ones
 - **API keys are never stored in clear**: the database keeps only `HMAC-SHA256(raw + internal secret)` plus a display prefix; the full key appears exactly once, in the create response
 - **Port conflicts self-heal**: if 9527 is taken it probes 9528 ~ 9530, and the UI shows the port that is **actually in effect**
 - **No autostart, loopback only by default**: installing it does not open a port; `autostart` defaults to off and `bind` defaults to `127.0.0.1`
@@ -437,20 +442,20 @@ Both `Authorization: Bearer <key>` and Anthropic's `x-api-key` header are accept
   - **Keyword scrubbing and sentence rewrites**: scope by **message role** (system / user / assistant / tool) and replace literally or by regex. Built-in fingerprint scrubbing (header key/value segments, `cc_*` billing field names, template sentences such as `official CLI for Claude`, the bare error code `11128`) is one built-in rule group, on by default
   - **Only the copy sent upstream is changed**: the response your client sees is unchanged, and affected requests are tagged in the **敏** column of the Request Log, where hovering shows which rules hit
   - **Dry run**: paste sample text and click **Dry run** to see the before/after difference and the hit list, with no upstream call
-- **Zero regression on the pool's own egress**: the pool's own requests carry no outbound context, so a policy only affects requests the gateway forwards; switching a channel back to passthrough (or clearing its policy) restores the original behaviour
+- **Zero regression on the section's own egress**: the section's own liveness and model-fetch requests carry no outbound context, so a policy only affects requests the gateway forwards; switching a channel back to passthrough (or clearing its policy) restores the original behaviour
 - **Disabling the section stops the service**: toggling the module off immediately closes the listener and releases connections
 
 ### Where the data lives
 
 | Content | Location | Synced |
 | --- | --- | --- |
-| API keys (HMAC + prefix) | `localgw_keys` table in `%APPDATA%\AgentHub\proxy\stats.db` | No (same DB and backup as the pool) |
+| API keys (HMAC + prefix) | `localgw_keys` table in `%APPDATA%\AgentHub\proxy\stats.db` | No (same DB and backup as the rest of the app) |
 | Request log | `localgw_logs` table in the same DB, pruned by `logRetentionDays` | No |
 | Gateway config | the `localgw` block of `%APPDATA%\AgentHub\config.json` | No |
 
 ### How to use
 
-1. First add at least one channel account to the pool in **Pool Keeper** (the gateway takes its accounts from there; with none, the Overview shows a three-step guide)
+1. Open **Local Gateway → Custom Providers** and add an upstream: base URL and key, then fetch its model list (merged as added / existing / retired)
 2. Back in **Local Gateway → Overview**, click **Start** — the status badge becomes "Running · 9527"
 3. Go to **Services & Keys** and create your first API key — **the page shows it exactly once**, so copy it immediately
 4. Go to **Access & Docs**, copy the curl example or the IDE configuration, point `base_url` at `http://127.0.0.1:9527/v1` and paste the `sk-lgw-...` key
@@ -547,7 +552,7 @@ node tools/prompts-smoke.cjs   # built-in styles / {extra} rendering / <ASSUMPTI
 
 ### 1. For learning and exchange only
 
-This project is a hands-on project for learning **local credential management, multi-upstream account and quota aggregation, HTTP reverse proxying with SSE streaming pass-through, OpenAI / Anthropic protocol adaptation, cross-tool skill directory management and Electron desktop packaging**. It is for personal learning and research only and is not an official product of any company.
+This project is a hands-on project for learning **local credential management, multi-upstream account and quota aggregation, a loopback gateway with SSE streaming pass-through, OpenAI / Anthropic protocol adaptation, cross-tool skill directory management and Electron desktop packaging**. It is for personal learning and research only and is not an official product of any company.
 
 This project is **not affiliated with** the following companies or their products in any way, and has not received their authorisation, endorsement, sponsorship or backing:
 
@@ -559,7 +564,7 @@ All product names, trademarks, service names and protocol names appearing here b
 
 The Pool Keeper reuses the login state of **your own accounts** on your own machine for balance queries, check-ins and account management. It does not crack or bypass any payment or permission check, and the quota it reads always comes from what your own account already has.
 
-The Local Gateway adds a **loopback-only** API forwarding layer on top: it exposes your own account's quota as an **OpenAI / Anthropic compatible endpoint** on `127.0.0.1` (off by default, loopback-only by default, credentials never leave the local process). The old standalone "reverse proxy gateway" process is no longer maintained and has been removed; the Local Gateway replaces it, and it likewise **no longer tracks upstream protocol or risk-control changes**, with no availability guarantee. The Docker form was restored in Nov 2026 as a four-module headless image — see [Docker deployment](#docker-deployment).
+The Local Gateway is a separate **loopback-only** API surface: it exposes the upstream model services you configure as an **OpenAI / Anthropic compatible endpoint** on `127.0.0.1` (off by default, loopback-only by default, upstream credentials never leave the local process). The Docker form is a four-module headless image — see [Docker deployment](#docker-deployment).
 
 Be clear about this, however: reusing a login state **in the shape of a non-official client** **may not comply with the upstream service's user agreement or terms of use**; whether you use it, and every consequence that follows (including but not limited to rate limiting, risk control, downgrading, freezing or banning of your account, termination of a subscription, or zeroing of points/quota), **is borne solely by you, and the author accepts no responsibility**.
 
@@ -610,15 +615,15 @@ This project is provided "AS IS", and the author **makes no express or implied w
 
 ### For learning and exchange only
 
-This project is a hands-on project for learning **local credential management, multi-upstream account and quota aggregation, HTTP reverse proxying with SSE streaming pass-through, OpenAI / Anthropic protocol adaptation, cross-tool skill directory management and Electron desktop packaging**. It is for personal learning and research only. It is not an official product and is **not affiliated with** the following companies or their products in any way, and has not received their authorisation, endorsement or sponsorship:
+This project is a hands-on project for learning **local credential management, multi-upstream account and quota aggregation, a loopback gateway with SSE streaming pass-through, OpenAI / Anthropic protocol adaptation, cross-tool skill directory management and Electron desktop packaging**. It is for personal learning and research only. It is not an official product and is **not affiliated with** the following companies or their products in any way, and has not received their authorisation, endorsement or sponsorship:
 
 Tencent and WorkBuddy / CodeBuddy, ByteDance and Trae / TRAE SOLO, SenseTime and Raccoon, Zhipu and ZCode / AutoClaw / AutoGLM, Meituan and CatPaw, Alibaba and Qoder / ModelScope / Accio, Huawei Cloud and CodeArts, iFLYTEK and Loomy, NetEase Youdao and LobsterAI, Xiaomi and MiMo, DeepSeek and DeepSeek Harness, OpenAI and Codex, Google and Antigravity, Cline, and any other service provider mentioned in the documentation, code or UI.
 
 All product names, trademarks, service names and protocol names belong to their respective owners and are used only for identification and explanation.
 
-### About the reverse-proxy behaviour
+### About the Local Gateway behaviour
 
-This project implements a **local reverse proxy**: the Pool Keeper reuses the login state of **your own accounts** on your own machine for balance queries, check-ins and account management; the Local Gateway then exposes that quota as an **OpenAI / Anthropic compatible endpoint** on `127.0.0.1` (off by default, loopback-only by default, credentials never leaving the local process) and forwards requests to the official upstream gateway.
+This project implements a **loopback API surface**: the Pool Keeper reuses the login state of **your own accounts** on your own machine for balance queries, check-ins and account management; the Local Gateway instead exposes the upstream model services you configure as an **OpenAI / Anthropic compatible endpoint** on `127.0.0.1` (off by default, loopback-only by default, upstream credentials never leaving the local process) and forwards requests to the corresponding upstream.
 
 It does not crack or bypass any payment or permission check, and the quota used always comes from what your own account already has. Be clear, however, that forwarding a login state **in the shape of a non-official client** **may not comply with the upstream service's user agreement or terms of use**; whether you use it and every consequence that follows (including but not limited to rate limiting, risk control, downgrading, freezing or banning of your account, termination of a subscription, or zeroing of points/quota) **is borne solely by you, and the author accepts no responsibility**.
 

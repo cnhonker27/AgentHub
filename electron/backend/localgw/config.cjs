@@ -49,6 +49,12 @@ const LOCALGW_DEFAULTS = {
     cooldownMs: 120000,
     cooldownCapMs: 900000,
     maxRetriesPerRequest: 3,
+    /** 会话粘性：auto = 5 分钟无往来就放手；on = 一直保持；off = 关闭。
+     *  粘性命中且账号可用时置顶，命中但不可用则不动位次（不消耗轮转位）。 */
+    sticky: "auto",
+    /** 能力过滤：请求带 tools/images/video 时，先剔除声明确实不支持的候选。
+     *  过滤后一个都不剩时保留原候选 —— 宁可让上游回明确的 400，也不在网关层制造无解。 */
+    needsFilter: true,
     preferChannels: [],
     blockedChannels: [],
     /** 渠道启闭表 { channelId: boolean }：由 routing.setChannelEnabled 写入。
@@ -58,6 +64,9 @@ const LOCALGW_DEFAULTS = {
   },
   models: {
     overrides: {},
+    // Explicit execution source per channel. Invalid/removed pins fail closed;
+    // normalization must not drop them and silently select another publisher.
+    serviceBindings: {},
     /** 渠道锁定：{ [对外模型名]: 渠道 id } —— 只固定"走哪个渠道"，绝不改发给上游的模型名。
      *  与 overrides 的区别：overrides 是「改名绑定」({real_model, channel})，本表是「只锁渠道」。
      *  为什么单开一张表（而不是复用 overrides 的缺省字段）：
@@ -65,8 +74,18 @@ const LOCALGW_DEFAULTS = {
      *   「real_model 是系统推导的还是用户手写的」无法可靠区分，改渠道时会静默改掉用户的
      *  上游模型名。分表后两条链路互不干扰，现有 overrides 数据一个字节都不用动。 */
     channelLocks: {},
+    /** 模型消耗倍率（用户手填）：{ [对外模型名]: number }。上游目录不一定给倍率
+     *  （Trae 就没有），这里允许用户按模型补一个用于展示/比价的系数；缺省 = 沿用目录声明。 */
+    rates: {},
     aliases: {},
     custom: {},
+    /** 模型组：{ [对外名]: { strategy, members: [{ channel, real_model }] } }。
+     *  与 aliases 的区别：别名是「一个名字 → 一个名字」，模型组是「一个对外名 → 多个
+     *  （渠道 + 实际模型）候选」，转发时按 strategy 选一个成员，失败自动换下一个。
+     *  strategy：priority=成员顺序；round-robin=在可用成员间轮转；
+     *  credit=跨渠道积分优先（免费 → 先到期 → 后到期 → 永久/未知，见 credit-picker.cjs）。
+     *  members 的顺序就是顺序优先策略的优先级；credit 策略下同档同到期时也用它兜底。 */
+    groups: {},
     disabledAliases: [],
     exposeInV1Models: true,
     modelDefaultChannel: "",
@@ -108,6 +127,13 @@ const LOCALGW_DEFAULTS = {
     },
     /** 按渠道覆盖：{ [channelId]: Partial<Policy> }，缺字段继承 defaults */
     perChannel: {},
+    /**
+     * 脱敏应用范围：空数组 = 全部渠道；非空 = 只在列出的渠道上执行脱敏。
+     * 语义对齐示例项目 Agent2API 的 sanitizeFingerprintProviders。
+     * 与 perChannel 的分工：perChannel 改「这一家怎么发」（伪装/规则/头），
+     * 这里是「这一家要不要脱敏」—— 一个总闸，避免逐家去关 builtinSanitize。
+     */
+    providers: [],
     /** 全局共享关键词规则（所有渠道叠加使用） */
     keywords: [],
     /** 全局共享文案替换规则 */
@@ -142,6 +168,69 @@ function normalizeChannelLocks(v) {
     const channel = String(rawChannel == null ? "" : rawChannel).trim();
     if (!name || !channel) continue;
     out[name] = channel;
+  }
+  return out;
+}
+
+/** 模型组条数 / 单组成员数上限：防手改配置把热路径（每次请求都要解析绑定）撑爆 */
+const MAX_MODEL_GROUPS = 200;
+const MAX_GROUP_MEMBERS = 100;
+const GROUP_STRATEGIES = ["priority", "round-robin", "credit"];
+/** 模型倍率条数上限与合法范围（防手改配置把热路径撑爆 / 写出 NaN） */
+const MAX_MODEL_RATES = 1000;
+const MAX_RATE_VALUE = 1000;
+
+/** 倍率表纠偏：{ [模型名]: number }。只保留非空模型名 + 有限非负数；
+ *  0 是合法倍率（免费档），不能当缺失去掉。 */
+function normalizeModelRates(v) {
+  if (!plainObject(v)) return {};
+  const out = {};
+  let count = 0;
+  for (const [rawName, rawRate] of Object.entries(v)) {
+    const name = String(rawName == null ? "" : rawName).trim();
+    const rate = Number(rawRate);
+    if (!name || !Number.isFinite(rate) || rate < 0 || rate > MAX_RATE_VALUE) continue;
+    out[name] = Math.round(rate * 10000) / 10000;
+    if (++count >= MAX_MODEL_RATES) break;
+  }
+  return out;
+}
+
+/** 模型组成员纠偏：只保留「非空渠道 + 非空实际模型名」，同渠道同名去重（大小写不敏感）。
+ *  顺序即顺序优先策略的优先级，所以去重后必须保留首次出现的顺序。 */
+function normalizeGroupMembers(v) {
+  if (!Array.isArray(v)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const item of v) {
+    if (!plainObject(item)) continue;
+    const channel = String(item.channel == null ? "" : item.channel).trim();
+    const realModel = String(item.real_model == null ? "" : item.real_model).trim();
+    if (!channel || !realModel) continue;
+    const key = `${channel.toLowerCase()}\u0000${realModel.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ channel, real_model: realModel });
+    if (out.length >= MAX_GROUP_MEMBERS) break;
+  }
+  return out;
+}
+
+/** 模型组纠偏：{ [对外名]: { strategy, members } }；没有有效成员的组整组丢弃，
+ *  否则会得到一个「永远 503 但看起来配好了」的组，比直接不显示更让人困惑。 */
+function normalizeModelGroups(v) {
+  if (!plainObject(v)) return {};
+  const out = {};
+  let count = 0;
+  for (const [rawName, rawGroup] of Object.entries(v)) {
+    const name = String(rawName == null ? "" : rawName).trim();
+    if (!name) continue;
+    const group = plainObject(rawGroup) ? rawGroup : {};
+    const members = normalizeGroupMembers(group.members);
+    if (!members.length) continue;
+    const strategy = GROUP_STRATEGIES.includes(group.strategy) ? group.strategy : "priority";
+    out[name] = { strategy, members };
+    if (++count >= MAX_MODEL_GROUPS) break;
   }
   return out;
 }
@@ -372,6 +461,10 @@ function normalizeOutbound(raw) {
   out.perChannel = normalizePerChannel(out.perChannel);
   out.keywords = normalizeKeywordRules(out.keywords);
   out.rewrites = normalizeRewriteRules(out.rewrites);
+  // 脱敏应用范围：只保留非空字符串、去重、小写化（渠道 id 本来就是小写，防止手填大写对不上）
+  out.providers = Array.isArray(out.providers)
+    ? [...new Set(out.providers.filter((s) => typeof s === "string" && s.trim()).map((s) => s.trim().toLowerCase()))]
+    : [];
 
   const prof = plainObject(out.profiles) ? out.profiles : { ...LOCALGW_DEFAULTS.outbound.profiles };
   prof.custom = normalizeCustomProfiles(prof.custom);
@@ -409,7 +502,7 @@ function normalize(raw) {
   m.security.readonlyToken = typeof m.security.readonlyToken === "string" ? m.security.readonlyToken : "";
 
   m.routing = mergeDeep(LOCALGW_DEFAULTS.routing, m.routing || {});
-  const STRATEGIES = ["smart", "fixed", "round-robin", "score", "cost-first"];
+  const STRATEGIES = ["smart", "fixed", "round-robin", "score", "cost-first", "credit-first"];
   // 非法值回退到默认值本身（cost-first）：原先回退 "score" 会让「配置写错」变成「悄悄换了套策略」
   if (!STRATEGIES.includes(m.routing.strategy)) m.routing.strategy = "cost-first";
   m.routing.fixedChannel = typeof m.routing.fixedChannel === "string" ? m.routing.fixedChannel : "";
@@ -417,6 +510,9 @@ function normalize(raw) {
   m.routing.cooldownMs = clampInt(m.routing.cooldownMs, 120000, 10000, 3600000);
   m.routing.cooldownCapMs = clampInt(m.routing.cooldownCapMs, 900000, 60000, 7200000);
   m.routing.maxRetriesPerRequest = clampInt(m.routing.maxRetriesPerRequest, 3, 1, 10);
+  // 粘性/能力过滤：非法值回退到默认，不让手改 config.json 把增强悄悄关掉
+  if (!["auto", "on", "off"].includes(m.routing.sticky)) m.routing.sticky = "auto";
+  m.routing.needsFilter = m.routing.needsFilter !== false;
   m.routing.preferChannels = Array.isArray(m.routing.preferChannels) ? m.routing.preferChannels.filter((s) => typeof s === "string") : [];
   m.routing.blockedChannels = Array.isArray(m.routing.blockedChannels) ? m.routing.blockedChannels.filter((s) => typeof s === "string") : [];
   m.routing.perChannelEnabled = plainObject(m.routing.perChannelEnabled) ? m.routing.perChannelEnabled : {};
@@ -428,10 +524,12 @@ function normalize(raw) {
   m.models.overrides = plainObject(m.models.overrides) ? m.models.overrides : {};
   m.models.custom = plainObject(m.models.custom) ? m.models.custom : {};
   m.models.aliases = plainObject(m.models.aliases) ? m.models.aliases : {};
+  m.models.groups = normalizeModelGroups(m.models.groups);
   m.models.disabledAliases = Array.isArray(m.models.disabledAliases) ? m.models.disabledAliases.filter((v) => typeof v === "string") : [];
   // 渠道锁定：{ [模型名]: 渠道 id }。只保留「非空字符串 → 非空字符串」的条目，
   // 手改成数组/字符串/数字的一律丢弃（坏配置不该让整段读不出来）。
   m.models.channelLocks = normalizeChannelLocks(m.models.channelLocks);
+  m.models.rates = normalizeModelRates(m.models.rates);
   m.models.migratedChannelLocks = m.models.migratedChannelLocks === true;
 
   m.rateLimitPerMin = clampInt(m.rateLimitPerMin, 300, 1, 100000);
@@ -489,7 +587,7 @@ function migrateLegacyModelOverrides(c) {
     // 写失败不阻塞读：本次内存里已生效，下次启动会因为标记没落盘而重试
   }
   if (added > 0) {
-    console.log(`[localgw] 已把旧版反代网关的 ${added} 条模型渠道覆盖迁入渠道锁定表`);
+    console.log(`[localgw] 已把旧版网关的 ${added} 条模型渠道覆盖迁入渠道锁定表`);
   }
 }
 
@@ -572,10 +670,13 @@ function patch(p) {
     }
     incoming.port = port;
   }
+  if (incoming.routing && incoming.routing.sticky !== undefined && !["auto", "on", "off"].includes(incoming.routing.sticky)) {
+    return { ok: false, message: "会话粘性只支持 auto / on / off" };
+  }
   if (incoming.routing && incoming.routing.strategy !== undefined) {
-    const STRATEGIES = ["smart", "fixed", "round-robin", "score", "cost-first"];
+    const STRATEGIES = ["smart", "fixed", "round-robin", "score", "cost-first", "credit-first"];
     if (!STRATEGIES.includes(incoming.routing.strategy)) {
-      return { ok: false, message: "路由策略只支持 smart / fixed / round-robin / score / cost-first" };
+      return { ok: false, message: "路由策略只支持 smart / fixed / round-robin / score / cost-first / credit-first" };
     }
   }
   if (incoming.outbound !== undefined) {
@@ -625,4 +726,4 @@ function ensureSecret() {
   return secret;
 }
 
-module.exports = { LOCALGW_DEFAULTS, get, patch, normalize, mergeDeep, ensureSecret, revealSecret, normalizeBind };
+module.exports = { LOCALGW_DEFAULTS, get, patch, normalize, mergeDeep, ensureSecret, revealSecret, normalizeBind, normalizeModelGroups, normalizeGroupMembers, normalizeModelRates, GROUP_STRATEGIES };

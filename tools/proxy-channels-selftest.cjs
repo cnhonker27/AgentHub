@@ -24,13 +24,16 @@ function ok(cond, label) { if (cond) pass++; else { fail++; console.log(`  ✗ $
 
 const signer = require("../electron/backend/proxy/codearts/signer.cjs");
 const loomySign = require("../electron/backend/proxy/loomy/sign.cjs");
-const accioProto = require("../electron/backend/proxy/accio/protocol.cjs");
-const accioStream = require("../electron/backend/proxy/accio/stream.cjs");
+// 插件侧协议/SSE 自测在本机（有兄弟仓库）时跑全套；CI 只 checkout 主仓，
+// 缺插件目录则跳过这两块，主仓侧的签名与目录归一自测照常执行。
+const path = require("node:path");
+const pluginDir = process.env.AGENTHUB_FORWARDING_PLUGIN_DIR || path.join(__dirname, "../../AgentHub_skill");
+const optionalPlugin = (rel) => { try { return require(path.join(pluginDir, rel)); } catch { return null; } };
+const accioProto = optionalPlugin("src/providers/accio/protocol.cjs");
+const accioStream = optionalPlugin("src/providers/accio/stream.cjs");
 const accioModels = require("../electron/backend/proxy/accio/models.cjs");
 const caFault = require("../electron/backend/proxy/codearts/stream_fault.cjs");
 const caRedact = require("../electron/backend/proxy/codearts/redact.cjs");
-const caModels = require("../electron/backend/proxy/codearts/models.cjs");
-const loomyImages = require("../electron/backend/proxy/loomy/images.cjs");
 
 // ===== CodeArts 签名：尾斜杠 + 字符集 + Go 语义 =====
 (function testCodeArtsSigner() {
@@ -62,6 +65,7 @@ const loomyImages = require("../electron/backend/proxy/loomy/images.cjs");
 
 // ===== Accio 协议翻译：Gemini 信封 + 思考档位落点 + sg_k =====
 (function testAccioProtocol() {
+  if (!accioProto) { console.log("  · 跳过 Accio 协议翻译（插件目录不可用，归插件仓库自测覆盖）"); return; }
   const body = {
     model: "claude-sonnet-4-6",
     messages: [
@@ -95,6 +99,7 @@ const loomyImages = require("../electron/backend/proxy/loomy/images.cjs");
 
 // ===== Accio SSE：首帧预读 + 流内错误 + 翻译 =====
 (function testAccioStream() {
+  if (!accioStream) { console.log("  · 跳过 Accio SSE 翻译（插件目录不可用，归插件仓库自测覆盖）"); return; }
   const frame = accioStream.parseFrame('{"content":{"role":"model","parts":[{"text":"你"}]},"partial":true}');
   eq(frame.parts[0], { kind: "text", text: "你" }, "Accio text part");
   const thought = accioStream.parseFrame('{"content":{"role":"model","parts":[{"thought":true,"text":"想"}]}}');
@@ -153,27 +158,6 @@ const loomyImages = require("../electron/backend/proxy/loomy/images.cjs");
   const redacted = caRedact.redactValues(`auth=${secret} and ${secret.slice(0, 12)}`, [secret], true);
   ok(!redacted.includes(secret), "CodeArts 脱敏盖原文");
   ok(redacted.includes("[REDACTED]"), "CodeArts 脱敏占位");
-})();
-
-// ===== CodeArts 目录：三源合并 + 大小写查找 + 福利判定 =====
-(function testCodeArtsModels() {
-  const merged = caModels.mergeCatalog([{ id: "GLM-5.2" }], [{ id: "qwen3-vl" }], [{ id: "benefit-1" }]);
-  eq(merged.length, 3, "CodeArts 三源合并去重");
-  eq(caModels.resolveModelId(merged, "glm-5.2"), "GLM-5.2", "CodeArts 小写→上游真名");
-  eq(caModels.resolveModelId(merged, "GLM-5.2"), "GLM-5.2", "CodeArts 真名命中");
-  ok(caModels.isBenefitId(merged, "BENEFIT-1"), "CodeArts 福利判定大小写无关");
-  ok(!caModels.isBenefitId(merged, "glm-5.2"), "CodeArts 非福利不误判");
-})();
-
-// ===== Loomy 图片：deepseek 标记改写 =====
-(function testLoomyImages() {
-  eq(loomyImages.prefersTagFormat("deepseek-v3"), true, "Loomy deepseek 命中");
-  eq(loomyImages.prefersTagFormat("spark-x"), false, "Loomy 非 deepseek 不命中");
-  const { body, converted } = loomyImages.rewriteToTag({ messages: [{ role: "user", content: [
-    { type: "text", text: "看图" }, { type: "image_url", image_url: { url: "data:image/png;base64,BBBB" } },
-  ] }] });
-  eq(converted, 1, "Loomy 图片转标记数");
-  eq(body.messages[0].content[1].text, "<image_base64>BBBB</image_base64>", "Loomy <image_base64> 标记");
 })();
 
 console.log(`\n通过 ${pass}，失败 ${fail}`);

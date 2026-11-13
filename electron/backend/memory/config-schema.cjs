@@ -65,7 +65,7 @@ const SCHEMA = {
   "agents.autoVerify":     { type: "boolean", def: true, label: "接入后自动校验", group: "Agent 接入", hot: true, tier: "basic" },
   "agents.verifyInterval": { type: "number", def: 300, min: 30, max: 3600, label: "连接巡检间隔（秒）", group: "Agent 接入", hot: true, tier: "advanced" },
   "agents.injectAgentsMd": { type: "boolean", def: true, label: "注入 AGENTS.md 受控块", group: "Agent 接入", hot: true, tier: "advanced" },
-  "agents.coreMaxTokens":    { type: "number", def: 800,  min: 200, max: 2000, label: "memory_core token 上限", group: "Agent 接入", hot: true, tier: "internal" },
+  "agents.coreMaxTokens":    { type: "number", def: 800,  min: 200, max: 4000, label: "memory_core token 上限", group: "Agent 接入", hot: true, tier: "internal" },
   "agents.digestMaxLines":   { type: "number", def: 200,  min: 50, max: 1000, label: "memory_digest 行数上限", group: "Agent 接入", hot: true, tier: "internal" },
   "agents.searchMaxTokens":  { type: "number", def: 1200, min: 200, max: 4000, label: "memory_search token 上限", group: "Agent 接入", hot: true, tier: "internal" },
 
@@ -83,6 +83,10 @@ const SCHEMA = {
   "auto.overBudgetAction":{ type: "enum", def: "pause", options: ["pause", "ignore"], label: "超预算行为", group: "自动化", hot: true, tier: "advanced" },
   "auto.logKeepDays":     { type: "number", def: 30, min: 1, max: 365, label: "任务日志保留天数", group: "自动化", hot: true, tier: "internal" },
   "auto.logKeepCount":    { type: "number", def: 200, min: 20, max: 2000, label: "任务日志保留条数", group: "自动化", hot: true, tier: "internal" },
+  // 抽取/打标的最小正文长度（字节）。一句话提问（「npm install 为什么这么慢？」）提炼不出结论，
+  // 摘要只能复述原文、重要度也无从判断 —— 白烧 token 还占着 pending 队列。
+  // 默认 0 = 不过滤（历史行为）；中文 1 字约 3 字节，500 ≈ 167 字。
+  "auto.minBodyBytes":    { type: "number", def: 0, min: 0, max: 5000, label: "抽取最小正文长度（字节）", group: "自动化", hot: true, tier: "advanced", desc: "正文短于此值的记忆不做抽取/打标；0 = 不过滤" },
   "auto.tasks": {
     type: "map",
     def: {
@@ -139,6 +143,9 @@ const SCHEMA = {
   "models.tagDefs":      { type: "list", def: ["light", "heavy", "dedup", "classify", "distill", "extract", "tag", "summarize", "profile", "supersede", "consolidate", "optimize"], label: "用途标签集", group: "模型与网关", hot: true, tier: "internal" },
   "models.timeout":      { type: "number", def: 60, min: 5, max: 600, label: "请求超时（秒）", group: "模型与网关", hot: true, tier: "advanced" },
   "models.maxRetries":   { type: "number", def: 3, min: 0, max: 10, label: "失败重试次数", group: "模型与网关", hot: true, tier: "advanced" },
+  // 同一时刻最多几个模型请求在飞。默认 1 与历史行为一致；调高后 extract/tag 会并行处理多批，
+  // 上游若是串行排队（实测多数中转如此），收益有限但不会报错；真限流时由 maxRetries 的退避兜住
+  "models.maxInflight":  { type: "number", def: 1, min: 1, max: 8, label: "模型调用并发数", group: "模型与网关", hot: true, tier: "advanced", desc: "同一时刻最多几个模型请求；1 = 顺序执行" },
   "models.gatewayUrl":   { type: "string", def: "", label: "本机网关地址覆盖", group: "模型与网关", hot: true, tier: "internal", desc: "空 = 读 proxy 模块配置" },
   "models.taskEffort":   { type: "map", def: { extract: "low", tag: "minimal", classify: "minimal", summarize: "low", distill: "medium", profile: "high", dedup: "low", optimize: "medium" }, label: "各任务思考强度覆盖", group: "模型与网关", hot: true, tier: "internal" },
   "models.degrade":      { type: "map", def: { enabled: true, effort: "minimal" }, label: "兜底降级", group: "模型与网关", hot: true, tier: "internal" },
@@ -220,7 +227,7 @@ const SCHEMA = {
   "ui.defaultTab":      { type: "enum", def: "dashboard", options: ["dashboard", "browse", "projects", "profile", "agents", "index", "auto", "import", "sync"], label: "默认页签", group: "界面", hot: true, tier: "advanced" },
   // 2026-10-20 起默认展示 8 个页签：仅「检索与索引」（排障场景）收进配置·界面，可勾选找回。
   // 曾把旧默认 5 项写盘的存量配置由 migrateUiTabs 一次性搬过来，用户自选过的清单不动
-  "ui.tabs":            { type: "multiselect", options: ["dashboard", "browse", "projects", "profile", "hub", "agents", "index", "auto", "import", "sync"], def: ["dashboard", "browse", "projects", "profile", "hub", "auto"], label: "显示的页签", group: "界面", hot: true, tier: "advanced" },
+  "ui.tabs":            { type: "multiselect", options: ["dashboard", "browse", "projects", "profile", "hub", "agents", "index", "auto", "import", "sync", "logic"], def: ["dashboard", "browse", "projects", "profile", "hub", "auto", "sync", "logic"], label: "显示的页签", group: "界面", hot: true, tier: "advanced" },
   "ui.realtimeRefresh": { type: "boolean", def: true, label: "浏览页实时刷新", group: "界面", hot: true, tier: "basic" },
 };
 

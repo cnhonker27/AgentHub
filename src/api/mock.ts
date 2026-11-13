@@ -56,6 +56,7 @@ function defaultConfig(): AppConfig {
     l3: { enabled: true, threshold: 0.85 },
     trashDays: 7,
     update: { channel: "stable", autoCheck: true, notifiedVersion: "" },
+    plugins: { autoUpdate: true, autoDownload: true, feedUrl: "" },
     webdav: {
       endpoint: "https://dav.jianguoyun.com/dav",
       username: "me@example.com",
@@ -397,7 +398,7 @@ const PROXY_POOL = [
     ],
   },
   {
-    id: "qoder_intl", display: "Qoder International", domain: "api2.qoder.sh", costTier: "", poolStrategy: "expire_first",
+    id: "qoder_intl", display: "Qoder 国际版", domain: "api2.qoder.sh", costTier: "", poolStrategy: "expire_first",
     health: null as { until: number; reason: string; streak: number } | null,
     checkinAuto: { enabled: false, time: "09:00", jitterMin: 0 },
     summary: { channel: "qoder_intl", totalCredits: 0.0066, accountCount: 1, onlineCount: 1, earliestExpire: NOW + 30 * 86400000, expiringSoon: false, todayReq: 1, todayTokens: 2100, lastCreditsAt: ago(30) },
@@ -525,6 +526,17 @@ const MOCK_PROXY_PROVIDERS: {
 // 预览态的 Key 内容判重表（真机 addKey 按 Key 内容的 SHA-256 判重，不看名称）。
 // 刻意不进 provider 对象：那是 hasToken 脱敏视图，塞明文进去会与真机形状分叉
 const MOCK_PROVIDER_SECRETS = new Map<string, Set<string>>();
+
+/** 预设目录的预览子集：真机是 34 条、模型清单留在主进程，这里只放 6 条把三档协议都覆盖到，
+ *  卡片渲染、搜索、预填、preset 创建四条路径就都能在 dev:web 里走通。 */
+const MOCK_PROVIDER_PRESETS = [
+  { id: "zai-api", display: "Z.ai Coding Plan", brand: "zai", group: "zhipu", kind: "anthropic_messages", baseUrl: "https://api.z.ai/api/anthropic", auth: "bearer", apiKeyUrl: "https://z.ai/manage-apikey/apikey-list", note: "Coding Plan 与普通 API 的 Key 不通用", modelCount: 2 },
+  { id: "bigmodel-standard-api", display: "BigModel API", brand: "bigmodel", group: "zhipu", kind: "openai_compat", baseUrl: "https://open.bigmodel.cn/api/paas/v4", auth: "bearer", apiKeyUrl: "https://open.bigmodel.cn/usercenter/apikeys", note: "", modelCount: 24 },
+  { id: "kimi-code-cn", display: "Kimi Code（国内）", brand: "kimi", group: "moonshot", kind: "openai_compat", baseUrl: "https://api.kimi.com/coding/v1", auth: "bearer", apiKeyUrl: "https://platform.moonshot.cn/console/api-keys", note: "", modelCount: 6 },
+  { id: "deepseek", display: "DeepSeek", brand: "deepseek", group: "deepseek", kind: "anthropic_messages", baseUrl: "https://api.deepseek.com/anthropic", auth: "bearer", apiKeyUrl: "https://platform.deepseek.com/api_keys", note: "", modelCount: 2 },
+  { id: "openai", display: "OpenAI", brand: "openai", group: "openai", kind: "openai_responses", baseUrl: "https://api.openai.com/v1", auth: "bearer", apiKeyUrl: "https://platform.openai.com/api-keys", note: "", modelCount: 13 },
+  { id: "tokenrhythm", display: "基元律动 TokenRhythm", brand: "tokenrhythm", group: "tokenrhythm", kind: "openai_compat", baseUrl: "https://tokenrhythm.studio/v1", auth: "bearer", apiKeyUrl: "", note: "模型清单走「从上游拉取」获取", modelCount: 0 },
+];
 
 /** 真机的 create/update 只回渠道视图（keys / keyCount / onlineCount 是 list 才补的），这里保持同形 */
 function providerView(p: (typeof MOCK_PROXY_PROVIDERS)[number]) {
@@ -1085,11 +1097,13 @@ function promptStats(): PromptStats {
 // 形状严格对齐 electron/backend/localgw/index.cjs 的 handler 返回值与 api/ipc.ts 的类型，
 // 预览与真机看到的是同一套字段名（真机取数口径见 localgw/keys-store.cjs / routing.cjs / oplog.cjs）。
 const LGW_ROUTE_STATE = {
-  strategy: "score" as "smart" | "fixed" | "round-robin" | "score",
+  strategy: "score" as "smart" | "fixed" | "round-robin" | "score" | "cost-first" | "credit-first",
   fixedChannel: "",
   enableFailover: true,
   cooldownMs: 120000,
   cooldownCapMs: 900000,
+  sticky: "auto" as "auto" | "on" | "off",
+  needsFilter: true,
   perChannel: { trae: { enabled: true }, workbuddy: { enabled: true }, zcode: { enabled: false } } as Record<string, { enabled: boolean }>,
 };
 
@@ -1109,7 +1123,9 @@ const LGW_MODELS: {
   display: string;
   channel: string;
   realModel: string;
-  source: "channel" | "override" | "alias" | "custom" | "channel-lock";
+  source: "channel" | "override" | "alias" | "custom" | "channel-lock" | "group";
+  /** group = 该行所属模型组 */
+  groupName?: string;
   /** 该模型真实存在的渠道（行内渠道锁定下拉的选项；真机由 models.list() 计算） */
   sources?: string[];
 }[] = [
@@ -1212,16 +1228,36 @@ const LGW_CONFIG: Record<string, unknown> = JSON.parse(JSON.stringify(defaultCon
   const locks = (lgwModels.channelLocks as Record<string, string> | undefined) || ({} as Record<string, string>);
   locks["glm-4.6"] = "zcode";
   lgwModels.channelLocks = locks;
+  // 预置一个模型组：预览里能看到「free → 多成员」在目录页展开成多行
+  lgwModels.groups = {
+    free: {
+      strategy: "priority",
+      members: [
+        { channel: "trae", real_model: "deepseek-v4-flash" },
+        { channel: "zcode", real_model: "glm-5.3-air" },
+      ],
+    },
+  };
 }
 
 /** 行内「渠道锁定」的预览视图：与 electron/backend/localgw/models.cjs 的 list() 同口径——
  *  锁生效时该行改成 source=channel-lock、channel/realModel 指向锁渠道；
  *  锁失效（目标渠道没有该模型）时只回传 lockChannel（前端据此提示并允许取消）；
- *  被改名绑定接管的行（override/custom）锁不生效。 */
+ *  被改名绑定接管的行（override/custom）锁不生效；模型组每个成员一行（source=group）。 */
 function lgwModelsView() {
   const lgwModels = LGW_CONFIG.models as Record<string, unknown>;
   const locks = (lgwModels.channelLocks as Record<string, string> | undefined) || ({} as Record<string, string>);
-  return LGW_MODELS.map((m) => {
+  const rates = (lgwModels.rates as Record<string, number> | undefined) || ({} as Record<string, number>);
+  const rateOf = (name: string) => {
+    const key = String(name || "").trim().toLowerCase();
+    const hit = Object.entries(rates).find(([k]) => k.toLowerCase() === key);
+    return hit && Number.isFinite(hit[1]) ? hit[1] : null;
+  };
+  const withRate = <T extends { id: string; display?: string }>(row: T) => {
+    const rate = rateOf((row as { display?: string }).display || row.id);
+    return rate == null ? row : { ...row, rate, rateSource: "user" as const };
+  };
+  const rows = LGW_MODELS.map((m) => withRate((() => {
     const lock = locks[m.display] || locks[m.id] || "";
     const sources = m.sources || [m.channel];
     const base = { ...m, sources, lockChannel: lock, renameLocked: m.source === "override" || m.source === "custom" };
@@ -1229,7 +1265,17 @@ function lgwModelsView() {
     const target = (LGW_CHANNEL_MODELS[lock] || []).find((r) => r.id === m.id);
     if (!target) return base;
     return { ...base, channel: lock, realModel: target.realModel, source: "channel-lock" as const };
-  });
+  })()));
+  const groups = (lgwModels.groups || {}) as Record<string, { members?: { channel?: string; real_model?: string }[] }>;
+  for (const [name, group] of Object.entries(groups)) {
+    for (const member of group?.members || []) {
+      const channel = String(member?.channel || "").trim();
+      const realModel = String(member?.real_model || "").trim();
+      if (!channel || !realModel) continue;
+      rows.push(withRate({ id: name, display: name, channel, realModel, source: "group" as const, groupName: name, sources: [channel], lockChannel: "", renameLocked: true }));
+    }
+  }
+  return rows;
 }
 
 /** 深合并（数组整体覆盖）：与 electron/backend/localgw/config.cjs 的 mergeDeep 同语义 */
@@ -1507,7 +1553,7 @@ export const mock = {
             "search.timeDecayHalfLife": { type: "number", def: 30, min: 0, max: 365, label: "时间衰减半衰期（天）", group: "检索", hot: true },
             "search.synonymsEnabled": { type: "boolean", def: true, label: "同义词表扩展", group: "检索", hot: true },
             "classify.fuzzyThreshold": { type: "number", def: 0.62, min: 0.3, max: 1, step: 0.01, label: "模糊匹配阈值", group: "归类", hot: true },
-            "agents.coreMaxTokens": { type: "number", def: 800, min: 200, max: 2000, label: "memory_core token 上限", group: "Agent 接入", hot: true },
+            "agents.coreMaxTokens": { type: "number", def: 800, min: 200, max: 4000, label: "memory_core token 上限", group: "Agent 接入", hot: true },
             "agents.digestMaxLines": { type: "number", def: 200, min: 50, max: 1000, label: "memory_digest 行数上限", group: "Agent 接入", hot: true },
             "agents.verifyInterval": { type: "number", def: 300, min: 30, max: 3600, label: "连接巡检间隔（秒）", group: "Agent 接入", hot: true },
             "deep.enabled": { type: "boolean", def: true, label: "深层记忆总开关", group: "深层记忆", hot: true },
@@ -1533,8 +1579,8 @@ export const mock = {
             "sync.intervalMin": { type: "number", def: 60, min: 5, max: 1440, label: "同步间隔（分钟）", group: "同步", hot: true },
             "sync.excludeIndex": { type: "boolean", def: true, label: "索引库不入同步包", group: "同步", hot: true },
             "ui.pageSize": { type: "number", def: 50, min: 10, max: 500, label: "列表每页条数", group: "界面", hot: true },
-            "ui.defaultTab": { type: "enum", def: "dashboard", options: ["dashboard", "browse", "projects", "profile", "agents", "index", "auto", "import", "sync"], label: "默认页签", group: "界面", hot: true },
-            "ui.tabs": { type: "multiselect", options: ["dashboard", "browse", "projects", "profile", "agents", "index", "auto", "import", "sync"], def: ["dashboard", "browse", "projects", "profile", "agents", "auto", "import", "sync"], label: "显示的页签", group: "界面", hot: true },
+            "ui.defaultTab": { type: "enum", def: "dashboard", options: ["dashboard", "browse", "projects", "profile", "hub", "agents", "index", "auto", "import", "sync", "logic"], label: "默认页签", group: "界面", hot: true },
+            "ui.tabs": { type: "multiselect", options: ["dashboard", "browse", "projects", "profile", "hub", "agents", "index", "auto", "import", "sync", "logic"], def: ["dashboard", "browse", "projects", "profile", "hub", "auto", "sync", "logic"], label: "显示的页签", group: "界面", hot: true },
             "ui.realtimeRefresh": { type: "boolean", def: true, label: "浏览页实时刷新", group: "界面", hot: true },
           },
           root: "C:\\Users\\demo\\AgentHub\\memory",
@@ -1699,7 +1745,7 @@ export const mock = {
         return { providers: MOCK_PROVIDERS.map((p) => ({ ...p })) };
       case "memory_gateway_list":
         return { gateways: [
-          { id: "gw-local", name: "本机网关（AgentHub 反代）", baseUrl: "http://127.0.0.1:9527/v1", available: true, urlOverride: "", modelCount: 2, enabledModelCount: 2, fallbackModel: "gpt-4o-mini" },
+          { id: "gw-local", name: "本机网关（AgentHub 本地网关）", baseUrl: "http://127.0.0.1:9527/v1", available: true, urlOverride: "", modelCount: 2, enabledModelCount: 2, fallbackModel: "gpt-4o-mini" },
         ] };
       case "memory_provider_save":
         return { ok: true, id: String((args?.id as string) || "prov_preview") };
@@ -1729,6 +1775,9 @@ export const mock = {
         ] };
       case "memory_provider_quirks":
         return { memo: { prov_demo: { supportsReasoningEffort: false, dropped: { reasoning_effort: true } } }, log: [] };
+      // 从本地网关导入：预览态只回数量（真机在主进程解密 Key 并落库，明文不回渲染层）
+      case "memory_provider_import_gateway":
+        return { ok: true, providerId: String(args?.providerId || "gw_preview"), modelCount: Array.isArray(args?.modelIds) ? (args?.modelIds as string[]).length : 0 };
       case "memory_model_list":
         return { models: MOCK_MODELS.map((m) => ({ ...m })) };
       case "memory_model_save":
@@ -2125,6 +2174,87 @@ export const mock = {
         if (ch) ch.checkinAuto = rule;
         return { ok: true, channel: chId, ...rule };
       }
+      // ===== 签到中心（浏览器预览：形状与 checkin-center.cjs 的 snapshot 一致）=====
+      case "proxy_checkin_center": {
+        type MockAcct2 = { id: string; channel: string; name: string; uid: string; status?: string; checkin?: { at?: number; ok?: boolean; unavailable?: boolean; streakDays?: number; message?: string } };
+        const pools = PROXY_POOL as unknown as { id: string; display: string; accounts: MockAcct2[] }[];
+        const providers = pools
+          .filter((p) => p.accounts.length)
+          .map((p) => ({
+            channel: p.id,
+            label: p.display,
+            doneCount: p.accounts.filter((a) => a.checkin?.at && a.checkin.ok !== false && !a.checkin.unavailable).length,
+            totalCount: p.accounts.length,
+            accounts: p.accounts.map((a) => ({
+              id: a.id,
+              name: a.name,
+              uid: a.uid,
+              status: a.status || "online",
+              checkedInToday: !!(a.checkin?.at && a.checkin.ok !== false && !a.checkin.unavailable),
+              checkinAt: Number(a.checkin?.at) || 0,
+              streakDays: Number(a.checkin?.streakDays) || 0,
+              message: String(a.checkin?.message || ""),
+              unavailable: !!a.checkin?.unavailable,
+            })),
+          }));
+        // 预览里没有 raccoon / zcode 的真实账号时，用两条虚拟行把三块的布局撑起来
+        // （真实形态由后端 CAPABILITIES 决定；这里只是让 UI 可看）
+        const raccoonRows = (pools.find((p) => p.id === "raccoon")?.accounts || []) as MockAcct2[];
+        const zcodeRows = (pools.find((p) => p.id === "zcode")?.accounts || []) as MockAcct2[];
+        const onboarding = (raccoonRows.length
+          ? raccoonRows.map((a) => ({ id: a.id, name: a.name, uid: a.uid, settled: false, settledAt: 0, settledCount: 0, ledger: {} as Record<string, number> }))
+          : [{ id: "mock-raccoon-1", name: "小浣熊 · 主号", uid: "rc_5a12", settled: false, settledAt: 0, settledCount: 0, ledger: {} as Record<string, number> }]
+        ).map((r) => ({ ...r, channel: "raccoon", note: "桌面端 / 手机端首登奖励，各一次" }));
+        const plans = (zcodeRows.length
+          ? zcodeRows.map((a) => ({ id: a.id, name: a.name, uid: a.uid, claimAt: Number(a.checkin?.at) || 0, claimOk: !!a.checkin?.ok, claimMessage: String(a.checkin?.message || "") }))
+          : [{ id: "mock-zcode-1", name: "ZCode · 体验号", uid: "zc_9f01", claimAt: 0, claimOk: false, claimMessage: "" }]
+        ).map((r) => ({ ...r, channel: "zcode", note: "限时体验套餐，领取需滑块验证码" }));
+        const adminPanels: string[] = [];
+        if (onboarding.length) adminPanels.push("onboarding");
+        if (plans.length) adminPanels.push("plans");
+        return {
+          generatedAt: Date.now(),
+          today: TODAY,
+          daily: {
+            providers,
+            todayDone: providers.reduce((n, p) => n + p.doneCount, 0),
+            todayEligible: providers.reduce((n, p) => n + p.totalCount, 0),
+          },
+          extras: { onboarding, plans, growth: [] },
+          adminPanels,
+          capabilities: { raccoon: { onboarding: true }, zcode: { plans: true } },
+        };
+      }
+      case "proxy_onboarding_claim":
+        return {
+          ok: true,
+          message: "新手福利已结清",
+          tasks: [
+            { key: "desktop_login_grant", title: "首次电脑端登录奖励", ok: true, already: false, gone: false, points: 3000, error: "" },
+            { key: "mobile_login_grant", title: "首次手机端登录奖励", ok: true, already: true, gone: false, points: 0, error: "" },
+          ],
+          claimed: 1, already: 1, failed: 0, points: 3000, settled: true,
+        };
+      case "proxy_plans_preview":
+        return {
+          ok: true,
+          message: "有 2 个可领取的奖励套餐",
+          plans: [
+            { planId: "start-plan-weekend", name: "周末体验包", description: "活动期内每天一份", priority: 10, endsAt: NOW + 3 * 86400000 },
+            { planId: "start-plan-trial", name: "限时体验套餐", description: "限时体验，每天一份", priority: 5, endsAt: NOW + 7 * 86400000 },
+          ],
+        };
+      case "proxy_plans_claim":
+        return { ok: true, message: "领取成功", planId: String(args?.planId || ""), credit: 100 };
+      case "proxy_growth_query":
+        return { ok: false, message: "当前版本没有渠道支持成长任务" };
+      case "proxy_growth_run":
+        return { ok: false, message: "当前版本没有渠道支持成长任务" };
+      case "proxy_checkin_records":
+        return [
+          { accountId: "a2", channel: "workbuddy", day: TODAY, action: "checkin", ok: true, already: true, unavailable: false, needCaptcha: false, credit: 100, streakDays: 3, message: "今日已签到", at: NOW - 3600e3 },
+          { accountId: "a1", channel: "trae", day: TODAY, action: "checkin", ok: true, already: false, unavailable: false, needCaptcha: false, credit: 120, streakDays: 1, message: "签到成功", at: NOW - 7200e3 },
+        ];
       case "proxy_scan":
         return [
           { channel: "workbuddy", uid: "wb_7c21", name: "工作号", source: "scan", file: "workbuddy-desktop.info", imported: true },
@@ -2183,9 +2313,15 @@ export const mock = {
         return { ok: true, channel: args?.channel || "workbuddy", count: 6, withRate: 4 };
       // ===== 自定义提供商（预览态不代打上游，但增删改与两态结果都要能演） =====
       case "proxy_provider_list":
-        return { ok: true, providers: MOCK_PROXY_PROVIDERS.map((p) => ({ ...p, models: [...p.models], keys: p.keys.map((k) => ({ ...k })) })) };
+        return {
+          ok: true,
+          providers: MOCK_PROXY_PROVIDERS.map((p) => ({ ...p, models: [...p.models], keys: p.keys.map((k) => ({ ...k })) })),
+          presets: MOCK_PROVIDER_PRESETS.map((p) => ({ ...p })),
+        };
       case "proxy_provider_create": {
-        const id = String(args?.id || "");
+        // 预设创建：模型清单在真机由主进程按 preset 补全，预览态不伪造模型行（只回一条空清单的提供商）
+        const preset = args?.preset ? MOCK_PROVIDER_PRESETS.find((x) => x.id === args.preset) : null;
+        const id = String(args?.id || preset?.id || "");
         if (MOCK_PROXY_PROVIDERS.some((p) => p.id === id)) return { ok: false, message: `标识 "${id}" 已存在` };
         const keys = (args?.keys as { key?: string }[]) || [];
         // 同名不同 Key 放行、同内容重复只收一把：与真机 addKey 的内容判重同一口径
@@ -2199,8 +2335,13 @@ export const mock = {
         }
         MOCK_PROVIDER_SECRETS.set(id, secrets);
         const p = {
-          id, display: String(args?.display || id), domain: "", kind: "openai_compat", enabled: args?.enabled !== false,
-          baseUrl: String(args?.baseUrl || ""), models: (args?.models as unknown[]) || [],
+          id,
+          display: String(args?.display || preset?.display || id),
+          domain: "",
+          kind: String(args?.kind || preset?.kind || "openai_compat"),
+          enabled: args?.enabled !== false,
+          baseUrl: String(args?.baseUrl || preset?.baseUrl || ""),
+          models: (args?.models as unknown[]) || [],
           extraHeaders: (args?.extraHeaders as Record<string, string>) || {}, extraBody: (args?.extraBody as Record<string, unknown>) || {},
           updatedAt: Date.now(),
           keys: keyRows, keyCount: keyRows.length, onlineCount: keyRows.length,
@@ -2873,6 +3014,13 @@ export const mock = {
         // 真机是"打一次上游"（骨架阶段返回 note 占位）；预览给固定延时，够验 loading 与结果行
         return { ok: true, latencyMs: 320, note: "浏览器预览 mock：未真实打上游" };
 
+      case "localgw_models_refresh_channels":
+        throw new Error("浏览器预览无法连接真实渠道，请在桌面客户端刷新渠道模型");
+      case "localgw_models_snapshot":
+        return { models: JSON.parse(JSON.stringify(lgwModelsView())), diagnostics: {
+          complete: true, totalAccounts: 0, examinedAccounts: 0, pendingAccounts: 0,
+          totalSources: 0, examinedSources: 0, pendingSources: 0, errors: [],
+        } };
       case "localgw_models_list":
         // 行内渠道锁在预览里也要生效：视图层按 channelLocks 改写，与真机 models.list() 同口径
         return JSON.parse(JSON.stringify(lgwModelsView()));
@@ -2908,6 +3056,25 @@ export const mock = {
         return { ok: true };
       }
 
+      // 模型消耗倍率（用户手填）：rate=null 清除；与真机同语义
+      case "localgw_models_set_rate": {
+        const model = String(args?.model || "").trim();
+        const rateRaw = args?.rate;
+        if (!model) return { ok: false, message: "缺少模型名" };
+        const lgwModels = (LGW_CONFIG.models || {}) as Record<string, unknown>;
+        const rates = { ...((lgwModels.rates as Record<string, number>) || {}) };
+        for (const key of Object.keys(rates)) {
+          if (key.toLowerCase() === model.toLowerCase()) delete rates[key];
+        }
+        if (rateRaw !== null && rateRaw !== undefined && rateRaw !== "") {
+          const rate = Number(rateRaw);
+          if (!Number.isFinite(rate) || rate < 0 || rate > 1000) return { ok: false, message: "倍率需为 0–1000 的数字（0 = 免费档）" };
+          rates[model] = rate;
+        }
+        lgwModels.rates = rates;
+        return { ok: true };
+      }
+
       // 渠道锁定（v1.82.2「渠道覆盖」）：channel 传空 = 清除；与真机同校验「该渠道有没有这个模型」
       case "localgw_models_set_channel_lock": {
         const model = String(args?.model || "").trim();
@@ -2931,7 +3098,7 @@ export const mock = {
       case "localgw_models_remove_rule": {
         const kind = String(args?.kind || "");
         const name = String(args?.name || "").trim();
-        if (!["overrides", "aliases", "custom"].includes(kind)) return { ok: false, message: `未知的模型配置表：${kind}` };
+        if (!["overrides", "aliases", "custom", "groups"].includes(kind)) return { ok: false, message: `未知的模型配置表：${kind}` };
         if (!name) return { ok: false, message: "缺少模型名" };
         const models = (LGW_CONFIG.models || {}) as Record<string, Record<string, unknown>>;
         const table = { ...(models[kind] || {}) };
@@ -2945,6 +3112,43 @@ export const mock = {
         if (!model) return { ok: false, message: "缺少模型名" };
         LGW_MODELS.push({ id: model, display: model, channel: provider.channel || "", realModel: provider.real_model || model, source: "custom" as const });
         return { ok: true };
+      }
+      // 批量添加（覆盖 / 自定义）：与真机同语义——同名覆盖旧值、缺名/缺渠道的行跳过并回报
+      case "localgw_models_batch_add": {
+        const kind = String(args?.kind || "");
+        const rows = Array.isArray(args?.rows) ? args.rows : [];
+        if (!["override", "custom"].includes(kind)) return { ok: false, message: "批量添加只支持 override / custom" };
+        if (!rows.length) return { ok: false, message: "没有要添加的模型" };
+        let added = 0, replaced = 0;
+        const skipped: { model: string; message: string }[] = [];
+        for (const raw of rows) {
+          const row = (raw || {}) as { model?: string; real_model?: string; channel?: string };
+          const model = String(row.model || "").trim();
+          const channel = String(row.channel || "").trim();
+          if (!model || !channel) { skipped.push({ model, message: "缺少模型名或渠道" }); continue; }
+          const next = { id: model, display: model, channel, realModel: String(row.real_model || model).trim() || model, source: kind as "override" | "custom", sources: [channel] };
+          const hit = LGW_MODELS.find((m) => m.id === model);
+          if (hit) { replaced++; Object.assign(hit, next); } else LGW_MODELS.push(next);
+          added++;
+        }
+        if (!added) return { ok: false, message: "没有可写入的条目（模型名与渠道都不能为空）", skipped };
+        return { ok: true, added, replaced, skipped };
+      }
+      // 模型组（对外名 → 多成员）：整组替换；目录视图 lgwModelsView() 会按成员展开
+      case "localgw_models_set_group": {
+        const name = String(args?.name || "").trim();
+        const payload = (args?.payload || {}) as { strategy?: string; members?: { channel?: string; real_model?: string }[] };
+        if (!name) return { ok: false, message: "缺少模型组名称" };
+        const members = (Array.isArray(payload.members) ? payload.members : [])
+          .map((m) => ({ channel: String(m?.channel || "").trim(), real_model: String(m?.real_model || "").trim() }))
+          .filter((m) => m.channel && m.real_model);
+        if (!members.length) return { ok: false, message: "模型组至少需要一个有效成员（渠道与实际模型名都不能为空）" };
+        const models = (LGW_CONFIG.models || {}) as Record<string, unknown>;
+        const groups = { ...((models.groups as Record<string, unknown>) || {}) };
+        for (const key of Object.keys(groups)) if (key.toLowerCase() === name.toLowerCase()) delete groups[key];
+        groups[name] = { strategy: payload.strategy === "round-robin" ? "round-robin" : payload.strategy === "credit" ? "credit" : "priority", members };
+        models.groups = groups;
+        return { ok: true, added: members.length };
       }
 
       case "localgw_config_get":
@@ -3064,129 +3268,14 @@ export const mock = {
 
       case "localgw_stats_cleanup":
         return { ok: true, deleted: LGW_LOGS.length };
-      // Provider 扩展点（决策 2）：本期后端固定返回未启用，预览照抄同一句话，
-      // 让页面「扩展点未启用」的提示分支在 dev:web 里也能看到（真机同款 ok:false → 调用层抛错）
+      // Web preview has no installed execution processes.
       case "localgw_providers_list":
+        return { ok: true, services: [] };
       case "localgw_providers_enable":
       case "localgw_providers_doctor":
       case "localgw_providers_exec":
         return { ok: false, message: "provider 扩展点未启用（方案决策 2，本期不打包 exe）" };
 
-      // ===== 自定义提供商（从 fdb3e55^ 恢复）：形状对齐 backend/proxy/provider.cjs 的返回 =====
-      case "proxy_provider_list":
-        return { ok: true, providers: JSON.parse(JSON.stringify(PROV_PROVIDERS)) };
-
-      case "proxy_provider_create": {
-        const id = String(args?.id || "").trim();
-        if (!id) return { ok: false, message: "标识不能为空" };
-        if (PROV_PROVIDERS.some((x) => x.id === id)) return { ok: false, message: `标识 ${id} 已存在` };
-        PROV_PROVIDERS.push({
-          id, display: String(args?.display || id), domain: "", kind: "openai_compat", enabled: true,
-          baseUrl: String(args?.baseUrl || ""), models: Array.isArray(args?.models) ? (args!.models as unknown[]) : [],
-          extraHeaders: (args?.extraHeaders as Record<string, string>) || {}, extraBody: (args?.extraBody as Record<string, unknown>) || {},
-          updatedAt: NOW, keyCount: 0, onlineCount: 0, keys: [],
-        });
-        return { ok: true, provider: PROV_PROVIDERS[PROV_PROVIDERS.length - 1], keyIds: [] };
-      }
-
-      case "proxy_provider_update": {
-        const row = PROV_PROVIDERS.find((x) => x.id === String(args?.id || ""));
-        if (!row) return { ok: false, message: "提供商不存在" };
-        if (args?.display !== undefined) row.display = String(args.display);
-        if (args?.baseUrl !== undefined) row.baseUrl = String(args.baseUrl);
-        if (Array.isArray(args?.models)) row.models = args!.models as unknown[];
-        row.updatedAt = NOW;
-        return { ok: true, provider: row };
-      }
-
-      case "proxy_provider_delete": {
-        const i = PROV_PROVIDERS.findIndex((x) => x.id === String(args?.id || ""));
-        if (i >= 0) PROV_PROVIDERS.splice(i, 1);
-        return { ok: true };
-      }
-
-      case "proxy_provider_add_key": {
-        const row = PROV_PROVIDERS.find((x) => x.id === String(args?.id || ""));
-        if (!row) return { ok: false, message: "提供商不存在" };
-        const kid = `k-${row.id}-${row.keys.length + 1}`;
-        row.keys.push({ id: kid, name: String(args?.name || `Key ${row.keys.length + 1}`), status: "online" as const, hasToken: true, coolUntil: 0, coolReason: "", todayReq: 0, lastUsed: 0 });
-        row.keyCount = row.keys.length;
-        return { ok: true, id: kid };
-      }
-
-      case "proxy_provider_remove_key": {
-        for (const row of PROV_PROVIDERS) {
-          const i = row.keys.findIndex((k) => k.id === String(args?.accountId || ""));
-          if (i >= 0) { row.keys.splice(i, 1); row.keyCount = row.keys.length; return { ok: true }; }
-        }
-        return { ok: false, message: "Key 不存在" };
-      }
-
-      // 测试连接：预览里直接回一个像样的成功结果（真机会真实打上游并可能计费）
-      case "proxy_provider_test":
-        return { ok: true, status: 200, ms: 412, model: String(args?.model || ""), sample: "pong", finishReason: "stop", usage: { prompt_tokens: 16, completion_tokens: 2, total_tokens: 18 } };
-
-      case "proxy_provider_fetch_models":
-        return { ok: true, models: ["gpt-4o", "gpt-4o-mini", "claude-sonnet-4.5", "deepseek-v4-flash"] };
-
-      // ===== 网络代理 / 出口池（从 fdb3e55^ 恢复）：形状对齐 backend/proxy/netproxy.cjs =====
-      case "proxy_netproxy_list":
-        return { ok: true, ...NP_STATE, settings: { testUrl: NP_STATE.testUrl, timeoutMs: NP_STATE.timeoutMs, defaultTestUrl: "https://www.gstatic.com/generate_204", defaultTimeoutMs: 8000 }, items: JSON.parse(JSON.stringify(NP_ITEMS)) };
-
-      case "proxy_netproxy_save": {
-        const id = String(args?.id || `np${NP_ITEMS.length + 1}`);
-        const row = NP_ITEMS.find((x) => x.id === id);
-        const draft = {
-          id, name: String(args?.name || "未命名出口"), protocol: (args?.protocol === "socks5" ? "socks5" : "http") as "http" | "socks5",
-          host: String(args?.host || ""), port: Number(args?.port) || 0, username: String(args?.username || ""),
-          hasPassword: !!args?.password || (!!row?.hasPassword && !args?.clearPassword),
-          enabled: args?.enabled !== false, lastTest: row?.lastTest ?? null, createdAt: row?.createdAt ?? NOW, updatedAt: NOW,
-        };
-        if (row) Object.assign(row, draft);
-        else NP_ITEMS.push(draft);
-        return { ok: true, item: draft };
-      }
-
-      case "proxy_netproxy_remove": {
-        const i = NP_ITEMS.findIndex((x) => x.id === String(args?.id || ""));
-        if (i >= 0) NP_ITEMS.splice(i, 1);
-        if (NP_STATE.fixedId === String(args?.id || "")) NP_STATE.fixedId = "";
-        return { ok: true };
-      }
-
-      case "proxy_netproxy_toggle": {
-        const row = NP_ITEMS.find((x) => x.id === String(args?.id || ""));
-        if (row) { row.enabled = !!args?.enabled; row.updatedAt = NOW; }
-        return { ok: true, item: row };
-      }
-
-      // 连通性测试：草稿态也能测（真机不落盘），这里统一给一个成功结果
-      case "proxy_netproxy_test":
-        return { ok: true, success: true, status: 204, ip: "203.0.113.7", durationMs: 186, error: "" };
-
-      case "proxy_netproxy_settings": {
-        // 策略立即落盘（旧版语义：切 mode 当场生效，失败回滚）
-        if (args?.mode !== undefined) NP_STATE.mode = String(args.mode) as "off" | "fixed" | "rotate";
-        if (args?.fixedId !== undefined) NP_STATE.fixedId = String(args.fixedId);
-        if (args?.testUrl !== undefined) NP_STATE.testUrl = String(args.testUrl);
-        if (args?.timeoutMs !== undefined) NP_STATE.timeoutMs = Number(args.timeoutMs) || 8000;
-        return { ok: true, ...NP_STATE, settings: { testUrl: NP_STATE.testUrl, timeoutMs: NP_STATE.timeoutMs, defaultTestUrl: "https://www.gstatic.com/generate_204", defaultTimeoutMs: 8000 }, items: JSON.parse(JSON.stringify(NP_ITEMS)) };
-      }
-
-      // ===== 生态接入（CC Switch，从 fdb3e55^ 恢复）=====
-      case "proxy_ccswitch_status":
-        return JSON.parse(JSON.stringify(CCS_STATE));
-
-      case "proxy_ccswitch_register": {
-        const appType = String(args?.appType || "claude") as "claude" | "codex" | "claude-desktop";
-        // entries 在类型上是可选字段（旧库/异常库可能缺），推入前先兜底成数组
-        if (!Array.isArray(CCS_STATE.entries)) CCS_STATE.entries = [];
-        const existed = CCS_STATE.entries.some((e) => e.appType === appType);
-        if (!existed) {
-          CCS_STATE.entries.push({ appType, registered: true, name: `AgentHub 网关（${appType}）` });
-        }
-        return { ok: true, action: existed ? "updated" : "inserted", appType, dbPath: CCS_STATE.dbPath, name: `AgentHub 网关（${appType}）`, backupPath: "C:\\Users\\demo\\.cc-switch\\backups\\cc-switch.db.bak_agenthub_demo" };
-      }
       // ===== 桌宠组件（悬浮桌宠 · 卡冈图雅）=====
       // 浏览器预览没有真实悬浮窗，只把配置读写跑通；窗口状态按 enabled 推导，
       // 页面据此显示「已显示 / 已关闭」，让设置页各分支都能被看到。

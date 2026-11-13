@@ -18,17 +18,24 @@ const models = require("./models.cjs");
 const oplog = require("./oplog.cjs");
 const usagehook = require("./usagehook.cjs");
 const forwarder = require("./forwarder.cjs");
+const creditPicker = require("./credit-picker.cjs");
+const routeState = require("./route-state.cjs");
+const routeAssist = require("./route-assist.cjs");
+const pool = require("../proxy/pool.cjs");
+const services = require("./services.cjs");
+const { waitForDrain } = require("./output-drain.cjs");
+const { createAttemptLedger } = require("../extensions/attempt-ledger.cjs");
 const memory = (() => { try { return require("../memory/index.cjs"); } catch { return null; } })();
 
 const { Gate, BodyQueue } = require("./admission.cjs");
 const concurrencyGuard = new Gate();
 const bodyQueue = new BodyQueue();
 const requests = require("./requests.cjs");
-const openaiOut = require("../proxy/protocols/openai-out.cjs");
-const anthropicOut = require("../proxy/protocols/anthropic-out.cjs");
-const anthropicIn = require("../proxy/protocols/anthropic-in.cjs");
-const responsesIn = require("../proxy/protocols/responses-in.cjs");
-const responsesOut = require("../proxy/protocols/responses-out.cjs");
+const openaiOut = require("./protocols/openai-out.cjs");
+const anthropicOut = require("./protocols/anthropic-out.cjs");
+const anthropicIn = require("./protocols/anthropic-in.cjs");
+const responsesIn = require("./protocols/responses-in.cjs");
+const responsesOut = require("./protocols/responses-out.cjs");
 const protocolUtil = require("../proxy/util.cjs");
 
 /** 运行状态 */
@@ -121,8 +128,8 @@ function acquireKeySlot(key) {
   };
 }
 
-/** 指纹脱敏：剔除客户端痕迹头的实际过滤在 proxy/adapters.cjs 内部完成；
- *  本模块不再单独做（避免重复维护两套名单；adapters 里已剥离 cc_/x-anthropic 等前缀特征头） */
+/** 指纹脱敏：私有渠道头由外部插件按其签名授权处理；本地网关只传递宿主允许的
+ * 受限材料，不在主仓复制渠道名单或私有协议。 */
 
 /** 发送 JSON 响应 */
 function sendJson(res, status, body, extraHeaders = {}) {
@@ -310,18 +317,29 @@ function aggregatedUsage(events, direction) {
   return Math.max(0, Number(direction === "in" ? usage.prompt_tokens ?? usage.input_tokens : usage.completion_tokens ?? usage.output_tokens) || 0);
 }
 
+/** 积分优先模式下的显式渠道指定：模型改名覆盖 > 渠道锁定（与 routing.pick 同优先级）。
+ *  固定渠道属于 fixed 策略，credit-first 下不参与；组请求的成员本身就是显式声明，
+ *  由组的成员顺序兜底，不看这里。 */
+function explicitChannelFor(model) {
+  const cfg = lgwConfig.get();
+  const override = cfg.models.overrides && cfg.models.overrides[model];
+  if (override && override.channel) return String(override.channel);
+  try { return String(models.channelLockOf(model) || ""); } catch { return ""; }
+}
+
 async function handleCompletion(req, res, ctx, protocol) {
   const t0 = Date.now();
   const c = lgwConfig.get();
   const ac = new AbortController();
   const close = () => { if (!res.writableEnded) ac.abort(new Error("客户端已断开")); };
   res.once("close", close);
-  let releaseBody, releaseGlobal, slot, deadline, heartbeat;
+  let releaseBody, releaseGlobal, slot, deadline, heartbeat, releaseAuthority, attemptLedger;
   let body, sink, channelUsed = "", forwardResult;
   const attempts = [];
-  let requestState;
+  let requestState, authorizedChannels;
   try {
     requestState = requests.begin(ctx.requestId, ac, ctx.apiKeyPrefix);
+    releaseAuthority = watchKey(ctx, ac, () => requestState.channel ? [requestState.channel] : authorizedChannels);
     const raw = await readBody(req, c.bodyLimitMb, ac.signal);
     try { body = JSON.parse(raw.toString("utf8") || "{}"); }
     catch { sendJson(res, 400, { error: { message: "请求体不是有效 JSON" } }); return; }
@@ -341,8 +359,46 @@ async function handleCompletion(req, res, ctx, protocol) {
     const model = String(body.model || "").trim();
     if (!model) { sendJson(res, 400, { error: { message: "缺少 model 字段" } }); return; }
     const allowed = ctx.isApiKey && ctx.key?.scopes?.length && !ctx.key.scopes.includes("*") ? new Set(ctx.key.scopes) : null;
-    const bindings = models.bindings(model).filter((m) => !allowed || allowed.has(m.channel));
-    if (!bindings.length) { sendJson(res, allowed ? 403 : 404, { error: { message: allowed ? "模型没有已授权的渠道绑定" : "模型未配置或已关闭" } }); return; }
+    const authorizeChannel = catalogAuthorization(ctx);
+    const snapshot = await models.prepare({ ...catalogContext(ctx, authorizeChannel), signal: ac.signal });
+    const declared = models.bindings(model, new Set(), snapshot).filter((m) => !allowed || allowed.has(m.channel));
+    // 模型组先解析：组存在但成员渠道全被关闭时 declared 是空数组，错误文案要说清是「组没有可用成员」
+    const group = models.groupSpec(model, snapshot);
+    if (!declared.length) {
+      if (group && !allowed) {
+        sendJson(res, 503, { error: { message: `模型组「${model}」当前没有可用成员（渠道被关闭或执行来源未打开）`, code: "MODEL_GROUP_EMPTY" } });
+        return;
+      }
+      sendJson(res, allowed ? 403 : 404, { error: { message: allowed ? "模型没有已授权的渠道绑定" : "模型未配置或已关闭" } });
+      return;
+    }
+    const bindings = [];
+    for (const binding of declared) {
+      if (binding.unavailable) continue;
+      try {
+        const captured = services.check(binding.channel, () => authorizeChannel(binding.channel));
+        bindings.push({ ...binding, serviceRef: captured.ref });
+      } catch { /* Unavailable sources must not reach routing/account selection. */ }
+    }
+    if (!bindings.length) {
+      sendJson(res, 503, { error: { message: group
+        ? `模型组「${model}」的成员渠道当前都不可执行（执行插件未启用、未就绪或未打开该渠道）`
+        : "执行插件未启用、未就绪或未打开该渠道", code: "FORWARD_PLUGIN_UNAVAILABLE" } });
+      return;
+    }
+    // 能力过滤：请求明确要 tools/images/video 时，先剔除声明确实不支持的候选；
+    // 过滤后一个都不剩就保留原候选（宁可让上游回明确的 400，也不在网关层制造无解）。
+    const needs = routeAssist.requestNeeds(body);
+    if (c.routing.needsFilter !== false && routeAssist.hasNeeds(needs)) {
+      const capable = bindings.filter((binding) => routeAssist.supportsBinding(binding, needs));
+      if (capable.length) bindings.splice(0, bindings.length, ...capable);
+    }
+    // 组成员按「渠道 + 实际模型」逐个选：同一渠道可以挂多个成员，渠道级 pick 会永远只命中第一条。
+    const groupRows = group ? bindings.filter((m) => m.groupName) : [];
+    const groupMode = groupRows.length > 0;
+    // While queued, loss of every candidate channel cancels the waiter. Once an
+    // attempt starts, revocation is scoped to that attempt's actual channel.
+    authorizedChannels = bindings.map(binding => binding.channel);
     if (ctx.isApiKey) {
       const rl = checkRateLimit(ctx.key);
       if (!rl.ok) { sendJson(res, rl.status, { error: { message: rl.message } }); return; }
@@ -362,65 +418,220 @@ async function handleCompletion(req, res, ctx, protocol) {
       estInputTokens: () => 0,
     });
     if (body.stream) heartbeat = setInterval(() => {
-      if (res.headersSent && !res.writableEnded && !res.destroyed) sink.keepAlive();
+      if (res.headersSent && !res.writableEnded && !res.destroyed && !res.writableNeedDrain) sink.keepAlive();
     }, 15000);
     const excluded = new Set(routing.channelsWithAccounts().filter((ch) => !bindings.some((m) => m.channel === ch)));
+    // 组内成员级排重：同一渠道的不同模型要分开判死，不能因为一个模型失败把整条渠道排掉
+    const blockedMembers = new Set();
     const triedAccounts = new Map();
     const budget = c.routing.failover === false ? 1 : Math.max(1, Math.min(10, Math.floor(c.routing.maxRetriesPerRequest || 3)));
     const totalBudget = body.stream ? c.streamTotalTimeoutMs : c.requestTimeoutMs;
     const until = totalBudget > 0 ? Date.now() + totalBudget : Infinity;
+    attemptLedger = createAttemptLedger({ limit: budget, deadlineAt: Number.isFinite(until) ? until : null, signal: ac.signal });
     if (totalBudget > 0) deadline = setTimeout(() => ac.abort(Object.assign(new Error("请求总时限已到"), { code: "TIMEOUT" })), totalBudget);
     if (protocol !== "openai") sink.writeHead();
-    let count = 0, loops = 0;
-    while (count < budget && loops++ < 128) {
+    // 积分优先：组策略 credit 或全局策略 credit-first 时，选号上提为「一次定号」——
+    // 先跨渠道按积分档位挑出唯一账号+渠道+真实模型，再交给执行器并钉住，执行器不再换号。
+    // 资格判定仍由 accountPlan 负责（credit-picker 不复制任何规则）。
+    const creditCatalogExclude = (ch, realModel) => {
+      try { return snapshot.catalog.excludedAccounts(ch, realModel); } catch { return []; }
+    };
+    const explicitChannel = groupMode ? "" : explicitChannelFor(model);
+    // 会话粘性：同一个对话（模型 + 首条 user 消息）上次成功用过哪个号，下次优先还用它。
+    // sticky=off 时返回空串，整条链路零开销。
+    const convKey = routeAssist.stickyKeyFor(body, req.headers);
+    // 三级兜底的第一级：全渠道都没有可用账号时，挑「冷却中且恢复最早」的强试一次。
+    // 正常路径 anyEligible 为真，这段不产生任何决策。
+    let bestEffort = null;
+    if (c.routing.failover !== false) {
+      const anyEligible = bindings.some((m) => {
+        try { return pool.accountPlan(m.channel, undefined, [], 0, m.realModel).some((r) => r.eligible); } catch { return false; }
+      });
+      if (!anyEligible) bestEffort = routeAssist.bestEffort(bindings, Date.now());
+    }
+
+    let loops = 0;
+    while (attemptLedger.remaining > 0 && loops++ < 128) {
       ac.signal.throwIfAborted();
-      const channel = routing.pick(model, [...excluded]);
-      if (!channel) break;
-      const binding = bindings.find((m) => m.channel === channel);
-      if (!binding) { excluded.add(channel); continue; }
+      let binding, pinAccountId = "";
+      if (bestEffort) {
+        // 强试只发生一次：把真实的上游错误（含 429 恢复时间）带回客户端，比直接 503 有用。
+        binding = bestEffort.binding;
+        pinAccountId = bestEffort.accountId;
+        bestEffort = null;
+      } else if (groupMode && group.strategy === "credit") {
+        const picked = creditPicker.pick({
+          bindings: groupRows, excludeChannels: excluded, excludeMembers: blockedMembers, triedAccounts,
+          catalogExcludeAccounts: creditCatalogExclude,
+          scopeOf: (item) => routing.groupMemberKey(item),
+        });
+        if (!picked) break;
+        binding = picked.binding;
+        pinAccountId = picked.row.account.id;
+      } else if (!groupMode && c.routing.strategy === "credit-first") {
+        const picked = creditPicker.pickWithExplicit({
+          bindings, excludeChannels: excluded, triedAccounts,
+          catalogExcludeAccounts: creditCatalogExclude,
+          scopeOf: (item) => item.channel,
+          explicitChannel, failover: c.routing.failover !== false,
+        });
+        if (!picked) break;
+        binding = picked.binding;
+        pinAccountId = picked.row.account.id;
+      } else if (groupMode) {
+        // 组请求不看全局路由策略：成员顺序 / 轮询由组自己决定，失败自动换下一个还能用的成员
+        binding = routing.pickGroupMember(groupRows, group.strategy, excluded, blockedMembers, `group:${group.name}`);
+        if (!binding) break;
+      } else {
+        const channel = routing.pick(model, [...excluded]);
+        if (!channel) break;
+        binding = bindings.find((m) => m.channel === channel);
+        if (!binding) {
+          // fixed / 模型覆盖 / 渠道锁定可能选出一个没有可用执行绑定的渠道。
+          // failover 关掉时必须按「固定渠道不可用」直接失败，不能悄悄换到别的渠道。
+          excluded.add(channel);
+          if (c.routing.failover === false) break;
+          continue;
+        }
+      }
+      const channel = binding.channel;
+      // 账号排重键：普通模型按渠道；组按「渠道 + 实际模型」（同渠道不同模型的可用账号可能不同）
+      const accountScope = groupMode ? routing.groupMemberKey(binding) : channel;
+      // 选号增强：同渠道多号时按计划钉住首选（单号渠道返回空串，行为与改动前完全一致）。
+      // 顺序尊重号池自己的 poolStrategy，计划只叠加粘性、退避、垫底与熔断。
+      if (!pinAccountId) {
+        pinAccountId = routeAssist.pinForBinding(binding, {
+          state: routeState.snapshot(),
+          stickyKey: convKey,
+          needs,
+          tried: [...(triedAccounts.get(accountScope) || [])],
+        });
+      }
       channelUsed = channel;
       requestState.phase = "等待上游";
       requestState.channel = channel;
-      requestState.attempts = count + 1;
+      requestState.attempts = attemptLedger.used + 1;
       sink.resetAttempt();
       let committed = false, outputBytes = 0, usage = null, finish = "stop";
-      const emit = (ev) => {
+      const REFUSAL_MARKERS = ["作为一个人工智能语言模型", "作为一个人工智能助手", "无法回答此类问题", "未学习如何回答这个问题"];
+      let accumulatedText = "";
+
+      const attemptAc = new AbortController();
+      const combinedSignal = AbortSignal.any([ac.signal, attemptAc.signal]);
+      const idleLimitMs = body.stream ? (c.routing.streamIdleTimeoutMs || 30000) : 0;
+      let idleTimer = null;
+      const resetIdle = () => {
+        if (idleLimitMs > 0 && !attemptAc.signal.aborted) {
+          clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => {
+            attemptAc.abort(Object.assign(new Error("流式响应分片空闲超时（30秒上游无新数据）"), { code: "STREAM_STALL" }));
+          }, idleLimitMs);
+        }
+      };
+      if (idleLimitMs > 0) resetIdle();
+
+      const emit = async (ev) => {
+        resetIdle();
         if (ev.type === "delta") {
           if (!protocolUtil.hasConsumableDelta(ev.delta || {})) return;
+          const textChunk = String(ev.delta?.content || ev.delta?.text || "");
+          accumulatedText += textChunk;
+          // Refusal Guard：未提交给客户端前识别假 200 套话拒答
+          if (!committed && accumulatedText.length < 250 && REFUSAL_MARKERS.some(m => accumulatedText.includes(m))) {
+            throw Object.assign(new Error("上游安全套话拒答（触发容错避让）"), { code: "REFUSAL_BLOCKED", status: 502 });
+          }
           outputBytes += Buffer.byteLength(JSON.stringify(ev.delta));
           if (outputBytes > 16 * 1024 * 1024) throw Object.assign(new Error("上游输出超过网关限制"), { status: 413 });
           if (body.stream && !committed) { if (protocol === "openai") sink.writeHead(); committed = true; }
           requestState.phase = "接收响应";
           sink.onDelta(ev.delta);
         } else if (ev.type === "usage") { usage = ev.usage; sink.onUsage(usage); }
-        else if (ev.type === "finish") { finish = ev.reason || "stop"; sink.onFinish(finish); }
+        else if (ev.type === "finish") {
+          finish = ev.reason || "stop";
+          if (!committed && finish === "content_filter") {
+            throw Object.assign(new Error("上游安全过滤拒答（content_filter）"), { code: "REFUSAL_BLOCKED", status: 502 });
+          }
+          sink.onFinish(finish);
+        }
+        await waitForDrain(res, ac.signal);
       };
-      forwardResult = await forwarder.forward({ ...body, model: binding.realModel }, channel, binding.realModel, model,
-        { ...ctx, excludeAccounts: [...(triedAccounts.get(channel) || [])] }, Number.isFinite(until) ? Math.max(1, until - Date.now()) : 0, emit, ac.signal);
+      try {
+        forwardResult = await forwarder.forward({ ...body, model: binding.realModel }, channel, binding.realModel, model,
+          { ...ctx, serviceRef: binding.serviceRef, clientHeaders: req.headers, clientRawHeaders: req.rawHeaders,
+            stateContext: () => executionStateContext(ctx), authorize: () => !combinedSignal.aborted && authorizeChannel(channel),
+            catalogExcludeAccounts: () => snapshot.catalog.excludedAccounts(channel, binding.realModel),
+            catalogModels: accountId => snapshot.catalog.accountModels(channel, accountId), attempt: attemptLedger.used + 1,
+            attemptsRemaining: attemptLedger.remaining - 1, attemptLedger, excludeAccounts: [...(triedAccounts.get(accountScope) || [])],
+            pinAccountId }, Number.isFinite(until) ? Math.max(1, until - Date.now()) : 0, emit, combinedSignal);
+      } catch (err) {
+        if (!committed && (err.code === "STREAM_STALL" || err.code === "REFUSAL_BLOCKED")) {
+          forwardResult = {
+            ok: false,
+            status: err.code === "STREAM_STALL" ? 504 : 502,
+            errCode: err.code === "STREAM_STALL" ? "timeout" : "model_blocked",
+            switchable: true,
+            failureScope: "upstream",
+            error: err.message,
+            accountId: pinAccountId,
+          };
+        } else {
+          throw err;
+        }
+      } finally {
+        clearTimeout(idleTimer);
+      }
+      requestState.attempts = attemptLedger.used;
       // committed 取两者之或：本地 sink 已写响应头，或转发层已向客户端吐出可消费内容。
       // 只看局部变量时，非流式 / 降级重发路径会把「已输出」记成 false，日志漏标。
-      attempts.push({ channel, model: binding.realModel, code: forwardResult.errCode || "ok", ms: forwardResult.ms || 0, committed: committed || forwardResult.committed === true });
+      attempts.push({ channel, model: binding.realModel, code: forwardResult.errCode || "ok", ms: forwardResult.ms || 0, committed: committed || forwardResult.committed === true,
+        ...(forwardResult.accountId ? { accountId: forwardResult.accountId } : {}),
+        ...(forwardResult.executionFacts?.length ? { executionFacts: forwardResult.executionFacts } : {}) });
       if (forwardResult.accountId) {
-        count++;
-        if (!triedAccounts.has(channel)) triedAccounts.set(channel, new Set());
-        triedAccounts.get(channel).add(forwardResult.accountId);
+        if (!triedAccounts.has(accountScope)) triedAccounts.set(accountScope, new Set());
+        triedAccounts.get(accountScope).add(forwardResult.accountId);
       }
       if (forwardResult.ok) {
         routing.markSucceeded(channel);
+        // 成功写回：清退避/垫底，并把这个对话钉在刚成功的号上（下一轮优先复用它）。
+        if (forwardResult.accountId) {
+          routeState.markSuccess(forwardResult.accountId);
+          if (convKey) routeState.stickySet(convKey, forwardResult.accountId);
+        }
         sink.endOk(finish, protocol === "openai" && body.stream && body.stream_options?.include_usage === false ? null : usage);
         break;
       }
       if (committed || forwardResult.switchable === false || ac.signal.aborted) break;
-      if (forwardResult.accountId && !require("../proxy/pool.cjs").accountPlan(channel, undefined, [...triedAccounts.get(channel)], 0, binding.realModel).some((r) => r.eligible)) {
-        excluded.add(channel);
-        if (forwardResult.failureScope !== "egress" && ["server", "timeout"].includes(forwardResult.errCode)) routing.markFailed(channel);
+      // 失败写回：只对「还没向客户端吐过内容」的失败记状态 —— 已吐字后的超时多半是客户端断开，
+      // 罚账号会让它在接下来 15 分钟里被无谓地排到后面。
+      if (forwardResult.accountId) {
+        const action = routeAssist.failureAction(forwardResult.errCode, forwardResult.failureScope);
+        if (action === "rest") routeState.markFailure(forwardResult.accountId);
+        else if (action === "sunk") routeState.markSunk(forwardResult.accountId);
       }
-      if (!forwardResult.accountId) {
-        excluded.add(channel);
+      const accountsLeft = !!forwardResult.accountId
+        && require("../proxy/pool.cjs").accountPlan(channel, undefined, [...(triedAccounts.get(accountScope) || [])], 0, binding.realModel).some((r) => r.eligible);
+      if (groupMode) {
+        // 组内成员级故障转移：模型不存在 / 账号都不可用时只判死这个成员，
+        // 同渠道的其它成员（另一个模型）仍然保留在候选里。
+        const hopeless = !forwardResult.accountId || ["not_found", "model_blocked", "model_config"].includes(forwardResult.errCode);
+        if (!accountsLeft || hopeless) blockedMembers.add(routing.groupMemberKey(binding));
+        if (!accountsLeft && forwardResult.failureScope !== "egress" && ["server", "timeout"].includes(forwardResult.errCode)) routing.markFailed(channel);
+      } else {
+        if (forwardResult.accountId && !accountsLeft) {
+          excluded.add(channel);
+          if (forwardResult.failureScope !== "egress" && ["server", "timeout"].includes(forwardResult.errCode)) routing.markFailed(channel);
+        }
+        if (!forwardResult.accountId) {
+          excluded.add(channel);
+        }
       }
       if (c.routing.failover === false) break;
     }
-    if (!forwardResult?.ok && !res.writableEnded && !res.destroyed) sink.endErr(forwardResult?.status || 503, forwardResult?.error || "当前没有可用渠道", "upstream_error", forwardResult?.errCode || "no_route");
+    if (!forwardResult?.ok && !res.writableEnded && !res.destroyed) {
+      const noRoute = group ? `模型组「${model}」当前没有可用成员` : "当前没有可用渠道";
+      sink.endErr(forwardResult?.status || 503, forwardResult?.error || noRoute, "upstream_error",
+        forwardResult?.errCode || (group ? "no_group_member" : "no_route"));
+    }
     const ok = forwardResult?.ok === true;
     const ms = Date.now() - t0;
     const events = forwardResult?.events;
@@ -440,7 +651,11 @@ async function handleCompletion(req, res, ctx, protocol) {
   } finally {
     clearTimeout(deadline);
     clearInterval(heartbeat);
+    releaseAuthority?.();
+    attemptLedger?.close();
     requests.end(ctx.requestId);
+    // 顺手清掉过期的退避/垫底/粘性：长跑进程里这些表必须有人收，否则只增不减。
+    try { routeState.prune(); } catch { /* 状态清理失败不影响本次请求 */ }
     releaseGlobal?.();
     releaseBody?.();
     slot?.release();
@@ -452,14 +667,16 @@ function handleChat(req, res, ctx) { return handleCompletion(req, res, ctx, "ope
 function handleMessages(req, res, ctx) { return handleCompletion(req, res, ctx, "anthropic"); }
 
 /** 处理 OpenAI /v1/models */
-function handleModels(req, res, ctx) {
+async function handleModels(req, res, ctx) {
   const c = lgwConfig.get();
   if (!c.models.exposeInV1Models) {
     sendJson(res, 200, { object: "list", data: [] });
     return;
   }
   const allowed = ctx?.key?.scopes?.length && !ctx.key.scopes.includes("*") ? new Set(ctx.key.scopes) : null;
-  const rows = [...new Map(models.list().filter((m) => !allowed || allowed.has(m.channel)).map((m) => [m.display, m])).values()].map((m) => ({
+  const snapshot = await prepareRequestCatalog(req, res, ctx);
+  if (res.destroyed) return;
+  const rows = [...new Map(models.list(snapshot).filter((m) => (!allowed || allowed.has(m.channel)) && serviceReady(m.channel)).map((m) => [m.display, m])).values()].map((m) => ({
     id: m.display,
     object: "model",
     created: Math.floor(Date.now() / 1000),
@@ -470,10 +687,65 @@ function handleModels(req, res, ctx) {
 
 /** 处理 Anthropic /v1/models
  *  Anthropic 没有 /v1/models 端点；本模块返回空目录即可（不影响 Claude Code 等客户端） */
-function handleAnthropicModels(req, res, ctx) {
+async function handleAnthropicModels(req, res, ctx) {
   const allowed = ctx?.key?.scopes?.length && !ctx.key.scopes.includes("*") ? new Set(ctx.key.scopes) : null;
-  const rows = [...new Map(models.list().filter((m) => !allowed || allowed.has(m.channel)).map((m) => [m.display, m])).values()];
+  const snapshot = await prepareRequestCatalog(req, res, ctx);
+  if (res.destroyed) return;
+  const rows = [...new Map(models.list(snapshot).filter((m) => (!allowed || allowed.has(m.channel)) && serviceReady(m.channel)).map((m) => [m.display, m])).values()];
   sendJson(res, 200, { data: rows.map((m) => ({ id: m.display, type: "model", display_name: m.display })), has_more: false, first_id: rows[0]?.display || null, last_id: rows.at(-1)?.display || null });
+}
+
+// The shared directory refresh checks current credentials/permissions, independent
+// of any one HTTP waiter's signal. Disconnect only cancels that waiter.
+function catalogAuthorization(ctx) {
+  return channel => {
+    if (!ctx?.isApiKey) return ctx?.isAdmin === true || ctx?.isReadonly === true;
+    const key = keysStore.getById(ctx.apiKeyId);
+    return !!key && key.status === "active" && (!key.expiresAt || key.expiresAt > Date.now())
+      && (!key.scopes?.length || key.scopes.includes("*") || key.scopes.includes(channel));
+  };
+}
+function watchKey(ctx, controller, channelsFor = () => undefined) {
+  if (!ctx?.isApiKey) return () => {};
+  return requests.watchAuthority({ controller, tags: { keyId: ctx.apiKeyId }, check() {
+    const key = keysStore.getById(ctx.apiKeyId);
+    const channels = channelsFor();
+    return !!key && key.status === "active" && (!key.expiresAt || key.expiresAt > Date.now())
+      && (!channels?.length || !key.scopes?.length || key.scopes.includes("*") || channels.some(channel => key.scopes.includes(channel)));
+  } });
+}
+function catalogContext(ctx, authorizeChannel = catalogAuthorization(ctx)) {
+  const key = ctx?.isApiKey ? keysStore.getById(ctx.apiKeyId) : null;
+  return { audience: ctx?.isApiKey ? `key:${ctx.apiKeyId}` : ctx?.isReadonly ? "readonly" : "admin", authorizeChannel,
+    authorizationVersion: key ? require("node:crypto").createHash("sha256").update(JSON.stringify([key.status, key.expiresAt, key.scopes])).digest("hex") : "",
+    ...(key?.scopes?.length && !key.scopes.includes("*") ? { channels: key.scopes } : {}) };
+}
+function executionStateContext(ctx) {
+  if (ctx?.isApiKey) {
+    const version = keysStore.authorizationVersion(ctx.apiKeyId);
+    if (!version) throw Object.assign(new Error("网关密钥授权已失效"), { code: "AUTHORITY_REVOKED", status: 403 });
+    return { audience: "key:" + ctx.apiKeyId, authorizationVersion: version };
+  }
+  if (ctx?.isAdmin === true || ctx?.isReadonly === true) {
+    return { audience: ctx.isAdmin === true ? "admin" : "readonly", authorizationVersion: "local-role-v1" };
+  }
+  throw Object.assign(new Error("缺少已认证的执行主体"), { code: "AUTHORITY_REVOKED", status: 403 });
+}
+async function prepareRequestCatalog(req, res, ctx) {
+  const controller = new AbortController();
+  const close = () => { if (!res.writableEnded) controller.abort(new Error("客户端已断开")); };
+  res.once("close", close);
+  let releaseAuthority;
+  try {
+    releaseAuthority = watchKey(ctx, controller);
+    const snapshot = await models.prepare({ ...catalogContext(ctx), signal: controller.signal });
+    controller.signal.throwIfAborted();
+    return snapshot;
+  } finally { releaseAuthority?.(); res.off("close", close); }
+}
+
+function serviceReady(channel) {
+  try { services.check(channel, () => true); return true; } catch { return false; }
 }
 
 /** 主请求分发 */

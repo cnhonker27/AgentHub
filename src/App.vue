@@ -45,6 +45,8 @@ import SyncLogView from "./views/sync/LogView.vue";
 import ProxyHomeView from "./views/proxy/ProxyHomeView.vue";
 import ProxyAgentsView from "./views/proxy/ProxyAgentsView.vue";
 import ProxyExpiryView from "./views/proxy/ProxyExpiryView.vue";
+// 签到中心：每日签到 / 新手福利 / 活动福利 / 成长任务四节（后端 adminPanels 决定显隐）
+import ProxyCheckinView from "./views/proxy/ProxyCheckinView.vue";
 import ProxyPoolSyncView from "./views/proxy/ProxyPoolSyncView.vue";
 import ProxyLogView from "./views/proxy/ProxyLogView.vue";
 // 记忆中枢模块：9 个页面 + 隐藏配置页（模块级 .memory-scope 样式作用域，可整体剥离）
@@ -59,6 +61,7 @@ import MemoryIndexView from "./views/memory/IndexView.vue";
 import MemoryAutoView from "./views/memory/AutoView.vue";
 import MemoryImportView from "./views/memory/ImportView.vue";
 import MemorySyncView from "./views/memory/SyncView.vue";
+import MemoryLogicView from "./views/memory/LogicView.vue";
 import MemoryDetailDrawer from "./components/memory/MemoryDetailDrawer.vue";
 import ConfigMemorySection from "./components/config/ConfigMemorySection.vue";
 // 提示词库模块：优化 / 优化历史 / 个人库 / 同步 四页 + 隐藏的详情编辑器（页 id 见方案总纲：prompt-detail）。
@@ -722,6 +725,7 @@ const pageValid = computed(
         <SyncLogView v-if="seen('sync', 'log')" v-show="on('sync', 'log')" class="sync-scope" :class="{ 'page-anim': on('sync', 'log') }" />
         <ProxyHomeView v-if="seen('proxy', 'home')" v-show="on('proxy', 'home')" :class="{ 'page-anim': on('proxy', 'home') }" />
         <ProxyAgentsView v-if="seen('proxy', 'agents')" v-show="on('proxy', 'agents')" :class="{ 'page-anim': on('proxy', 'agents') }" />
+        <ProxyCheckinView v-if="seen('proxy', 'checkin')" v-show="on('proxy', 'checkin')" :class="{ 'page-anim': on('proxy', 'checkin') }" />
         <ProxyExpiryView v-if="seen('proxy', 'expiry')" v-show="on('proxy', 'expiry')" :class="{ 'page-anim': on('proxy', 'expiry') }" />
         <ProxyPoolSyncView v-if="seen('proxy', 'poolsync')" v-show="on('proxy', 'poolsync')" :class="{ 'page-anim': on('proxy', 'poolsync') }" />
         <ProxyLogView v-if="seen('proxy', 'proxylog')" v-show="on('proxy', 'proxylog')" :class="{ 'page-anim': on('proxy', 'proxylog') }" />
@@ -739,6 +743,7 @@ const pageValid = computed(
         <MemoryAutoView v-if="seen('memory', 'auto')" v-show="on('memory', 'auto')" class="page" :class="{ 'page-anim': on('memory', 'auto') }" />
         <MemoryImportView v-if="seen('memory', 'import')" v-show="on('memory', 'import')" class="page" :class="{ 'page-anim': on('memory', 'import') }" />
         <MemorySyncView v-if="seen('memory', 'sync')" v-show="on('memory', 'sync')" class="page" :class="{ 'page-anim': on('memory', 'sync') }" />
+        <MemoryLogicView v-if="seen('memory', 'logic')" v-show="on('memory', 'logic')" class="page" :class="{ 'page-anim': on('memory', 'logic') }" />
         <!-- 提示词库五页：各页自带 .page.prompts-scope 容器（样式作用域见 styles/prompts.css）；
              页 id 与 MODULES 一一对应；prompt-detail 是隐藏页（从库/优化结果点卡片进入），不进横条菜单 -->
         <PromptsOptimizeView v-if="seen('prompts', 'optimize')" v-show="on('prompts', 'optimize')" :class="{ 'page-anim': on('prompts', 'optimize') }" />

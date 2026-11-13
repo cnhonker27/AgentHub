@@ -29,19 +29,30 @@ export {
   // 路由 / 渠道
   localgwRouteGet as routeGet,
   localgwRouteSet as routeSet,
+  localgwRoutePlan as routePlan,
   localgwChannelToggle as channelToggle,
   localgwChannelTest as channelTest,
   // 模型目录
   localgwModelsList as modelsList,
+  localgwModelsSnapshot as modelsSnapshot,
+  localgwModelsRefreshChannels as modelsRefreshChannels,
   // 「覆盖与自定义」表单的「实际模型名」下拉：按渠道取该渠道的原生模型清单
   // （不能用 modelsList 过滤渠道：合并目录里同名模型被覆盖/自定义接管后原渠道行就没了）
   localgwModelsChannelModels as modelsChannelModels,
   localgwModelsSetOverride as modelsSetOverride,
+  // 模型消耗倍率（用户手填）：null = 清除
+  localgwModelsSetRate as modelsSetRate,
   // 渠道锁定（v1.82.2「渠道覆盖」）：只锁渠道、不改上游模型名；channel 传空 = 清除锁定
   localgwModelsSetChannelLock as modelsSetChannelLock,
   localgwModelsSetAlias as modelsSetAlias,
   localgwModelsAddCustom as modelsAddCustom,
-  // 删除单条模型规则（overrides / aliases / custom）：config_patch 是加性合并删不掉，
+  // 模型组（对外名聚合多模型）：整组保存 / 删除走 removeRule("groups", 组名)
+  localgwModelsSetGroup as modelsSetGroup,
+  // 积分优先选号的只读预览（本期无界面；排障 / 后续 UI 用，无副作用）
+  localgwCreditRoutePreview as creditRoutePreview,
+  // 批量添加（覆盖 / 自定义多选）：后端一次合并一次落盘
+  localgwModelsBatchAdd as modelsBatchAdd,
+  // 删除单条模型规则（overrides / aliases / custom / groups）：config_patch 是加性合并删不掉，
   // 后端为此单开通道，见 models.cjs 的 removeRule
   localgwModelsRemoveRule as modelsRemoveRule,
   // 配置
@@ -71,6 +82,11 @@ export type {
   LocalgwModelRow,
   // 某渠道的原生模型清单条目（覆盖与自定义表单的「实际模型名」下拉）
   LocalgwChannelModel,
+  // 模型组（对外名 → 多成员）
+  LocalgwModelGroup,
+  LocalgwModelGroupMember,
+  // 积分优先选号预览行（只读接口返回形状）
+  LocalgwCreditPreviewRow,
   LocalgwLogRow,
   // 出站伪装与清洗（契约 §4.8 的返回形状）
   LocalgwOutboundGetResult,

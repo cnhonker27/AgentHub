@@ -167,6 +167,28 @@ CREATE TABLE IF NOT EXISTS op_logs (
   detail TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_oplog_ts ON op_logs(ts);
+-- 订阅 plan 窗口（百分比口径）：一个账号多行（5 小时窗 / 周窗 / 视频窗 / 模型维度）。
+-- 为什么不复用 credit_packages：包是「金额可求和」，窗口是「百分比不可相加」——
+-- 混用会让 deriveAccountCredits 把 5h 30% + 周 60% 派生成 90 credits（pool.cjs 的派生逻辑只认 remaining）。
+CREATE TABLE IF NOT EXISTS plan_windows (
+  account_id TEXT NOT NULL,
+  channel TEXT NOT NULL DEFAULT '',
+  quota_type INTEGER NOT NULL,
+  total_pct REAL NOT NULL DEFAULT 0,
+  used_pct REAL NOT NULL DEFAULT 0,
+  reset_at INTEGER NOT NULL DEFAULT 0,
+  is_unlimited INTEGER NOT NULL DEFAULT 0,
+  snapshot_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (account_id, quota_type)
+);
+-- 账号级 plan 状态：plan=窗口有余额 / credit=窗口满但积分可接 / exhausted=两者皆无 /
+-- absent=上游明确无订阅（如 MiniMax 2062）/ unknown=查询成功但字段缺失（禁止写 0 冒充未使用）
+CREATE TABLE IF NOT EXISTS plan_state (
+  account_id TEXT PRIMARY KEY,
+  channel TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL DEFAULT 'unknown',
+  computed_at INTEGER NOT NULL DEFAULT 0
+);
 `;
 
 /**
@@ -183,6 +205,63 @@ const QODER_INTL_ENABLED = true;
 // （国内手机验证码 / 国际 OAuth）。地区是通道属性不是账号属性，故做成两个独立渠道 id，
 // 不在账号上挂 region 字段——做成账号字段会让界面与选路分不清哪条账号走哪个站点。
 const AUTOCLAW_INTL_ENABLED = true;
+
+// ZCode 国际版开关：与 Qoder/AutoClaw 双区同口径。zcode 平面（登录/领取/配置）两地同为
+// zcode.z.ai，仅推理平面与 OAuth provider 字段分地区（CN=bigmodel / INTL=zai，
+// 依据 Agent2Providers zcode/region.rs）。地区做成独立渠道 id，不做成账号上的字段。
+const ZCODE_INTL_ENABLED = true;
+
+// ModelScope 国际版开关：两站同一份协议、不同的域（依据 Agent2Providers modelscope/region.rs）：
+// 推理 CN api-inference.modelscope.cn/v1、INTL api-inference.modelscope.ai/v1；
+// 网页站（身份/魔粒/签到/OAuth）CN modelscope.cn、INTL www.modelscope.ai。
+// **两站账号体系独立**（CN key 打 INTL 身份接口 401），故必须做成两个渠道 id：
+// 做成账号上的 region 字段会让两站的模型清单互相覆盖、账号也无法按站隔离。
+const MODELSCOPE_INTL_ENABLED = true;
+
+// MiniMax Code 国际版开关：与 Qoder / AutoClaw / ModelScope 双区同口径——两站是**独立账号体系**
+// （凭据互不通用、域名也不同：CN agent.minimax.cn / INTL agent.minimax.io），故做成两个渠道 id
+// 而不是账号上的 region 字段（做成账号字段会让两站同名模型的目录互相覆盖）。
+// 默认关闭：本机只有 CN 登录态，国际版尚无实测账号（方案 §3 推荐 P0 只做 CN）。
+const MINIMAX_INTL_ENABLED = false;
+
+// 千问办公双区开关（国内版 / 国际版）：与 Qoder **同一套协议栈**（同聊天路径、同 COSY 信封、
+// 同一把服务端 RSA 公钥、国内版 client_id 与 Qoder CN 逐字相同），差异只有一批客户端身份常量
+// 与账号接口路径（依据 Agent2Providers qoder/endpoints.rs）。站点做成独立渠道 id，
+// 不做成账号上的字段——两站的账号体系与模型目录互不相通。
+const QWEN_OFFICE_ENABLED = true;
+// 千问办公国际版：暂时隐藏（只保留国内版）。站点表 / 插件 provider 代码保留，
+// 恢复时把这里改回 true，并同步恢复插件 manifest 的 provider 声明与 main.cjs 注册。
+const QWEN_OFFICE_INTL_ENABLED = false;
+
+// Command Code 开关：无状态转发 + **粘贴式 API Key**（`user_` 开头），单一域名，
+// 没有国内/国际两套（依据 Agent2Providers commandcode/endpoints.rs）。
+// 无续期、无签到、无余额接口 —— 三样都在适配器里如实回报 unavailable。
+const COMMANDCODE_ENABLED = true;
+
+// OfficeAce（华为云果办）开关：上游**本身就是 OpenAI 兼容**（{base}/v2/chat/completions +
+// Basic 头），无状态转发。凭据分两层：网关 Basic（不过期，转发用）与控制面 AK/SK（约 2 小时，
+// 额度/签到用）——依据 Agent2Providers officeace/credentials.rs。
+const OFFICEACE_ENABLED = true;
+
+// AtomCode（AtomGit / GitCode）开关：OpenAI 兼容，三条平面三域（登录代理 / CodingPlan REST /
+// 聊天网关）。凭据是 OAuth（轮询式登录，回调在代理域名终结）+ 会轮换的 refresh token。
+// 额度口径是「每窗口可调用次数」（免费档实测 200 次 / 5 小时）——依据 atomcode/endpoints.rs。
+const ATOMCODE_ENABLED = true;
+
+// 会话式 / 自有多步协议三渠道（一次转发 = 适配器自己完成多步时序）：
+//   orcaterm   腾讯云遨驰：建会话 → SSE 对话（两步），历史拍平进输入
+//   astudio    讯飞 Astron Studio：OpenAI **Responses** 协议，响应事件要翻成 chat 帧
+//   doubaowork 豆包工作：自家信封 + 命名事件 SSE，登录态是 Cookie
+// 三者都没有可「每天领」的活动口径（orcaterm 明确无签到；另两家本版未对接），
+// 故 checkinKind 一律 "unknown"（不新增枚举）。
+const SESSION_CHANNELS_ENABLED = true;
+
+// Kiro / Antigravity 开关（最高成本两项）：
+//   kiro        AWS AI IDE：会话 JSON + **AWS event stream（二进制帧）**；两个订阅地区共用
+//               同一套账号体系与令牌，只是端点不同 → **不拆渠道**
+//   antigravity Google AI IDE：Cloud Code Assist 的 v1internal 平面，信封 + Gemini SSE；
+//               三个「环境」（sandbox/daily/prod）不是地区 → **不拆渠道**
+const BINARY_PROTOCOL_ENABLED = true;
 
 // checkinKind = 渠道**动作类型**。依据 13/14/15 号报告 §1.3：号池原有矩阵只有 checkin /
 // checkinStatus 两列，**没有区分「签到」与「登录领取」**——不同渠道的上游要求本就不同，
@@ -225,11 +304,19 @@ const CHANNELS = [
   // + 点赞 40/日）。唯一**官方公开 API** 型渠道：无客户端、无签名、无逆向。
   // checkinKind "unknown"：本轮未排查（13 号基线 §0 未列该渠道）→ 不臆断。
   { id: "modelscope", display: "ModelScope（魔搭）", domain: "api-inference.modelscope.cn", costTier: "free", checkinKind: "unknown" },
+  // ModelScope 国际版：与 CN 同一份协议、不同的域（推理 api-inference.modelscope.ai/v1，
+  // 网页站 www.modelscope.ai）。两站账号体系独立，一个 ms- key 两用但**只在本站有效**，
+  // 故按站拆渠道（依据 Agent2Providers modelscope/region.rs）。costTier/checkinKind 沿用 CN 口径。
+  ...(MODELSCOPE_INTL_ENABLED ? [{ id: "modelscope_intl", display: "ModelScope 国际版", domain: "api-inference.modelscope.ai", costTier: "free", checkinKind: "unknown" }] : []),
   // checkinKind "login_grant"：LobsterAI 的活动是 client-activities 三段式（slot → context →
   // actions/check_in），按 §1.3 归「登录领取」档（14 §2 的 Agent2API 建模亦未把它当每日打卡签到）。
   { id: "lobster", display: "LobsterAI（有道）", domain: "lobsterai-server.youdao.com", costTier: "low", checkinKind: "login_grant" },
   // checkinKind "claim"：套餐制，客户端 POST /api/v1/zcode-plan/billing/claim（11 §6）→ 领取，非每日打卡。
   { id: "zcode", display: "ZCode（智谱）", domain: "zcode.z.ai", checkinKind: "claim" },
+  // ZCode 国际版：与 CN 同协议，zcode 平面同为 zcode.z.ai，仅推理平面（api.z.ai）与
+  // OAuth provider 字段（zai）分地区。账号体系两地独立（CN=bigmodel 账号池、INTL=zai 账号池）。
+  // checkinKind "claim"：与 CN 同一 billing/claim 链路（zcode 平面不区分地区）。
+  ...(ZCODE_INTL_ENABLED ? [{ id: "zcode_intl", display: "ZCode 国际版", domain: "zcode.z.ai", checkinKind: "claim" }] : []),
   // CatPaw（美团）：上游是**有状态会话协议**（round → event → turn → event），适配器声明
   // stateful 走会话式转发；凭据是桌面端会话 Cookie 值（X-Passport-Token）+ user-uid 独立头，
   // 无签到、无刷新接口（过期只能在客户端重新登录）。成本档暂不标注（套餐口径未实测）
@@ -239,7 +326,37 @@ const CHANNELS = [
   // 注意：该渠道签名依赖本机安装的客户端（wasm 提取），凭据可导入但未装客户端时不可调用。
   // checkinKind "claim"：campaign 制，客户端 GET campaigns、实际 claim 由远端网页发出（11 §6）。
   { id: "qoder", display: "Qoder CN", domain: "gateway.qoder.com.cn", checkinKind: "claim" },
-  ...(QODER_INTL_ENABLED ? [{ id: "qoder_intl", display: "Qoder International", domain: "api2.qoder.sh", checkinKind: "claim" }] : []),
+  ...(QODER_INTL_ENABLED ? [{ id: "qoder_intl", display: "Qoder 国际版", domain: "api2.qoder.sh", checkinKind: "claim" }] : []),
+  // 千问办公（阿里 QoderWork）：与 Qoder 同一套 COSY 协议栈，但**没有可领取的每日活动**
+  // （Agent2Providers endpoints.rs supports_checkin=false）→ checkinKind 留 "unknown"，
+  // 不新增枚举（与 monkeycode 同口径）；成本档不标注（套餐口径未实测）。
+  // Command Code：无状态转发（响应是 NDJSON、HTTP 恒 200），凭据是粘贴的 `user_` API Key。
+  // 无签到活动、无余额接口 → checkinKind "unknown"（不新增枚举），成本档不标注（口径未实测）。
+  ...(COMMANDCODE_ENABLED ? [{ id: "commandcode", display: "Command Code", domain: "api.commandcode.ai", checkinKind: "unknown" }] : []),
+  // OfficeAce：签到与「新手任务」在上游是**同一个动作**（POST /v1/subscription/bonus/claim
+  // 一次把当天所有可领奖励发下来）→ 按 §1.3 归 "claim"（活动/套餐领取），不是每日打卡。
+  ...(OFFICEACE_ENABLED ? [{ id: "officeace", display: "OfficeAce 果办", domain: "agentarts.cn-southwest-2.myhuaweicloud.com", checkinKind: "claim" }] : []),
+  // AtomCode：所谓「签到」是**领取免费 CodingPlan**（一次性授权，到期可续领），
+  // 按 §1.3 归 "claim"（套餐/活动领取），不是每日打卡。
+  ...(ATOMCODE_ENABLED ? [{ id: "atomcode", display: "AtomCode（AtomGit）", domain: "api-ai.gitcode.com", checkinKind: "claim" }] : []),
+  ...(BINARY_PROTOCOL_ENABLED ? [
+    // Kiro：没有签到类活动；成本档不标注（订阅口径未实测）
+    { id: "kiro", display: "Kiro（AWS）", domain: "runtime.us-east-1.kiro.dev", checkinKind: "unknown" },
+    // Antigravity：Google 账号体系；同样没有签到
+    { id: "antigravity", display: "Antigravity（Google）", domain: "cloudcode-pa.googleapis.com", checkinKind: "unknown" },
+  ] : []),
+  ...(SESSION_CHANNELS_ENABLED ? [
+    // OrcaTerm：两步有状态（建会话 → SSE）；上游没有签到类活动
+    { id: "orcaterm", display: "OrcaTerm（腾讯云）", domain: "lightai.cloud.tencent.com", checkinKind: "unknown" },
+    // AStudio：Responses 协议；签到是「每日登录积分」（网页会话），归 login_grant
+    { id: "astudio", display: "AStudio（讯飞）", domain: "astronstudio-api-volces-prod.xf-yun.com", checkinKind: "login_grant" },
+    // 豆包工作：自家协议 + Cookie 登录态；有签到与奖励（本版未对接，留 unknown）
+    { id: "doubaowork", display: "豆包工作", domain: "www.doubao.com", checkinKind: "unknown" },
+  ] : []),
+  ...(QWEN_OFFICE_ENABLED ? [
+    { id: "qwen_office", display: "QwenWork（千问办公）", domain: "gateway.qwenwork.cn", checkinKind: "unknown" },
+    ...(QWEN_OFFICE_INTL_ENABLED ? [{ id: "qwen_office_intl", display: "QwenWork 国际版（千问办公）", domain: "gateway.qwenwork.ai", checkinKind: "unknown" }] : []),
+  ] : []),
   // AutoClaw 双区（智谱 AutoGLM 加速站 / 国际站）：同套协议与签名指纹，仅域名与登录方式不同。
   // 账号体系两区独立，桌面端登录态文件却是同一个（%APPDATA%/AutoClaw/auth.json）——
   // 桌面导入时哪边登录了就是哪边的账号，靠用户选对目标渠道（与 Qoder 双区同口径）。
@@ -274,9 +391,17 @@ const CHANNELS = [
   // 账号池与模型清单都按站点分份，合成一格会让两站同名模型互相覆盖（与 Qoder / AutoClaw 双区同口径）。
   // 上游是「建任务 + WebSocket 任务流（ACP 事件）」，凭据只有粘贴 session（30 天硬上限、无续期接口）。
   // checkinKind "unknown"：本家没有签到类活动，但取值表里没有「无签到」这一档（不新增枚举以免改动
-  // 共享的展示分类逻辑），因此按既有口径留 "unknown"，事实记在本行注释与 monkeycode/adapter.cjs 里。
+  // 共享的展示分类逻辑），因此按既有口径留 "unknown"；模型执行由外部插件提供。
   { id: "monkeycode", display: "MonkeyCode 国内版", domain: "monkeycode-ai.com", checkinKind: "unknown" },
   { id: "monkeycode_intl", display: "MonkeyCode 国际版", domain: "monkeycode-ai.net", checkinKind: "unknown" },
+  // MiniMax Code：Anthropic Messages 上游 + OAuth 设备码 + 真实每日签到（七日面板）。
+  // 与 ZCode 的差别：没有独立控制面、没有「套餐领取」，额度是账户积分（get_membership_info 的
+  // total_remaining_amount，浮点）。国际版是独立渠道 id（见 MINIMAX_INTL_ENABLED 注释），默认关闭。
+  // checkinKind "signin"：上游确有独立的 signin/status + signin/claim（实测 200）——是**每日打卡**，
+  // 不是「登录即发」也不是「领取套餐」（ZCode 是 claim / Raccoon 是 login_grant，三者不能混）。
+  // costTier 刻意不标：免费积分账号与订阅账号混在同一个池里，标 free 会让 cost-first 把它当免费池烧。
+  { id: "minimax", display: "MiniMax Code（国内版）", domain: "agent.minimax.cn", checkinKind: "signin" },
+  ...(MINIMAX_INTL_ENABLED ? [{ id: "minimax_intl", display: "MiniMax Code 国际版", domain: "agent.minimax.io", checkinKind: "signin" }] : []),
 ];
 
 // 内置渠道 id 的只读名单：凡是「这一行是不是提供商」的判定都走它，而不是看 kind 列——
@@ -403,6 +528,9 @@ function migrateProviders(d) {
     "extra_headers TEXT NOT NULL DEFAULT '{}'",
     "extra_body TEXT NOT NULL DEFAULT '{}'",
     "enabled INTEGER NOT NULL DEFAULT 1",
+    // 鉴权风格：'' = auto（按 host 推断）、'bearer'、'x-api-key'。只对 Anthropic 协议档有意义，
+    // 但所有行都存——换协议形态时不必再回来重填。存量行由 DEFAULT 补成 auto。
+    "auth TEXT NOT NULL DEFAULT ''",
   ];
   for (const c of cols) {
     try { d.exec(`ALTER TABLE agents ADD COLUMN ${c}`); } catch { /* 已存在 */ }
@@ -733,6 +861,7 @@ function providerChannelView(r) {
     display: r.display || r.id,
     domain: r.domain || "",
     kind: r.kind,
+    auth: r.auth || "",
     enabled: !!r.enabled,
     baseUrl: r.base_url || "",
     models: parseModelsJson(r.models_json),
@@ -792,11 +921,11 @@ function saveProvider(p) {
   const previous = db.prepare("SELECT updated_at FROM agents WHERE id=?").get(String(p.id));
   const now = Math.max(Date.now(), Number(previous?.updated_at || 0) + 1);
   db.prepare(
-    `INSERT INTO agents (id, display, domain, pool_strategy, updated_at, kind, base_url, models_json, extra_headers, extra_body, enabled)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    `INSERT INTO agents (id, display, domain, pool_strategy, updated_at, kind, auth, base_url, models_json, extra_headers, extra_body, enabled)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(id) DO UPDATE SET display=excluded.display, domain=excluded.domain,
        pool_strategy=excluded.pool_strategy, updated_at=excluded.updated_at, kind=excluded.kind,
-       base_url=excluded.base_url, models_json=excluded.models_json,
+       auth=excluded.auth, base_url=excluded.base_url, models_json=excluded.models_json,
        extra_headers=excluded.extra_headers, extra_body=excluded.extra_body, enabled=excluded.enabled`
   ).run(
     String(p.id),
@@ -805,6 +934,7 @@ function saveProvider(p) {
     ["optimal", "expire_first", "credit_first", "round_robin", "manual"].includes(p.poolStrategy) ? p.poolStrategy : "optimal",
     now,
     String(p.kind),
+    String(p.auth || ""),
     String(p.baseUrl || ""),
     JSON.stringify(Array.isArray(p.models) ? p.models : []),
     JSON.stringify(p.extraHeaders && typeof p.extraHeaders === "object" ? p.extraHeaders : {}),
@@ -888,6 +1018,8 @@ function accountView(r) {
     onboardingGrants: meta.onboardingGrants && typeof meta.onboardingGrants === "object" ? meta.onboardingGrants : null,
     /** 账号备注（号池列表副行展示 + 备注弹窗；落 meta.note，随 WebDAV 同步） */
     note: typeof meta.note === "string" ? meta.note : "",
+    /** 账号级出口绑定（netproxy.json 里的条目 id；空 = 跟随全局出口策略） */
+    netproxyId: typeof meta.netproxyId === "string" ? meta.netproxyId : "",
     source: r.source,
     lastUsed: r.last_used,
     todayReq: r.today_day === dayStr() ? r.today_req : 0,
@@ -1059,8 +1191,27 @@ function updateAccount(id, patch) {
   return true;
 }
 
-/** 记录账号最近一次上游错误（号池状态气泡展示用；只留最新一条，message 截 400 字）。
- *  渠道级拦截（11128/WAF）不冷却账号，这类错误只有落在这里才看得见。
+/**
+ * 按函数读-改-写账号 meta（**允许结果为空对象**）。
+ *
+ * 为什么单独开一个而不是复用 updateAccount：updateAccount 把「空对象」当
+ * 「本次不改 meta」（那是刻意的 —— 防止只改名时把设备绑定整份清空）。
+ * 而「删掉 meta 里最后一个键」（例如清除账号的出口绑定）恰恰需要写入 `{}`，
+ * 这个意图只能显式表达。mutate 收到的是副本，返回新对象。
+ */
+function patchAccountMeta(id, mutate) {
+  open();
+  const cur = getAccount(id);
+  if (!cur) return false;
+  const meta = parseMeta(cur.meta);
+  const next = typeof mutate === "function" ? mutate({ ...meta }) : mutate;
+  if (!next || typeof next !== "object" || Array.isArray(next)) return false;
+  db.prepare("UPDATE accounts SET meta = ?, updated_at = ? WHERE id = ?")
+    .run(JSON.stringify(stripSensitiveMeta(next)), Date.now(), cur.id);
+  return true;
+}
+
+/** 记录账号最近一次上游错误（号池状态气泡展示用；只留最新一条，message 截 400 字）。 *  渠道级拦截（11128/WAF）不冷却账号，这类错误只有落在这里才看得见。
  *  落库前过脱敏（redact.cjs）：上游报错回显的 Bearer/JWT 不进 meta 与日志页气泡 */
 function noteError(id, message) {
   const msg = redact(String(message || "").trim());
@@ -1244,8 +1395,8 @@ function bumpAccountUsage(id, tokens) {
   );
 }
 
-/** 删除账号连带它的余额历史 / 模型级负缓存 / 积分包。
- *  一个事务内原子完成（与 setCreditPackages 同一套 BEGIN IMMEDIATE 写法）：四张表分四条
+/** 删除账号连带它的余额历史 / 模型级负缓存 / 积分包 / plan 窗口。
+ *  一个事务内原子完成（与 setCreditPackages 同一套 BEGIN IMMEDIATE 写法）：六张表分六条
  *  DELETE，中途任一条失败（库忙/磁盘错）会留下「账号还在但流水/包已没了」的半删状态，
  *  且删除方（index.cjs）已写了跨机同步墓碑——半删 + 墓碑正是 F10 要避免的形态。
  *  返回是否有账号行被删（无该账号 = false，调用方据此回滚墓碑）。 */
@@ -1256,6 +1407,8 @@ function removeAccount(id) {
     db.prepare("DELETE FROM credits_history WHERE account_id = ?").run(String(id));
     db.prepare("DELETE FROM model_cooldowns WHERE acc_id = ?").run(String(id));
     db.prepare("DELETE FROM credit_packages WHERE account_id = ?").run(String(id));
+    db.prepare("DELETE FROM plan_windows WHERE account_id = ?").run(String(id));
+    db.prepare("DELETE FROM plan_state WHERE account_id = ?").run(String(id));
     const changes = db.prepare("DELETE FROM accounts WHERE id = ?").run(String(id)).changes;
     db.exec("COMMIT");
     return changes > 0;
@@ -1324,6 +1477,83 @@ function setCreditPackages(accountId, channel, packages) {
 /** credit_packages 行 → 对外包对象（列名 snake_case 收敛在这里，别让每个调用方各翻一遍） */
 function packageView(r) {
   return { code: r.code, name: r.name, total: r.total, used: r.used, remaining: r.remaining, expiresAt: r.expires_at };
+}// ===== 订阅 plan 窗口（百分比口径，禁止与 credit_packages 混用） =====
+
+const PLAN_STATES = new Set(["plan", "credit", "exhausted", "absent", "unknown"]);
+
+/** 单个窗口归一：百分比夹 0-100、保留两位；quota_type 非正数视为脏行丢弃 */
+function normPlanWindow(w) {
+  const pct = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return 0;
+    return Math.min(100, Math.max(0, Math.round(n * 100) / 100));
+  };
+  return {
+    quotaType: Math.floor(Number(w && w.quotaType) || 0),
+    totalPct: pct(w && w.totalPct),
+    usedPct: pct(w && w.usedPct),
+    resetAt: Math.max(0, Math.floor(Number(w && w.resetAt) || 0)),
+    isUnlimited: w && w.isUnlimited ? 1 : 0,
+  };
+}
+
+/**
+ * 写入某账号的 plan 快照：窗口整体替换 + 账号级状态 upsert。
+ * state 由调用方按「可用性」口径算好（见 docs 4.3），本层只做白名单收敛，不猜语义。
+ * 空窗口 + state=absent 是合法输入（上游确实无订阅）——必须清掉旧窗口，否则会留下陈旧百分比。
+ */
+function setPlanSnapshot(accountId, channel, state, windows) {
+  open();
+  const id = String(accountId || "");
+  if (!id) return;
+  const st = PLAN_STATES.has(String(state)) ? String(state) : "unknown";
+  const list = Array.isArray(windows) ? windows : [];
+  const now = Date.now();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("DELETE FROM plan_windows WHERE account_id = ?").run(id);
+    const ins = db.prepare(
+      `INSERT OR REPLACE INTO plan_windows (account_id, channel, quota_type, total_pct, used_pct, reset_at, is_unlimited, snapshot_at)
+       VALUES (?,?,?,?,?,?,?,?)`
+    );
+    for (const w of list) {
+      const r = normPlanWindow(w);
+      if (!r.quotaType) continue;
+      ins.run(id, String(channel || ""), r.quotaType, r.totalPct, r.usedPct, r.resetAt, r.isUnlimited, now);
+    }
+    db.prepare(
+      `INSERT INTO plan_state (account_id, channel, state, computed_at) VALUES (?,?,?,?)
+       ON CONFLICT(account_id) DO UPDATE SET channel=excluded.channel, state=excluded.state, computed_at=excluded.computed_at`
+    ).run(id, String(channel || ""), st, now);
+    db.exec("COMMIT");
+  } catch (e) {
+    try { db.exec("ROLLBACK"); } catch { /* ignore */ }
+    throw e;
+  }
+}
+
+/**
+ * 全池 plan：一次查出状态与窗口并按账号分桶（号池视图用）。
+ * 不做「每账号查一次」——那是 200 账号 15ms 起的 N+1，与 listAllCreditPackages 同一形态。
+ */
+function listAllPlan() {
+  open();
+  const out = new Map();
+  for (const r of db.prepare("SELECT * FROM plan_state").all()) {
+    out.set(r.account_id, { state: r.state, computedAt: r.computed_at, windows: [] });
+  }
+  for (const r of db.prepare("SELECT * FROM plan_windows ORDER BY quota_type").all()) {
+    const hit = out.get(r.account_id) || { state: "unknown", computedAt: r.snapshot_at, windows: [] };
+    hit.windows.push({
+      quotaType: r.quota_type,
+      totalPct: r.total_pct,
+      usedPct: r.used_pct,
+      resetAt: r.reset_at,
+      isUnlimited: !!r.is_unlimited,
+    });
+    out.set(r.account_id, hit);
+  }
+  return out;
 }
 
 /** 列出某账号的包集（按 ord 升序；展示/派生/导出共用）。
@@ -1843,6 +2073,16 @@ module.exports = {
   CHANNELS,
   QODER_INTL_ENABLED,
   AUTOCLAW_INTL_ENABLED,
+  ZCODE_INTL_ENABLED,
+  MODELSCOPE_INTL_ENABLED,
+  MINIMAX_INTL_ENABLED,
+  QWEN_OFFICE_ENABLED,
+  QWEN_OFFICE_INTL_ENABLED,
+  COMMANDCODE_ENABLED,
+  OFFICEACE_ENABLED,
+  ATOMCODE_ENABLED,
+  SESSION_CHANNELS_ENABLED,
+  BINARY_PROTOCOL_ENABLED,
   isBuiltinChannel,
   channelList, invalidateChannels,
   channelDisplay,
@@ -1850,8 +2090,9 @@ module.exports = {
   createKey, importKey, listKeys, findKeyBySecret, updateKey, deleteKey, keyTodayReq,
   validateKeyParams,
   listAgents, setPoolStrategy, setAgentCostTier,
-  listAccounts, getAccount, accountSecrets, addAccount, updateAccount, bumpAccountUsage, removeAccount, noteError, clearError, noteCheckin, listCheckinHistory, noteOnboardingGrant, noteAccount,
+  listAccounts, getAccount, accountSecrets, addAccount, updateAccount, patchAccountMeta, bumpAccountUsage, removeAccount, noteError, clearError, noteCheckin, listCheckinHistory, noteOnboardingGrant, noteAccount,
   setCreditPackages, listCreditPackages, listAllCreditPackages,
+  setPlanSnapshot, listAllPlan,
   insertOpLog, listOpLogs, listOpLogOps, exportOpLogRows,
   listModelCooldowns, upsertModelCooldown, deleteModelCooldowns,
   snapshotCredits,

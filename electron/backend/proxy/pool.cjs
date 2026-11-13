@@ -110,10 +110,10 @@ function poolAccounts(channel, readOnly = false) {
  *  真实门禁是每日额度的 429（带重置时间）与订阅 403，都已由错误分类按账号处置）。
  *  对这类渠道，「余额 0 → exhausted」会把免费池账号锁死：store 入库层把两位小数舍入后的
  *  0 与 < -1 的负值都归 0，复活条件 credits > 0 在余额恒 0 时永不满足。
- *  惰性 require：adapters.cjs 装配重，避免顶层 require 改变加载顺序（本仓反代依赖惯例） */
+ *  惰性 require：管理适配器装配重，避免顶层 require 改变加载顺序 */
 function zeroBalanceUsable(channel) {
   try {
-    const ad = require("./adapters.cjs").get(channel);
+    const ad = require("./management-adapters.cjs").get(channel);
     return !!(ad && ad.zeroBalanceUsable);
   } catch { return false; }
 }
@@ -127,14 +127,21 @@ function accountPlan(channel, strategy, excludeIds, maxInFlight, model) {
   });
 }
 
-function pickAccount(channel, strategy, excludeIds, maxInFlight, model) {
+/** 取值：`preferredId` 是「本轮已由上层定好的账号」（跨渠道积分优先选号的结果）。
+ *  只在它**当下仍然 eligible** 时采用；不可用就回落到原排序的首个可用账号——
+ *  选号与执行之间有一个毫秒级窗口（账号刚被别的请求冷却 / 并发打满），
+ *  上层不需要为此再写第二套兜底：这里回落的就是既有行为。 */
+function pickAccount(channel, strategy, excludeIds, maxInFlight, model, preferredId) {
   const rows = accountPlan(channel, strategy, excludeIds, maxInFlight, model);
   for (const r of rows) {
     if (r.reason === "余额耗尽" || r.reason === "余额已过期") {
       store.updateAccount(r.account.id, { status: "exhausted", coolUntil: nextDay4AM(), coolReason: `${r.reason}，已自动切换` });
     }
   }
-  const row = rows.find((r) => r.eligible);
+  const preferred = preferredId
+    ? rows.find((r) => r.eligible && String(r.account.id) === String(preferredId))
+    : null;
+  const row = preferred || rows.find((r) => r.eligible);
   if (!row) return null;
   const picked = row.account;
   const now = Date.now();

@@ -162,6 +162,9 @@ function lookupChannelLock(locks, name) {
  *   · round-robin 候选内轮转，保证多渠道路由均衡
  *   · smart       preferChannels 优先，其余按 score
  *   · score       纯打分（preferChannels 不参与，用于"只看余额/在线数"的场景）
+ *   · cost-first  按渠道成本档（免费 → 低成本 → 普通）排序
+ *   · credit-first 不经过本函数：账号级跨渠道积分排序见 credit-picker.cjs，
+ *                 server.cjs 会直接把「账号+渠道+真实模型」钉给执行器。
  *  模型级覆盖（models.overrides[model].channel）在所有策略之前生效——它是用户对单个模型的硬指定。
  *  渠道锁定（models.channelLocks[model]）同优先级：它是 v1.82.2「渠道覆盖」的语义，只锁渠道。 */
 function pick(model, except) {
@@ -202,9 +205,12 @@ function pick(model, except) {
     return list[idx];
   }
   if (c.routing.strategy === "score") {
-    // candidates 已按 prefer→score 排好；score 策略刻意忽略 preferChannels
+    // candidates 已按 prefer→score 排好；score 策略刻意忽略 preferChannels。
+    // 摘要一次算齐再排：比较器里直接查库是 O(N log N) 次重复查询（candidates() 上已有同类教训）
+    const summaryCache = new Map();
+    for (const id of list) summaryCache.set(id, channelSummary(id));
     const scored = list.slice().sort((a, b) => {
-      const d = score(b, channelSummary(b)) - score(a, channelSummary(a));
+      const d = score(b, summaryCache.get(b)) - score(a, summaryCache.get(a));
       return d !== 0 ? d : (a < b ? -1 : a > b ? 1 : 0);
     });
     return scored[0];
@@ -212,6 +218,47 @@ function pick(model, except) {
   // smart（默认）：candidates 的 prefer → score 顺序即所需
   list = list.slice();
   return list[0];
+}
+
+/** 模型组成员键：同一渠道可能挂多个模型，排重必须细到「渠道 + 上游模型名」 */
+function groupMemberKey(binding) {
+  return `${binding?.channel || ""}\u0000${binding?.realModel || ""}`;
+}
+
+/** 轮询游标（按组名；进程内，重启归零 —— 与 rrCursor 同口径，只是负载分散不是持久状态） */
+const groupCursors = new Map();
+
+/** 模型组成员选择：返回一个可用的成员绑定，没有可用成员回 null。
+ *
+ *  与 pick() 的分工：pick 是「先选渠道、再找该渠道的绑定」，模型组恰恰允许
+ *  同一渠道挂多个模型，渠道级选择会永远只命中第一条。这里直接按成员选。
+ *
+ *  可用性四重过滤（与 pick 的候选口径对齐）：
+ *    · 本轮已排除的渠道（组外渠道不会进来，排除的主要是熔断/账号耗尽的成员渠道）；
+ *    · 本轮已判死的成员（渠道 + 实际模型名，避免同一个模型反复撞墙）；
+ *    · 渠道启用且不在冷却；
+ *    · 该渠道针对**这个实际模型**还有可用账号（accountPlan 带 realModel，
+ *      模型级冷却按真实上游名生效，不是按对外组名）。
+ *  策略：priority = 按配置顺序取第一个可用；round-robin = 在可用成员间轮转。
+ */
+function pickGroupMember(members, strategy, exceptChannels, exceptMembers, cursorKey) {
+  const except = exceptChannels instanceof Set ? exceptChannels : new Set(exceptChannels || []);
+  const blocked = exceptMembers instanceof Set ? exceptMembers : new Set(exceptMembers || []);
+  const usable = (members || []).filter((m) => {
+    if (!m || !m.channel) return false;
+    if (except.has(m.channel) || blocked.has(groupMemberKey(m))) return false;
+    if (!isChannelEnabled(m.channel) || isCooling(m.channel)) return false;
+    try {
+      return pool.accountPlan(m.channel, undefined, [], 0, String(m.realModel || "")).some((r) => r.eligible);
+    } catch {
+      return false;
+    }
+  });
+  if (!usable.length) return null;
+  if (strategy !== "round-robin") return usable[0];
+  const cursor = (groupCursors.get(cursorKey) || 0) % usable.length;
+  groupCursors.set(cursorKey, cursor + 1);
+  return usable[cursor];
 }
 
 /** 当前路由配置视图（IPC 返回） */
@@ -226,6 +273,8 @@ function routeState() {
     enableFailover: c.routing.failover,
     cooldownMs: c.routing.cooldownMs,
     cooldownCapMs: c.routing.cooldownCapMs,
+    sticky: c.routing.sticky || "auto",
+    needsFilter: c.routing.needsFilter !== false,
     preferChannels: c.routing.preferChannels,
     blockedChannels: c.routing.blockedChannels,
     perChannel,
@@ -241,6 +290,8 @@ function setRoute(patch) {
   if (patch.enableFailover !== undefined) next.failover = !!patch.enableFailover;
   if (patch.cooldownMs !== undefined) next.cooldownMs = Number(patch.cooldownMs) || next.cooldownMs;
   if (patch.cooldownCapMs !== undefined) next.cooldownCapMs = Number(patch.cooldownCapMs) || next.cooldownCapMs;
+  if (patch.sticky !== undefined) next.sticky = ["auto", "on", "off"].includes(patch.sticky) ? patch.sticky : next.sticky;
+  if (patch.needsFilter !== undefined) next.needsFilter = patch.needsFilter !== false;
   if (patch.preferChannels !== undefined) next.preferChannels = Array.isArray(patch.preferChannels) ? patch.preferChannels : [];
   if (patch.blockedChannels !== undefined) next.blockedChannels = Array.isArray(patch.blockedChannels) ? patch.blockedChannels : [];
   if (patch.perChannel) {
@@ -256,6 +307,13 @@ function setRoute(patch) {
   // 越界入参（如非法 strategy）由 config.patch 显式拒绝，这里如实上抛而不是假装成功
   if (r && r.ok === false) return { ok: false, message: r.message || "路由配置写入失败" };
   return { ok: true, ...routeState() };
+}
+
+/** 只读计划预览（IPC localgw_route_plan）：这个模型的下一个请求会先落到谁、其余候选为什么排后面。
+ *  与转发路径共用 route-plan 的排序规则；不推进游标、不写粘性、不改账号状态。
+ *  惰性 require：route-assist 依赖 pool/config，顶层引入会把「只看路由」的调用方也拖上号池。 */
+async function previewPlan(model, options) {
+  return require("./route-assist.cjs").previewModel(model, options || {});
 }
 
 /** 活跃渠道数（status IPC 用） */
@@ -313,38 +371,30 @@ function channelMatrix() {
 async function testChannel(id) {
   if (!id) return { ok: false, message: "缺少渠道 id" };
   if (!isChannelEnabled(id) || isCooling(id)) return { ok: false, message: "渠道已关闭或正在冷却" };
-  const binding = require("./models.cjs").list().find((m) => m.channel === id);
+  const models = require("./models.cjs");
+  const snapshot = await models.prepare({ channels: [id] });
+  const binding = models.list(snapshot).find((m) => m.channel === id);
   if (!binding) return { ok: false, message: "渠道没有可测试的模型" };
-  const account = pool.accountPlan(id, undefined, [], 0, binding.realModel).find((r) => r.eligible)?.account;
-  if (!account) return { ok: false, message: "没有可用账号" };
-  const adapter = require("../proxy/adapters.cjs").get(id);
-  if (!adapter?.chat) return { ok: false, message: "渠道不支持对话" };
-  const secrets = proxyStore.accountSecrets(proxyStore.getAccount(account.id));
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error("探测超时")), 30000);
   const t0 = Date.now();
-  let received = false, error;
-  pool.acquireAccount(account.id);
-  try {
-    await require("../proxy/transport-context.cjs").run(controller.signal, () => adapter.chat({
-      account: { ...account, secrets }, secrets, model: binding.realModel,
-      body: { model: binding.realModel, messages: [{ role: "user", content: "ping" }], max_tokens: 16, stream: true },
-      meta: { signal: controller.signal }, emit: (ev) => {
-        if (ev.type === "error") error = ev;
-        if (ev.type === "delta" && require("../proxy/util.cjs").hasConsumableDelta(ev.delta || {})) received = true;
-      },
-    }));
-    controller.signal.throwIfAborted();
-    return { ok: received && !error, latencyMs: Date.now() - t0, message: error ? "上游返回错误，请检查账号及模型" : received ? `模型 ${binding.realModel} 最小对话探测通过` : "上游没有返回内容" };
-  } catch (e) {
-    return { ok: false, latencyMs: Date.now() - t0, message: controller.signal.aborted ? "探测超时" : "上游请求失败，请检查出口及账号" };
-  } finally { clearTimeout(timer); pool.releaseAccount(account.id); }
+  let received = false;
+  const result = await require("./forwarder.cjs").forward({
+    model: binding.realModel, messages: [{ role: "user", content: "ping" }], max_tokens: 16, stream: true
+  }, id, binding.realModel, binding.id, { probe: true, authorize: () => isChannelEnabled(id) && !isCooling(id),
+    catalogExcludeAccounts: () => snapshot.catalog.excludedAccounts(id, binding.realModel),
+    catalogModels: accountId => snapshot.catalog.accountModels(id, accountId) }, 30000,
+  event => { if (event.type === "delta" && require("../proxy/util.cjs").hasConsumableDelta(event.delta || {})) received = true; });
+  return { ok: result.ok && received, latencyMs: Date.now() - t0,
+    code: result.errCode, message: result.ok && received ? `模型 ${binding.realModel} 最小对话探测通过` : result.error || "上游没有返回内容" };
+
 }
 
 module.exports = {
   pick,
+  pickGroupMember,
+  groupMemberKey,
   candidates,
   routeState,
+  previewPlan,
   setRoute,
   setChannelEnabled,
   isChannelEnabled,

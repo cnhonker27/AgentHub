@@ -148,6 +148,14 @@ const ALLOWED_COMMANDS = new Set([
   "proxy_checkin_status",
   "proxy_checkin_run",
   "proxy_checkin_auto_set",
+  // 签到中心（签到中心页签：快照 / 新手福利 / 活动福利 / 成长任务 / 记录）
+  "proxy_checkin_center",
+  "proxy_onboarding_claim",
+  "proxy_plans_preview",
+  "proxy_plans_claim",
+  "proxy_growth_query",
+  "proxy_growth_run",
+  "proxy_checkin_records",
   "proxy_scan",
   "proxy_scan_import",
   "proxy_oauth_begin",
@@ -297,6 +305,7 @@ const ALLOWED_COMMANDS = new Set([
   "memory_provider_test",
   "memory_provider_fetch_models",
   "memory_provider_quirks",
+  "memory_provider_import_gateway",
   "memory_model_list",
   "memory_model_save",
   "memory_model_delete",
@@ -363,9 +372,13 @@ const ALLOWED_COMMANDS = new Set([
   "plugin_install",
   "plugin_uninstall",
   "plugin_toggle",
+  "plugin_authorize",
   "plugin_open",
   "plugin_embed",
   "plugin_sync_now",
+  "plugin_update_status",
+  "plugin_update_check",
+  "plugin_update_apply",
   // ===== 提示词库（契约 docs/提示词板块/02-实施契约.md §4；未登记的通道会被下面 invoke 静默拒绝） =====
   // 4.1 库
   "prompts_list",
@@ -440,15 +453,26 @@ const ALLOWED_COMMANDS = new Set([
   "localgw_accounts_reorder",
   "localgw_account_policy",
   "localgw_models_list",
+  "localgw_models_snapshot",
+  "localgw_models_refresh_channels",
   // 按渠道取该渠道的原生模型清单（「覆盖与自定义」表单的「实际模型名」下拉数据源）
   "localgw_models_channel_models",
   "localgw_models_set_override",
+  // 模型消耗倍率（用户手填）：rate=null 清除
+  "localgw_models_set_rate",
   // 渠道锁定（v1.82.2「渠道覆盖」的接口）：只锁渠道、不改上游模型名；channel 传空 = 清除
   "localgw_models_set_channel_lock",
   "localgw_models_set_alias",
   "localgw_models_add_custom",
+  // 批量添加（「覆盖与自定义」页多选，一次落盘）：handler 在 index.cjs，白名单漏登记会报
+  // 「未授权的 IPC 命令：localgw_models_batch_add」——新增 handler 时必须同步这张表
+  "localgw_models_batch_add",
+  // 模型组：对外名 → 多个「渠道 + 实际模型」，转发时按组策略选成员并在失败时自动换下一个
+  "localgw_models_set_group",
   // 删除单条模型规则（无法用 config_patch 实现删除，见 models.cjs 的 removeRule）
   "localgw_models_remove_rule",
+  // 积分优先选号的只读预览（无副作用）：输入对外模型名 → 候选渠道/真实模型/账号及原因
+  "localgw_credit_route_preview",
   "localgw_config_get",
   "localgw_config_patch",
   // 出站伪装与清洗（契约 §4.8）：三条通道必须与 index.cjs 的 ipcMain.handle 同步登记
