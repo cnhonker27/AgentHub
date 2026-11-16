@@ -157,6 +157,11 @@ function defaultConfig() {
       zcode: { enabled: true, paths: [".zcode/skills"] },
       codex: { enabled: true, paths: [".codex/skills"] },
       claude: { enabled: true, paths: [".claude/skills"] },
+      // DSH 用户技能目录；目录不存在时同步/扫描自动跳过，不会报错
+      dsh: { enabled: true, paths: [".dsh/skills"] },
+      // WorkBuddy 双区：两个独立产品，各自一个 id（目录名有前缀关系，不能按前缀合并）
+      workbuddy: { enabled: true, paths: [".workbuddy/skills"] },
+      "workbuddy-ai": { enabled: true, paths: [".workbuddy-ai/skills"] },
       antigravity: { enabled: true, paths: [".gemini/antigravity/skills", ".gemini/config/skills"] },
       agents: { enabled: true, paths: [".agents/skills"] },
     },
@@ -165,6 +170,8 @@ function defaultConfig() {
     l3: { enabled: false, threshold: 0.85 },
     trashDays: 7,
     update: { channel: "stable", autoCheck: true, notifiedVersion: "" },
+    // 外置插件：独立于主程序更新。autoCheck 沿用 update.autoCheck 的开关与间隔。
+    plugins: { autoUpdate: true, autoDownload: true, feedUrl: "" },
     // WebDAV 跨设备同步（password 落盘是密文，内存里是明文）
     // 注意：技能仓库的服务器凭据已并入 webdavShared，此段仅为兼容旧配置保留读取，
     // 实际生效的是 webdavShared.endpoint/username/password + webdavShared.roots.skills

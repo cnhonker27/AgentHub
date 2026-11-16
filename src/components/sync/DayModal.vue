@@ -10,7 +10,7 @@
 -->
 <script setup lang="ts">
 import { computed, watch } from "vue";
-import { humanDate, formatInteger, formatCost, formatToken, formatPercent } from "../../composables/useFormat";
+import { humanDate, formatInteger, formatCost, formatToken, formatPercent, formatCredits } from "../../composables/useFormat";
 import { useSyncStore } from "../../stores/sync";
 import type { HeatmapRow } from "../../stores/usage";
 
@@ -23,18 +23,20 @@ const day = computed(() => props.data.find((x) => x.date === props.date));
 const total = computed(() => (day.value ? day.value.total : 0));
 const cost = computed(() => (day.value && day.value.cost != null ? day.value.cost : null));
 const currency = computed(() => app.config.billing?.displayCurrency || "CNY");
-// 缓存命中率：与总览卡片同口径 cacheRead/input（input 含 cache_read）；
-// 当日无调用 → null（显示「—」）；有调用但无 token 明细（Qoder 官方模型）同样 null，脚注单独说明
-const hitRate = computed(() => {
-  const d = day.value;
-  if (!d || !d.callCount) return null;
-  return d.inputTokens && d.inputTokens > 0 ? (d.cacheReadTokens || 0) / d.inputTokens : null;
-});
+// 缓存命中率：后端已按「缓存口径可得」的源算好（取不到缓存拆分的来源为 null），
+// 当日无调用同样为 null；不再由前端用真实 input 自算——否则小浣熊这类源会被算成 0%
+const hitRate = computed(() => (day.value && day.value.callCount ? day.value.cacheHitRate ?? null : null));
 const callCount = computed(() => (day.value && day.value.callCount != null ? day.value.callCount : 0));
 const inputTokens = computed(() => day.value?.inputTokens ?? 0);
 const cacheReadTokens = computed(() => day.value?.cacheReadTokens ?? 0);
+// 命中率分母（口径值：不含取不到缓存拆分的来源）——脚注显示的比例要与命中率本身同口径
+const cacheInputTokens = computed(() => day.value?.cacheInputTokens ?? 0);
 const billingOn = computed(() => !!app.config.billing?.enabled);
 const hasDay = computed(() => !!day.value && (day.value.total > 0 || callCount.value > 0));
+// 当日额度点：仅 Qoder / Qoder CN 单渠道显示；“全部”会混入 Antigravity 的点，不展示
+const credits = computed(() => (day.value && typeof day.value.credits === "number" ? day.value.credits : 0));
+const showPoints = computed(() => app.activeSource === "qoder" || app.activeSource === "qoder-cn");
+const hasPoints = computed(() => showPoints.value && credits.value > 0);
 
 // 次级指标卡片：费用（开启计费才显示）/ 缓存命中率 / 调用次数，缺一行时栅格自动等宽
 const cells = computed(() => {
@@ -47,9 +49,11 @@ const cells = computed(() => {
     label: "缓存命中率",
     val: hitRate.value !== null ? formatPercent(hitRate.value) : "-",
     foot: hitRate.value !== null
-      ? `${formatToken(cacheReadTokens.value)} / ${formatToken(inputTokens.value)}`
+      ? `${formatToken(cacheReadTokens.value)} / ${formatToken(cacheInputTokens.value)}`
       : callCount.value > 0
-        ? "无 token 明细"
+        ? inputTokens.value > 0
+          ? "该来源不提供缓存数据"
+          : "无 token 明细"
         : "当日无调用",
   });
   out.push({ key: "calls", label: "调用次数", val: formatInteger(callCount.value), foot: "次请求记录" });
@@ -95,7 +99,10 @@ watch(
             <span class="dm-hero-label">当日消耗</span>
             <span class="dm-hero-badge" :class="{ off: !hasDay }">{{ hasDay ? "有记录" : "无记录" }}</span>
           </div>
-          <span class="dm-hero-val">{{ formatToken(total) }}<small> token</small></span>
+          <div class="dm-hero-nums">
+            <span class="dm-hero-val">{{ formatToken(total) }}<small> token</small></span>
+            <span v-if="hasPoints" class="dm-hero-points">{{ formatCredits(credits) }}点</span>
+          </div>
         </div>
 
         <!-- 次级指标栅格 -->
@@ -239,6 +246,13 @@ watch(
   background: rgba(255, 255, 255, 0.06);
   color: var(--text-3);
 }
+.dm-hero-nums {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
 .dm-hero-val {
   font-family: var(--font-mono, monospace);
   font-size: 28px;
@@ -246,6 +260,13 @@ watch(
   letter-spacing: -0.02em;
   color: var(--accent-strong);
   line-height: 1.15;
+}
+.dm-hero-points {
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--text-3);
+  white-space: nowrap;
 }
 .dm-hero-val small {
   font-size: 11.5px;

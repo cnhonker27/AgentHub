@@ -13,7 +13,7 @@ import { onMounted, ref, watch, computed } from "vue";
 import { useSyncStore } from "../../stores/sync";
 import { useAppStore } from "../../stores/app";
 import { useUsageStore } from "../../stores/usage";
-import { formatToken } from "../../composables/useFormat";
+import { formatToken, formatCredits } from "../../composables/useFormat";
 import TrendChart from "../../components/sync/TrendChart.vue";
 import Heatmap from "../../components/sync/Heatmap.vue";
 import UsageBreakdown from "../../components/sync/UsageBreakdown.vue";
@@ -72,9 +72,21 @@ const isFiltered = computed(() => usage.isFiltered);
 const todayHitPct = computed(() => (usage.summary?.todayCacheHitRate ?? null));
 const hasHitRate = computed(() => usage.summary != null && usage.summary.cacheHitRate != null);
 const hasTodayHitRate = computed(() => usage.summary != null && usage.summary.todayCacheHitRate != null);
+// 本范围是否有「缓存口径可得」的记录：false 表示来源本身取不到缓存拆分（如商汤小浣熊），
+// 命中率显示「-」并用专门文案，不能笼统说成「无 token 明细」
+const cacheStatsAvailable = computed(() => usage.summary?.cacheStatsAvailable !== false);
+// 今日同理：全期可能可得（别的日子用过有缓存的源），但今天只有取不到缓存的来源
+const todayCacheStatsAvailable = computed(() => usage.summary?.todayCacheStatsAvailable !== false);
 
 const hasRecords = computed(() => (usage.summary?.recordCount ?? 0) > 0);
 const hasTodayRecords = computed(() => (usage.summary?.todayRecordCount ?? 0) > 0);
+
+// Qoder / Qoder CN 单渠道才显示额度点；“全部”会把 Qoder 与 Antigravity 的点混在一起，其他渠道无点
+const showPoints = computed(() => app.activeSource === "qoder" || app.activeSource === "qoder-cn");
+const totalPoints = computed(() => usage.summary?.credits ?? 0);
+const todayPoints = computed(() => usage.summary?.todayCredits ?? 0);
+const hasTotalPoints = computed(() => showPoints.value && totalPoints.value > 0);
+const hasTodayPoints = computed(() => showPoints.value && todayPoints.value > 0);
 
 onMounted(() => {
   if (activeSourceEnabled.value) usage.loadOverview();
@@ -158,12 +170,18 @@ function showSettings() {
           <div class="kpi"><i class="k-line-glow"></i>
             <div class="k-label"><span class="kdot"></span>总计消耗Token</div>
             <div class="k-value mono">{{ formatToken(anim.total || 0) }}</div>
-            <div class="k-foot">{{ isFiltered ? ((selectedDev?.deviceName || '设备') + ' 累计消耗') : '全部设备累计' }}</div>
+            <div class="k-foot-row">
+              <div class="k-foot">{{ isFiltered ? ((selectedDev?.deviceName || '设备') + ' 累计消耗') : '全部设备累计' }}</div>
+              <span v-if="hasTotalPoints" class="k-points" title="Qoder 额度点（Credits）">{{ formatCredits(totalPoints) }}点</span>
+            </div>
           </div>
           <div class="kpi"><i class="k-line-glow"></i>
             <div class="k-label"><span class="kdot"></span>今日消耗Token</div>
             <div class="k-value mono">{{ formatToken(anim.today || 0) }}</div>
-            <div class="k-foot">{{ isFiltered ? '该设备今日消耗' : '今日 0 点起累计' }}</div>
+            <div class="k-foot-row">
+              <div class="k-foot">{{ isFiltered ? '该设备今日消耗' : '今日 0 点起累计' }}</div>
+              <span v-if="hasTodayPoints" class="k-points" title="Qoder 额度点（Credits）">{{ formatCredits(todayPoints) }}点</span>
+            </div>
           </div>
           <div class="kpi"><i class="k-line-glow"></i>
             <div class="k-label"><span class="kdot"></span>总计缓存命中率</div>
@@ -172,7 +190,8 @@ function showSettings() {
               <template v-else>-</template>
             </div>
             <div class="k-foot">
-              <template v-if="hasHitRate">命中 {{ formatToken(usage.summary?.cacheReadTokens || 0) }} / 输入 {{ formatToken(usage.summary?.inputTokens || 0) }}</template>
+              <template v-if="hasHitRate">命中 {{ formatToken(usage.summary?.cacheReadTokens || 0) }} / 输入 {{ formatToken(usage.summary?.cacheInputTokens || 0) }}</template>
+              <template v-else-if="hasRecords && !cacheStatsAvailable">该来源不提供缓存数据，不计算命中率</template>
               <template v-else>无 token 明细，不计算命中率</template>
             </div>
           </div>
@@ -183,8 +202,10 @@ function showSettings() {
               <template v-else>-</template>
             </div>
             <div class="k-foot">
-              <template v-if="hasTodayHitRate">今日命中 {{ formatToken(usage.summary?.todayCacheReadTokens || 0) }} / 输入 {{ formatToken(usage.summary?.todayInputTokens || 0) }}</template>
-              <template v-else>{{ hasTodayRecords ? '今日无 token 明细' : '今日无调用' }}</template>
+              <template v-if="hasTodayHitRate">今日命中 {{ formatToken(usage.summary?.todayCacheReadTokens || 0) }} / 输入 {{ formatToken(usage.summary?.todayCacheInputTokens || 0) }}</template>
+              <template v-else-if="!hasTodayRecords">今日无调用</template>
+              <template v-else-if="!todayCacheStatsAvailable">该来源不提供缓存数据，不计算命中率</template>
+              <template v-else>今日无 token 明细</template>
             </div>
           </div>
           <div class="kpi"><i class="k-line-glow"></i>
@@ -200,7 +221,14 @@ function showSettings() {
         </div>
 
         <div class="top-heatmap-wrapper">
-          <Heatmap :data="usage.heatmap" @pick="pickedDay = $event" />
+          <Heatmap
+            :data="usage.heatmap"
+            :mode="usage.heatmapMode"
+            :year="usage.heatmapYear"
+            @pick="pickedDay = $event"
+            @change-mode="usage.setHeatmapMode($event)"
+            @change-year="usage.setHeatmapYear($event)"
+          />
         </div>
       </div>
 

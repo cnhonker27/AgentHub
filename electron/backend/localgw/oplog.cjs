@@ -17,6 +17,20 @@ const path = require("node:path");
 const config = require("../config.cjs");
 const proxyStore = require("../proxy/store.cjs");
 const lgwConfig = require("./config.cjs");
+const { validateExecutionFacts, identifier, integer } = require("../extensions/provider-protocol.cjs");
+
+function executionFactsForLog(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 10).flatMap(row => {
+    try {
+      if (!identifier(row?.attemptId) || !integer(row.number, 1, 10)) return [];
+      const facts = { state: row.state, actualModel: row.actualModel,
+        ...(row.upstreamReportedModel === undefined ? {} : { upstreamReportedModel: row.upstreamReportedModel }) };
+      validateExecutionFacts(facts);
+      return [{ attemptId: row.attemptId, number: row.number, ...facts }];
+    } catch { return []; } // Invalid diagnostic metadata must not discard the request log.
+  });
+}
 
 /** 表：localgw_logs（独立命名空间） */
 const SCHEMA = `
@@ -53,6 +67,7 @@ function ensure() {
   if (ready) return;
   proxyStore.open().exec(SCHEMA);
   migrate();
+  try { proxyStore.open().exec("ALTER TABLE localgw_logs ADD COLUMN attempts TEXT NOT NULL DEFAULT '[]'"); } catch {}
   ready = true;
 }
 
@@ -62,8 +77,8 @@ function insert(row) {
     ensure();
     const crypto = require("node:crypto");
     proxyStore.open().prepare(
-      `INSERT INTO localgw_logs (id, ts, api_key_prefix, channel, model, status, ms, prompt_tokens, completion_tokens, err_code, sensitive_hits)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO localgw_logs (id, ts, api_key_prefix, channel, model, status, ms, prompt_tokens, completion_tokens, err_code, sensitive_hits, attempts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       crypto.randomUUID(),
       row.ts || Date.now(),
@@ -75,7 +90,14 @@ function insert(row) {
       row.promptTokens || 0,
       row.completionTokens || 0,
       row.errCode || "",
-      String(row.sensitiveHits || "").slice(0, 500)
+      String(row.sensitiveHits || "").slice(0, 500),
+      JSON.stringify((row.attempts || []).slice(0, 128).map((a) => {
+        const facts = executionFactsForLog(a.executionFacts);
+        return { channel: String(a.channel || "").slice(0, 100), model: String(a.model || "").slice(0, 200), code: String(a.code || "").slice(0, 60), ms: Math.max(0, Math.round(a.ms || 0)), committed: !!a.committed,
+          // 实际使用的账号：积分优先选号后「为什么走这个号」要能被核对（账号 id 是本机 UUID，不含凭据）
+          ...(a.accountId ? { accountId: String(a.accountId).slice(0, 64) } : {}),
+          ...(facts.length ? { executionFacts: facts } : {}) };
+      }))
     );
   } catch {
     /* 忽略 */
@@ -110,6 +132,7 @@ function list(opts) {
       completionTokens: r.completion_tokens,
       errCode: r.err_code,
       sensitiveHits: r.sensitive_hits || "",
+      attempts: JSON.parse(r.attempts || "[]"),
     })),
     total: totalRow ? totalRow.n : 0,
   };

@@ -88,13 +88,29 @@ console.log("\n④ updated_at：动态适配器实例缓存的键");
   ok(b.display === "第二版" && b.baseUrl === PROVIDER.baseUrl, "整体覆盖语义：未改的字段照原样留着", b);
 }
 
+console.log("\n④b auth 列：三档鉴权风格必须原样往返（丢了就按 auto 发头，国内套餐全 401）");
+{
+  const bearer = store.saveProvider(Object.assign({}, PROVIDER, { id: "auth-b", display: "Bearer 档", auth: "bearer" }));
+  ok(bearer.auth === "bearer", "auth=bearer 存得住", bearer.auth);
+  ok(store.getProvider("auth-b").auth === "bearer", "回读仍是 bearer（不是被默认值盖掉）", store.getProvider("auth-b"));
+  const xkey = store.saveProvider(Object.assign({}, PROVIDER, { id: "auth-x", display: "x-api-key 档", auth: "x-api-key" }));
+  ok(xkey.auth === "x-api-key", "auth=x-api-key 存得住", xkey.auth);
+  const none = store.saveProvider(Object.assign({}, PROVIDER, { id: "auth-n", display: "未指定" }));
+  ok(none.auth === "", "未指定时落空串（= auto，按协议档推默认头）", none.auth);
+  // 老库升级路径：列由 migrateProviders 的 ALTER 补上，缺省 ''。直接问表结构最可靠——
+  // 只测「读回空串」区分不出「列不存在时读成 undefined」和「列存在但值为空」。
+  const cols = store.open().prepare("PRAGMA table_info(agents)").all().map((c) => c.name);
+  ok(cols.includes("auth"), "agents 表确有 auth 列（老库靠 ALTER 补齐）", cols);
+  for (const id of ["auth-b", "auth-x", "auth-n"]) store.deleteProvider(id);
+}
+
 console.log("\n⑤ 非法输入按空折叠（存进去的必须是读得出的）");
 {
   const p = store.saveProvider({
     id: "fold", display: "  超长超长".repeat(20), kind: "openai_compat", baseUrl: "http://127.0.0.1:2",
     poolStrategy: "surprise", models: "不是数组", extraHeaders: "坏 JSON", extraBody: [1, 2],
   });
-  ok(store.listAgents().find((a) => a.id === "fold").poolStrategy === "round_robin", "非法 pool_strategy 折成 round_robin（判据落在 listAgents 这个可观察面上：提供商视图刻意不带策略）", store.listAgents().find((a) => a.id === "fold"));
+  ok(store.listAgents().find((a) => a.id === "fold").poolStrategy === "optimal", "非法 pool_strategy 折成 optimal（判据落在 listAgents 这个可观察面上：提供商视图刻意不带策略）", store.listAgents().find((a) => a.id === "fold"));
   ok(Array.isArray(p.models) && p.models.length === 0, "models 非数组 → 空清单（前缀路由仍可透传）", p.models);
   ok(p.extraHeaders && typeof p.extraHeaders === "object" && !Array.isArray(p.extraHeaders) && Object.keys(p.extraHeaders).length === 0, "extraBody/extraHeaders 非对象 → 空对象", p.extraHeaders);
   ok(p.enabled === true, "enabled 缺省视为启用（新建条目不该静默停用）", p.enabled);

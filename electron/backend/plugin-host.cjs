@@ -20,6 +20,12 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const config = require("./config.cjs");
+const extensionManifest = require("./extensions/manifest.cjs");
+const extensionPackage = require("./extensions/package.cjs");
+const { StdioTransport } = require("./extensions/stdio-transport.cjs");
+const { loadTrustStore } = require("./extensions/trust.cjs");
+const { officialTrustStore, keyFingerprint } = require("./extensions/official-keys.cjs");
+const { ActivationTransaction, recoverActivation } = require("./extensions/activation.cjs");
 
 const MANIFEST = "manifest.json";
 const ID_RE = /^[a-z][a-z0-9_-]{1,31}$/;
@@ -31,11 +37,81 @@ const DEFAULT_HEALTH_TIMEOUT = 30000;
 const MAX_RESTARTS = 3;
 const RESTART_WINDOW_MS = 10 * 60 * 1000;
 
+/** 官方插件的对外显示名：包清单里的 name 与签名一起发布，改一个称呼不必重签重发包，
+ *  因此只在展示层按「官方发布者 + 精确插件 id」改名；第三方插件一律用清单自带的名字。 */
+const DISPLAY_NAMES = new Map([
+  ["com.agenthub.forwarding-suite", "模型增强执行器"],
+]);
+function displayName(m) {
+  const name = m && m.publisher === "agenthub" ? DISPLAY_NAMES.get(m.id) : "";
+  return name || (m && m.name) || "";
+}
+
 let ctx = null; // { app }
 let state = null; // { plugins: { id: { enabled, secret, token } } }
 let installing = false;
 const procs = new Map(); // id -> { child, starting, stopping, restarts, lastError }
 const windows = new Map(); // id -> BrowserWindow
+const pluginOperations = new Set();
+let nextGeneration = 0;
+
+async function pluginOperation(id, operation) {
+  if (installing || pluginOperations.has(id)) return { ok: false, message: "插件管理操作正在进行，请稍后重试" };
+  pluginOperations.add(id);
+  try { return await operation(); } finally { pluginOperations.delete(id); }
+}
+
+// 内置官方公钥 + 本地信任库。本地可以用同一个 keyId 声明撤销或有效期，
+// 但不允许换成另一把公钥 —— 那等于把「官方签名」的定义改掉。
+function mergedTrustStore() {
+  const store = officialTrustStore();
+  for (const [keyId, entry] of loadTrustStore(path.join(config.dataDir(), "plugin-trust.json"))) {
+    const builtin = store.get(keyId);
+    if (builtin && keyFingerprint(builtin.publicKey) !== keyFingerprint(entry.publicKey)) {
+      throw new Error(`本地信任库的 ${keyId} 与内置官方公钥不一致，已拒绝加载`);
+    }
+    store.set(keyId, entry);
+  }
+  return store;
+}
+
+function extensionVerification() {
+  const policy = ctx?.extensionPolicy || {};
+  const store = mergedTrustStore();
+  if (policy.trustStore instanceof Map) for (const [keyId, entry] of policy.trustStore) store.set(keyId, entry);
+  const { trustStore: _policyTrust, ...rest } = policy;
+  return {
+    hostApi: "1.0.0",
+    libc: process.platform === "linux" ? (process.report?.getReport().header.glibcVersionRuntime ? "glibc" : "musl") : undefined,
+    ...rest,
+    trustStore: store,
+  };
+}
+function declaredChannelsOf(m) {
+  return new Set((m.contributes?.providers || []).flatMap(provider => Array.isArray(provider.channels) ? provider.channels : []));
+}
+
+function extensionAuthorized(m, st) {
+  const a = st.authorization;
+  if (!a || a.publisherId !== m.publisher || !Array.isArray(a.permissions) || !Array.isArray(a.channels)
+    || !m.permissions.required.every(permission => a.permissions.includes(permission))) return false;
+  // 插件升级可能删掉旧渠道，而 plugins.json 里的授权仍保留旧渠道。那些渠道已经
+  // 不在签名声明里，任何 capture 都会先检查声明、永远用不到；把整个插件判成未授权
+  // 会让升级后直接停用（症状是模型目录全空、请求 503）。只要求至少还有一条当前
+  // 声明内的授权渠道即可，其余由 pruneAuthorization 在启动/安装时清掉。
+  const declared = declaredChannelsOf(m);
+  return a.channels.some(channel => declared.has(channel));
+}
+
+function pruneAuthorization(m, st) {
+  const a = st.authorization;
+  if (!a || !Array.isArray(a.channels)) return false;
+  const declared = declaredChannelsOf(m);
+  const channels = a.channels.filter(channel => declared.has(channel));
+  if (channels.length === a.channels.length) return false;
+  st.authorization = { ...a, channels };
+  return true;
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -76,11 +152,12 @@ function readState() {
   state = { plugins: {} };
   const src = raw.plugins && typeof raw.plugins === "object" ? raw.plugins : {};
   for (const [id, v] of Object.entries(src)) {
-    if (!ID_RE.test(id) || !v || typeof v !== "object") continue;
+    if ((!ID_RE.test(id) && !/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/.test(id)) || id.length > 128 || !v || typeof v !== "object") continue;
     state.plugins[id] = {
       enabled: v.enabled === true,
       secret: config.decryptSecret(v.secret || ""),
       token: config.decryptSecret(v.token || ""),
+      authorization: v.authorization || null,
     };
   }
   return state;
@@ -94,12 +171,17 @@ function writeState() {
       enabled: !!v.enabled,
       secret: config.encryptSecret(v.secret),
       token: config.encryptSecret(v.token),
+      authorization: v.authorization || null,
     };
   }
+  fs.mkdirSync(path.dirname(statePath()), { recursive: true });
+  const temp = statePath() + `.tmp-${process.pid}-${crypto.randomBytes(8).toString("hex")}`;
   try {
-    fs.mkdirSync(path.dirname(statePath()), { recursive: true });
-    fs.writeFileSync(statePath(), JSON.stringify(out, null, 2));
-  } catch { /* 磁盘异常不影响运行 */ }
+    const file = fs.openSync(temp, "wx", 0o600);
+    try { fs.writeFileSync(file, JSON.stringify(out, null, 2)); fs.fsyncSync(file); } finally { fs.closeSync(file); }
+    fs.renameSync(temp, statePath());
+  } finally { try { fs.unlinkSync(temp); } catch { /* Renamed or failed before creation. */ } }
+  invalidateSessionSnapshot();
 }
 
 function pluginState(id) {
@@ -126,6 +208,10 @@ function compareVersion(a, b) {
 }
 
 function compatReason(m) {
+  if (m.schema === 2) {
+    try { extensionManifest.verifyManifest(m, extensionVerification()); return ""; }
+    catch (error) { return String(error.message || "插件校验失败"); }
+  }
   if (!ctx) return "";
   const appVersion = ctx.app.getVersion();
   if (m.minAppVersion && compareVersion(appVersion, m.minAppVersion) < 0) {
@@ -140,6 +226,10 @@ function compatReason(m) {
 // ===== manifest =====
 function validateManifest(m, dir) {
   if (!m || typeof m !== "object") return { ok: false, reason: "manifest 不是对象" };
+  if (m.schema === 2) {
+    try { extensionManifest.validateManifest(m); return { ok: true, manifest: m }; }
+    catch (error) { return { ok: false, reason: String(error.message || "manifest 无效") }; }
+  }
   if (m.schema !== undefined && m.schema !== 1) return { ok: false, reason: "manifest schema 不支持" };
   if (!ID_RE.test(String(m.id || ""))) return { ok: false, reason: "id 不合法" };
   if (!String(m.name || "").trim()) return { ok: false, reason: "缺少 name" };
@@ -171,7 +261,9 @@ function validateManifest(m, dir) {
 
 function readManifest(dir) {
   try {
-    const raw = JSON.parse(fs.readFileSync(path.join(dir, MANIFEST), "utf8"));
+    const filename = path.join(dir, MANIFEST), stat = fs.lstatSync(filename);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024) return { ok: false, reason: "manifest 不是普通文件或超过大小限制" };
+    const raw = JSON.parse(fs.readFileSync(filename, "utf8"));
     return validateManifest(raw, dir);
   } catch (e) {
     return { ok: false, reason: "manifest 缺失或无法解析" };
@@ -214,6 +306,7 @@ function find(id) {
 
 function isRunning(id) {
   const p = procs.get(id);
+  if (p?.transport) return p.transport.ready && !p.transport.closed;
   return !!p && !!p.child && p.child.exitCode === null;
 }
 
@@ -234,7 +327,7 @@ function list() {
     const bridge = parseBridge(m);
     return {
       id: m.id,
-      name: m.name,
+      name: displayName(m),
       version: m.version,
       installed: true,
       invalid: false,
@@ -246,10 +339,17 @@ function list() {
       lastError: p ? p.lastError : "",
       minAppVersion: m.minAppVersion || "",
       maxAppVersion: m.maxAppVersion || "",
-      ui: m.ui && m.ui.url ? { url: m.ui.url, title: m.ui.title || m.name } : null,
-      sidebar: m.sidebar ? { label: String(m.sidebar.label || m.name) } : null,
+      ui: m.ui && m.ui.url ? { url: m.ui.url, title: m.ui.title || displayName(m) } : null,
+      sidebar: m.sidebar ? { label: String(m.sidebar.label || displayName(m)) } : null,
       bridgeKinds: bridge ? bridge.kinds : [],
       embed: !!(m.ui && m.ui.url) && m.ui.embed !== false,
+      schema: m.schema || 1,
+      ready: m.schema === 2 ? !!p?.transport?.ready : isRunning(m.id),
+      authorized: m.schema === 2 ? extensionAuthorized(m, st) : true,
+      capabilities: m.schema === 2 ? m.capabilities : [],
+      requiredPermissions: m.schema === 2 ? m.permissions.required : [],
+      channels: m.schema === 2 ? [...new Set(m.contributes.providers.flatMap(provider => provider.channels))] : [],
+      publisherId: m.schema === 2 ? m.publisher : "",
     };
   });
 }
@@ -257,6 +357,7 @@ function list() {
 // ===== 桥接声明 / 内嵌地址 =====
 /** manifest.bridge：插件愿意接收哪些宿主资源。宿主只认 kinds，不认插件身份 */
 function parseBridge(m) {
+  if (m?.schema === 2) return null; // Never broadcast a pool mirror to a provider.
   const b = m && m.bridge;
   if (!b || typeof b !== "object" || !b.url) return null;
   const kinds = Array.isArray(b.kinds) ? b.kinds.filter((k) => typeof k === "string" && k) : [];
@@ -284,7 +385,7 @@ function embedUrl(id) {
   let u;
   try { u = new URL(String(m.ui.url)); } catch { return { ok: false, message: "插件界面地址非法" }; }
   u.searchParams.set("token", pluginState(id).token);
-  return { ok: true, id, url: u.toString(), title: m.ui.title || m.name };
+  return { ok: true, id, url: u.toString(), title: m.ui.title || displayName(m) };
 }
 
 // ===== 运行 =====
@@ -341,6 +442,7 @@ async function start(id) {
   const m = item.manifest;
   const reason = compatReason(m);
   if (reason) return { ok: false, message: reason };
+  if (m.schema === 2) return startExtension(item);
   if (isRunning(id)) return { ok: true, already: true };
 
   let p = procs.get(id);
@@ -399,17 +501,111 @@ async function start(id) {
   }
 }
 
+async function startExtension(item) {
+  const m = item.manifest, st = pluginState(m.id);
+  if (pruneAuthorization(m, st)) writeState();
+  if (!extensionAuthorized(m, st)) return { ok: false, message: "插件所需号池渠道或权限尚未授权" };
+  const previous = procs.get(m.id);
+  if (previous?.transport?.ready) return { ok: true, already: true };
+  if (previous?.starting) return { ok: false, message: "正在启动" };
+  const generation = ++nextGeneration;
+  const p = { child: null, starting: true, stopping: false, restarts: previous?.restarts || [], lastError: "" };
+  procs.set(m.id, p);
+  clearTimeout(previous?.restartTimer);
+  if (previous?.transport) await previous.transport.stop();
+  if (p.stopping || procs.get(m.id) !== p) { p.starting = false; return { ok: false, message: "已取消启动" }; }
+  const transport = p.transport = new StdioTransport({
+    directory: item.dir, dataDir: dataDir(m.id), generation,
+    verification: extensionVerification(), killTree,
+    bindSession: (peer, identity) => ctx?.bindExtensionSession?.(peer, identity, m) || (() => {}),
+    onExit: event => {
+      if (procs.get(m.id) !== p || p.transport !== transport || event.generation !== generation) return;
+      p.child = null;
+      invalidateSessionSnapshot();
+      if (event.stopping || p.stopping || !readState().plugins[m.id]?.enabled) return;
+      p.restarts = p.restarts.filter(time => Date.now() - time < RESTART_WINDOW_MS);
+      if (p.restarts.length >= 5) { p.lastError = "插件连续退出，已熔断自动重启"; return; }
+      p.restarts.push(Date.now());
+      p.lastError = "插件进程退出，等待退避重启";
+      p.restartTimer = setTimeout(() => {
+        if (procs.get(m.id) === p && !p.stopping && readState().plugins[m.id]?.enabled) start(m.id).catch(() => {});
+      }, Math.min(60000, 1000 * 2 ** (p.restarts.length - 1)));
+      p.restartTimer.unref?.();
+    },
+  });
+  try {
+    await transport.start();
+    p.child = transport.child;
+    if (procs.get(m.id) !== p || p.stopping) { await transport.stop(); invalidateSessionSnapshot(); return { ok: false, message: "已取消启动" }; }
+    invalidateSessionSnapshot();
+    return { ok: true };
+  } catch {
+    p.lastError = "插件启动、完整性校验或握手失败";
+    invalidateSessionSnapshot();
+    return { ok: false, message: p.lastError };
+  } finally { p.starting = false; }
+}
+
+async function authorize(id, { permissions, channels } = {}) {
+  const item = find(id);
+  if (!item || item.invalid || item.manifest.schema !== 2) return { ok: false, message: "不是可授权的新版插件" };
+  const m = item.manifest, reason = compatReason(m);
+  if (reason) return { ok: false, message: reason };
+  const declaredPermissions = [...m.permissions.required, ...m.permissions.optional];
+  const declaredChannels = m.contributes.providers.flatMap(provider => provider.channels);
+  if (!Array.isArray(permissions) || !Array.isArray(channels) || permissions.some(value => !declaredPermissions.includes(value)) || channels.some(value => !declaredChannels.includes(value))) return { ok: false, message: "授权超出插件已签声明" };
+  await stop(id); // Changing authorization revokes the current process/session.
+  const st = pluginState(id);
+  st.authorization = { publisherId: m.publisher, permissions: [...new Set(permissions)], channels: [...new Set(channels)] };
+  writeState();
+  return { ok: true, authorized: extensionAuthorized(m, st) };
+}
+
+// ===== 会话快照（热路径缓存）=====
+// providerSessions() 处在转发链路的极热路径上：每次授权检查、authority.watch 的 250ms
+// 周期巡检、插件流式响应的每个事件都会经由 resolve()/assertCurrent()/refFor() 调到这里。
+// 原实现每次都全目录 readdirSync + 逐 manifest 读取校验 + Ed25519 验签，单次流式请求
+// 可触发数百次同步 IO 与验签，全部阻塞在主进程 event loop 上。
+// 快照在所有状态变更点显式失效（writeState / transport 退出 / 启停路径），
+// 1s TTL 只是防漏网的兜底；未变更的窗口内快照与实时计算结果一致。
+let sessionSnapshot = null;
+function invalidateSessionSnapshot() { sessionSnapshot = null; }
+
+function providerSessions() {
+  if (sessionSnapshot && Date.now() - sessionSnapshot.at < 1000) return sessionSnapshot.value;
+  const items = scan();
+  const result = [...procs].flatMap(([id, p]) => {
+    if (!p.transport?.ready || p.stopping || !readState().plugins[id]?.enabled) return [];
+    const item = items.find(x => x.id === id);
+    if (!item || item.invalid || item.manifest.schema !== 2 || compatReason(item.manifest) || !extensionAuthorized(item.manifest, pluginState(id))) return [];
+    const authorization = pluginState(id).authorization;
+    const declared = declaredChannelsOf(item.manifest);
+    return [{ id, manifest: item.manifest, identity: p.transport.session.identity, session: p.transport.session,
+      permissions: [...authorization.permissions], channels: [...new Set(authorization.channels.filter(channel => declared.has(channel)))] }];
+  });
+  sessionSnapshot = { at: Date.now(), value: result };
+  return snapshotView();
+}
+// 调用方拿到的是快照的防御性拷贝（元素与数组都新建）：测试与上层有对 channels 原地
+// sort 的用法，绝不能让它们变异到缓存本体。
+function snapshotView() {
+  return sessionSnapshot.value.map(item => ({ ...item, permissions: [...item.permissions], channels: [...item.channels] }));
+}
+
 async function stop(id) {
   const p = procs.get(id);
   if (p) {
     p.stopping = true;
-    killTree(p.child);
+    clearTimeout(p.restartTimer);
   }
   const st = readState();
   if (st.plugins[id]) {
     st.plugins[id].enabled = false;
     writeState();
   }
+  if (p?.transport) await p.transport.stop();
+  else if (p) killTree(p.child);
+  invalidateSessionSnapshot();
   return { ok: true };
 }
 
@@ -430,9 +626,10 @@ async function toggle(id, enabled) {
   return { ok: true };
 }
 
-async function resumeEnabled() {
+async function resumeEnabled({ schema } = {}) {
   for (const item of scan()) {
     if (item.invalid) continue;
+    if (schema !== undefined && item.manifest.schema !== schema) continue;
     const st = pluginState(item.manifest.id);
     if (!st.enabled) continue;
     try { await start(item.manifest.id); } catch { /* 单个失败不影响其它插件 */ }
@@ -442,103 +639,129 @@ async function resumeEnabled() {
 function killAll() {
   for (const [, p] of procs) {
     p.stopping = true;
+    clearTimeout(p.restartTimer);
+    if (p.transport) {
+      p.transport.stopping = true;
+      p.transport.closed = true;
+      p.transport.ready = false;
+      p.transport.revoke?.();
+      p.transport.peer?.close(new Error("Host shutting down"));
+      killTree(p.transport.child);
+    }
     killTree(p.child);
   }
+  invalidateSessionSnapshot();
   for (const [, w] of windows) {
     try { if (!w.isDestroyed()) w.close(); } catch { /* 已关闭 */ }
   }
 }
 
 // ===== 安装 / 卸载 =====
-function extractZip(zip, dest) {
-  fs.mkdirSync(dest, { recursive: true });
-  const cp = require("node:child_process");
-  const dir = path.dirname(zip);
-  const base = path.basename(zip);
-  // 用「工作目录 + 相对包名」调用 tar：Windows 下 GNU tar 会把 C:\ 前缀当成 host:path
-  // 去解析（报 Cannot connect to C:），相对名可绕开；-C 的目标目录不受该解析影响
-  try {
-    cp.execFileSync("tar", ["-xf", base, "-C", dest], { cwd: dir, stdio: "ignore" });
-    return;
-  } catch { /* 换下一种 */ }
-  try {
-    cp.execFileSync("tar", ["--force-local", "-xf", zip, "-C", dest], { stdio: "ignore" });
-    return;
-  } catch { /* 系统 tar 可能是 bsdtar，不认 --force-local */ }
-  const q = (v) => String(v).replace(/'/g, "''");
-  cp.execFileSync("powershell", ["-NoProfile", "-Command",
-    `Expand-Archive -LiteralPath '${q(zip)}' -DestinationPath '${q(dest)}' -Force`], { stdio: "ignore" });
-}
-
-function findManifestRoot(dir) {
-  if (fs.existsSync(path.join(dir, MANIFEST))) return dir;
-  let subs = [];
-  try { subs = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory()); } catch { return null; }
-  for (const d of subs) {
-    const p = path.join(dir, d.name);
-    if (fs.existsSync(path.join(p, MANIFEST))) return p;
-  }
-  return null;
-}
-
-async function renameRetry(from, to, tries = 3) {
+async function renameRetry(from, to, tries = 5) {
   for (let i = 0; i < tries; i++) {
     try { fs.renameSync(from, to); return; }
-    catch (e) { if (i === tries - 1) throw e; await sleep(300); }
+    catch (e) {
+      if (i === tries - 1) {
+        // Windows 上插件进程退出后 .node / DLL 可能还被扫描器或加载器占着
+        if (process.platform === "win32" && ["EPERM", "EBUSY", "EACCES"].includes(e.code)) {
+          throw new Error("文件被占用，插件目录暂时无法替换；请稍后重试，或关闭杀毒软件的实时扫描");
+        }
+        throw e;
+      }
+      await sleep(400);
+    }
   }
 }
 
 async function install(zipPath) {
-  if (installing) return { ok: false, message: "正在安装其他插件" };
+  if (installing || pluginOperations.size) return { ok: false, message: "插件管理操作正在进行" };
   ensureClean();
   installing = true;
-  const stage = path.join(pluginsRoot(), `.incoming-${Date.now()}`);
+  let stage;
   let hadOld = false;
+  let transaction, installedId, wasRunning = false;
+  const restoreState = (id, enabled) => { pluginState(id).enabled = enabled; writeState(); };
   try {
+    recoverActivation(pluginsRoot(), restoreState);
     const size = fs.statSync(zipPath).size;
     if (size > MAX_ZIP_BYTES) return { ok: false, message: "插件包超过 200MB" };
-    extractZip(zipPath, stage);
-    const root = findManifestRoot(stage);
-    if (!root) return { ok: false, message: "插件包缺少 manifest.json" };
+    const schema = await extensionPackage.packageSchema(zipPath);
+    if (![1, 2].includes(schema)) return { ok: false, message: "插件 schema 不支持" };
+    const prepared = schema === 2
+      ? await extensionPackage.stagePackage(zipPath, { parentDir: pluginsRoot(), verification: extensionVerification() })
+      : await extensionPackage.stageLegacyPackage(zipPath, { parentDir: pluginsRoot() });
+    const root = stage = prepared.stageDir;
     const parsed = readManifest(root);
     if (!parsed.ok) return { ok: false, message: parsed.reason };
     const m = parsed.manifest;
+    installedId = m.id;
     const dest = pluginDir(m.id);
     hadOld = fs.existsSync(dest);
-    const wasRunning = isRunning(m.id);
+    if (hadOld) {
+      const old = readManifest(dest);
+      if (!old.ok || (old.manifest.schema || 1) !== (m.schema || 1) || m.schema === 2 && old.manifest.publisher !== m.publisher) return { ok: false, message: "禁止跨 schema 或发布者替换已有插件" };
+      if (m.schema === 2 && old.manifest.dataSchema !== m.dataSchema) return { ok: false, message: "插件私有数据版本变化需要迁移支持，已保持旧版" };
+    }
+    wasRunning = isRunning(m.id);
+    // 全新安装 = 装完即用：签名声明内的权限与渠道在下面一次性授权，安装后直接启用并启动，
+    // 用户不再需要先去开关一次才能看到执行来源。更新保持用户原有的启停选择。
     const wasEnabled = hadOld ? !!pluginState(m.id).enabled : true;
     if (wasRunning) { await stop(m.id); await sleep(600); }
 
     fs.mkdirSync(pluginsRoot(), { recursive: true });
-    const bak = dest + `.bak-${Date.now()}`;
-    if (hadOld) await renameRetry(dest, bak);
-    try {
-      await renameRetry(root, dest);
-    } catch (e) {
-      if (hadOld && fs.existsSync(bak)) { try { await renameRetry(bak, dest); } catch { /* 回滚失败保留备份 */ } }
-      throw e;
-    }
+    transaction = new ActivationTransaction({ root: path.dirname(root), id: m.id, stageDir: root, priorEnabled: wasEnabled });
+    await transaction.activate(renameRetry);
 
     const st = pluginState(m.id);
-    st.enabled = hadOld ? wasEnabled : true;
+    if (pruneAuthorization(m, st)) writeState();
+    // 自动授权只给插件自己签名声明的 required 权限与全部声明渠道：
+    // 不越出清单，也不替用户扩展 optional 权限（例如读取请求头）。
+    let autoGranted = false;
+    if (!hadOld && m.schema === 2 && !extensionAuthorized(m, st)) {
+      st.authorization = { publisherId: m.publisher, permissions: [...new Set(m.permissions.required)], channels: [...declaredChannelsOf(m)] };
+      autoGranted = true;
+    }
+    st.enabled = wasEnabled && (m.schema !== 2 || extensionAuthorized(m, st));
     writeState();
 
     let warning = "";
-    if (wasRunning || !hadOld) {
+    if (st.enabled && (wasRunning || !hadOld)) {
       const r = await start(m.id);
       if (!r.ok) {
         warning = r.message;
         st.enabled = false;
         writeState();
+        if (hadOld) {
+          await stop(m.id);
+          transaction.rollback(restoreState);
+          transaction = null;
+          const restored = wasRunning ? await start(m.id) : { ok: true };
+          return { ok: false, message: restored.ok ? "新版插件启动失败，已恢复旧版" : "新版失败，旧版目录已恢复但重启失败", rollback: restored.ok };
+        }
       }
     }
-    if (hadOld) { try { fs.rmSync(bak, { recursive: true, force: true }); } catch { /* 下次启动清理 */ } }
-    return { ok: true, id: m.id, name: m.name, version: m.version, updated: hadOld, warning };
+    transaction.commit();
+    // 新装插件把声明渠道显式固定到它，等同于用户在「设置」里点一次「全部固定」。
+    // 自定义提供商占用、已绑定到其它来源、当前不可用的渠道由回调自行跳过。
+    let autoBound = null;
+    if (!hadOld && m.schema === 2 && isRunning(m.id)) {
+      try { autoBound = await (ctx?.onExtensionActivated?.(m) ?? null); } catch { autoBound = null; }
+    }
+    return { ok: true, id: m.id, name: displayName(m), version: m.version, updated: hadOld, warning, autoGranted,
+      autoEnabled: !hadOld && st.enabled && isRunning(m.id), autoBound,
+      requiresAuthorization: m.schema === 2 && !extensionAuthorized(m, st) };
   } catch (e) {
+    if (transaction && !transaction.committed) {
+      try {
+        if (installedId) await stop(installedId);
+        transaction.rollback(restoreState);
+        if (wasRunning && installedId) await start(installedId);
+      } catch { return { ok: false, message: "插件激活失败且恢复未完成，已保留 journal 与备份" }; }
+    }
     return { ok: false, message: String((e && e.message) || e) };
   } finally {
     installing = false;
-    try { fs.rmSync(stage, { recursive: true, force: true }); } catch { /* 忽略 */ }
+    if (stage) { try { fs.rmSync(stage, { recursive: true, force: true }); } catch { /* 忽略 */ } }
   }
 }
 
@@ -612,6 +835,7 @@ async function uninstall(id) {
   delete st.plugins[id];
   writeState();
   procs.delete(id);
+  invalidateSessionSnapshot();
   return { ok: true };
 }
 
@@ -637,7 +861,7 @@ async function open(id) {
     height: 800,
     minWidth: 900,
     minHeight: 600,
-    title: m.ui.title || m.name,
+    title: m.ui.title || displayName(m),
     autoHideMenuBar: true,
     show: false,
     // 底色跟随宿主主题（原来是写死的暗色，亮色主题下会先闪一块纯黑）
@@ -687,6 +911,7 @@ function cleanupStale() {
 let cleaned = false;
 function ensureClean() {
   if (cleaned || installing) return; // 安装中不清理，避免误删暂存目录
+  recoverActivation(pluginsRoot(), (id, enabled) => { pluginState(id).enabled = enabled; writeState(); });
   cleaned = true;
   cleanupStale();
 }
@@ -696,8 +921,15 @@ function init(o) {
 }
 
 module.exports = {
-  init, list, install, uninstall, toggle, open,
-  start, stop, resumeEnabled, killAll,
+  init, list, install,
+  uninstall: id => pluginOperation(id, () => uninstall(id)),
+  toggle: (id, enabled) => pluginOperation(id, () => toggle(id, enabled)),
+  open: id => pluginOperation(id, () => open(id)),
+  start: id => pluginOperation(id, () => start(id)),
+  stop: id => pluginOperation(id, () => stop(id)),
+  resumeEnabled, killAll,
   pluginDir, dataDir, pluginsRoot,
   embedUrl, bridgeOf, tokenOf,
+  authorize: (id, args) => pluginOperation(id, () => authorize(id, args)),
+  providerSessions,
 };

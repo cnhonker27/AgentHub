@@ -14,12 +14,32 @@
      流水由 localgw/oplog.cjs 落库，保留期见配置 logRetentionDays（默认 30 天）；
      后端单次最多回 1000 行（oplog.list 钳制），所以前端必须分页而不是一次全拉。 -->
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
-import { ElMessage } from "element-plus";
+import { computed, onMounted, onUnmounted, ref } from "vue";
+// 全站顶部提示统一出口（3 秒自动消失 + 玻璃样式）：不要直接 import element-plus 的 ElMessage，
+// 否则时长/位置/样式会与其它页面不一致（这里是历史上唯一一处绕过 utils/toast 的地方）
+import { toast as ElMessage } from "../../utils/toast";
 import { useAppStore } from "../../stores/app";
 import { useLocalgwStore } from "../../stores/localgw";
 import * as localgwApi from "../../api/localgw";
+import { localgwRequestsList, localgwRequestCancel, type LocalgwActiveRequest, type LocalgwLogRow } from "../../api/ipc";
 import { fmtInt } from "../proxy/format";
+
+const activeRequests = ref<LocalgwActiveRequest[]>([]);
+const activeError = ref("");
+let activeTimer: ReturnType<typeof setInterval> | undefined;
+let activeBusy = false;
+async function refreshActive() {
+  if (activeBusy) return;
+  activeBusy = true;
+  try { activeRequests.value = await localgwRequestsList(); activeError.value = ""; }
+  catch (e) { activeError.value = e instanceof Error ? e.message : String(e); }
+  finally { activeBusy = false; }
+}
+async function cancelRequest(id: string) {
+  try { await localgwRequestCancel(id); await refreshActive(); }
+  catch (e) { ElMessage.error(e instanceof Error ? e.message : String(e)); }
+}
+onUnmounted(() => clearInterval(activeTimer));
 
 const app = useAppStore();
 const lgw = useLocalgwStore();
@@ -29,6 +49,14 @@ const exporting = ref(false);
 /** 分页：一页 50 条，避免几百行流水一次性铺满 DOM */
 const page = ref(1);
 const PAGE_SIZE = 50;
+
+function attemptDetails(row: LocalgwLogRow) {
+  return (row.attempts || []).map(a => {
+    const description = `${a.channel} / ${a.model} · ${a.code} · ${a.ms}ms${a.accountId ? ` · 账号 ${a.accountId.slice(0, 8)}` : ""}${a.committed ? " · 已输出" : ""}`;
+    const facts = (a.executionFacts || []).map(f => `#${f.number} 目标 ${f.actualModel}（${f.state === "responded" ? "收到上游响应" : "计划发起"}，插件报告）${f.upstreamReportedModel ? `；上游报告 ${f.upstreamReportedModel}` : ""}`);
+    return [description, ...facts].join("；");
+  }).join(" → ");
+}
 
 const statusOptions = [
   { label: "全部状态", value: "" },
@@ -105,7 +133,8 @@ function statusTagCls(s: string) {
 
 onMounted(async () => {
   // refreshLogs 成功即置 backendReady；顺带拉渠道清单让筛选下拉稳定
-  await Promise.all([reload(), lgw.refreshChannels()]);
+  await Promise.all([reload(), lgw.refreshChannels(), refreshActive()]);
+  activeTimer = setInterval(refreshActive, 3000);
 });
 </script>
 
@@ -141,7 +170,19 @@ onMounted(async () => {
         <div class="lgw-backend-off-desc">请求流水由 localgw 主进程写入，接入后本页自动可用。</div>
       </div>
 
-      <div v-else class="card">
+      <div v-if="lgw.backendReady" class="card">
+        <div class="card-title">当前请求 <span class="right">{{ activeRequests.length }} 条 · 每 3 秒刷新</span></div>
+        <div v-if="activeError" class="lgw-inline-err">{{ activeError }}</div>
+        <div class="table-scroll"><table class="table table-bare tbl-c">
+          <thead><tr><th>密钥</th><th>模型</th><th>渠道</th><th>阶段</th><th>尝试</th><th>耗时</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr v-for="r in activeRequests" :key="r.id"><td class="mono">{{ r.keyPrefix }}</td><td class="mono">{{ r.model || "—" }}</td><td>{{ r.channel || "—" }}</td><td>{{ r.phase }}</td><td>{{ r.attempts }}</td><td>{{ Math.round(r.elapsedMs / 1000) }}s</td><td><button class="btn btn-sm" @click="cancelRequest(r.id)">取消</button></td></tr>
+            <tr v-if="!activeRequests.length"><td colspan="7" class="empty-cell">当前没有进行中的请求</td></tr>
+          </tbody>
+        </table></div>
+      </div>
+
+      <div v-if="lgw.backendReady" class="card">
         <div class="card-title">
           请求流水
           <span class="right">{{ fmtInt(lgw.logsTotal) }} 条 · 第 {{ page }}/{{ totalPages }} 页</span>
@@ -151,7 +192,7 @@ onMounted(async () => {
             <thead>
               <tr>
                 <th>时间</th><th>密钥</th><th>渠道</th><th>模型</th>
-                <th>状态</th><th>耗时</th><th>输入</th><th>输出</th><th>敏</th>
+                <th>尝试</th><th>状态</th><th>耗时</th><th>输入</th><th>输出</th><th>敏</th>
               </tr>
             </thead>
             <tbody>
@@ -160,6 +201,7 @@ onMounted(async () => {
                 <td class="mono">{{ r.apiKeyPrefix || "-" }}</td>
                 <td>{{ r.channel || "-" }}</td>
                 <td class="mono">{{ r.model || "-" }}</td>
+                <td><el-tooltip :content="attemptDetails(r)" :disabled="!r.attempts?.length"><span class="mono">{{ r.attempts?.length || 0 }}</span></el-tooltip></td>
                 <td>
                   <el-tooltip :content="r.errCode || ''" :disabled="!r.errCode" placement="top">
                     <span class="tag" :class="statusTagCls(r.status)">{{ statusText(r.status) }}</span>
@@ -178,7 +220,7 @@ onMounted(async () => {
                 </td>
               </tr>
               <tr v-if="!lgw.logs.length">
-                <td colspan="9" class="empty-cell">暂无请求记录 —— 网关启动后，客户端调用会在这里逐条出现</td>
+                <td colspan="10" class="empty-cell">暂无请求记录 —— 网关启动后，客户端调用会在这里逐条出现</td>
               </tr>
             </tbody>
           </table>

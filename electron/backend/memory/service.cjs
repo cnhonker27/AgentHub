@@ -222,17 +222,14 @@ class MemoryService {
    * 待确认建议的自动按推荐确认（review.autoConfirm* 三开关，默认关）：
    * 开启后对应建议在入队时立即按推荐执行——语义与人工裁决完全一致（supersede=确认失效、
    * classify=按 slug 归入/无推荐则忽略、dedup=采纳新记忆并标旧失效），绝不物理删除。
+   * 开关即全自动：不再按置信度筛选，任何置信度的建议都按推荐处理（review.autoConfirmMinConfidence
+   * 已降级为人工队列的「低置信提示」阈值，只影响界面标红，不拦截自动执行）。
    * 执行失败时建议保留 pending，回落到收件箱由人工处理。产出点在 reviewAdd 之后调用本方法。
-   * 置信闸门（review.autoConfirmMinConfidence）：建议置信度（dedup/supersede 用 confidence、
-   * classify 用匹配分 score）低于下限时同样回落人工队列；未携带置信度视为完全可信（兼容历史建议）。
    */
   autoConfirmReview(kind, queueId, payload) {
     if (!queueId) return;
     const cfg = this.flat();
     try {
-      const conf = payload?.confidence ?? payload?.score;
-      const minConf = Number(cfg["review.autoConfirmMinConfidence"]);
-      if (Number.isFinite(minConf) && conf != null && Number(conf) < minConf) return;
       if (kind === "supersede" && cfg["review.autoConfirmSupersede"]) {
         void this.markSuperseded(payload.oldId, payload.newId, payload.reason || "自动按推荐确认失效")
           .then((r) => { if (r && r.ok) this.index.reviewResolve(queueId, "confirmed"); })
@@ -2168,7 +2165,10 @@ class MemoryService {
   // 三级披露第一级：画像 + 当前项目汇总（≤ coreMaxTokens）
   coreMemory(opts = {}) {
     const cfg = this.flat();
-    const maxTokens = cfg["agents.coreMaxTokens"] || 800;
+    const requested = Number(opts.maxTokens);
+    const maxTokens = Number.isFinite(requested) && requested > 0
+      ? Math.min(Math.max(Math.round(requested), 200), 4000)
+      : (cfg["agents.coreMaxTokens"] || 800);
     const parts = [];
     const profileFiles = ["persona", "preferences", "tech", "habits"];
     for (const name of profileFiles) {
@@ -2193,7 +2193,18 @@ class MemoryService {
       for (const r of rows) lines.push(`- ${r.title}：${r.summary || ""}`.slice(0, 200));
     }
     const text = lines.join("\n").trim() || "（尚未生成画像与深层记忆，可先积累 L1 记忆后蒸馏）";
-    return { text: truncateByTokens(text, maxTokens), tokens: estimateTokens(text) };
+    const cut = truncateByTokens(text, maxTokens);
+    return {
+      text: cut.text,
+      // tokens 表示**本次返回**的 token 数（旧实现给的是截断前全文估算，调用方无从判断内容是否被丢弃）。
+      tokens: cut.returnedTokens,
+      returnedTokens: cut.returnedTokens,
+      totalTokens: cut.totalTokens,
+      omittedTokens: cut.omittedTokens,
+      omittedLines: cut.omittedLines,
+      truncated: cut.truncated,
+      maxTokens,
+    };
   }
 
   // 三级披露第二级：全局索引概览（≤ digestMaxLines 行）
@@ -2263,7 +2274,19 @@ class MemoryService {
       lines.push(`    id=${r.id} project=${r.project || "-"} agent=${r.agent} date=${isoDate(r.created)}`);
     }
     const text = truncateByTokens(lines.join("\n"), maxTokens);
-    return { text, count: res.results.length, total: res.total, tookMs: res.tookMs, ids: res.results.map((r) => r.id) };
+    return {
+      text: text.text,
+      count: res.results.length,
+      total: res.total,
+      tookMs: res.tookMs,
+      ids: res.results.map((r) => r.id),
+      tokens: text.returnedTokens,
+      returnedTokens: text.returnedTokens,
+      totalTokens: text.totalTokens,
+      omittedTokens: text.omittedTokens,
+      omittedLines: text.omittedLines,
+      truncated: text.truncated,
+    };
   }
 
   getMany(ids, maxChars) {
@@ -2390,11 +2413,70 @@ function renderTimeline(chain) {
   }).join("\n");
 }
 
+/**
+ * 按 token 预算裁剪，且只在**完整行边界**收口。
+ * 返回可观测结果：调用方能区分「本次返回多少 token」与「原文总共多少 token、丢了多少」。
+ * 单行本身超预算时（例如一整段长文），退化为在句/分句边界截断该行并加省略号——
+ * 这是唯一无法保住整行的情况，但也不会切在词语/列表项中间。
+ */
+const TRUNC_MARKER = "\n…（超出 token 上限已截断，可用 memory_search / memory_digest 续取）";
+
 function truncateByTokens(text, maxTokens) {
-  if (estimateTokens(text) <= maxTokens) return text;
-  // CJK≈1 token/字、ASCII≈0.25：按字符预算折算后裁剪
-  const budgetChars = Math.max(200, Math.floor(maxTokens / 0.7));
-  return text.slice(0, budgetChars) + "\n…（超出 token 上限已截断）";
+  const full = String(text == null ? "" : text);
+  const totalTokens = estimateTokens(full);
+  const budget = Math.max(1, Math.floor(Number(maxTokens) || 0));
+  if (totalTokens <= budget) {
+    return { text: full, truncated: false, totalTokens, returnedTokens: totalTokens, omittedTokens: 0, omittedLines: 0 };
+  }
+  const markerTokens = estimateTokens(TRUNC_MARKER);
+  const contentBudget = Math.max(1, budget - markerTokens);
+  const lines = full.split("\n");
+  const kept = [];
+  let truncated = false;
+  for (let i = 0; i < lines.length; i++) {
+    const candidate = kept.length ? `${kept.join("\n")}\n${lines[i]}` : lines[i];
+    if (estimateTokens(candidate) <= contentBudget) {
+      kept.push(lines[i]);
+      continue;
+    }
+    // 第一行就放不下：在预算内退到最近的句子/分句边界，避免整段丢失
+    if (!kept.length) {
+      const rowBudget = Math.max(1, contentBudget - 1);
+      const clipped = clipLineToBudget(lines[i], rowBudget);
+      if (clipped) kept.push(`${clipped}…`);
+    }
+    truncated = true;
+    break;
+  }
+  const body = kept.join("\n");
+  const omittedLines = Math.max(0, lines.length - kept.length);
+  const textOut = `${body}${TRUNC_MARKER}`;
+  const returnedTokens = estimateTokens(textOut);
+  return {
+    text: textOut,
+    truncated,
+    totalTokens,
+    returnedTokens,
+    omittedTokens: Math.max(0, totalTokens - returnedTokens),
+    omittedLines,
+  };
+}
+
+/** 找「估算 token 不超过 budget」的最大字符前缀，再回退到句读/空格边界 */
+function clipLineToBudget(line, budget) {
+  const s = String(line || "");
+  if (!s) return "";
+  let lo = 0, hi = s.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (estimateTokens(s.slice(0, mid)) <= budget) lo = mid;
+    else hi = mid - 1;
+  }
+  const prefix = s.slice(0, lo);
+  if (!prefix) return "";
+  const boundary = Math.max(prefix.lastIndexOf("。"), prefix.lastIndexOf("！"), prefix.lastIndexOf("？"),
+    prefix.lastIndexOf("；"), prefix.lastIndexOf("，"), prefix.lastIndexOf(" "));
+  return boundary >= Math.floor(prefix.length * 0.6) ? prefix.slice(0, boundary + 1) : prefix.trimEnd();
 }
 
 function firstLine(text) {

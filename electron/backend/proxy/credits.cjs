@@ -13,7 +13,7 @@
 "use strict";
 const store = require("./store.cjs");
 const pool = require("./pool.cjs");
-const adapters = require("./adapters.cjs");
+const adapters = require("./management-adapters.cjs");
 const util = require("./util.cjs");
 const events = require("./events.cjs");
 // 休眠唤醒守卫：唤醒后静默窗内跳过本轮（见 backend/wakeGuard.cjs）
@@ -34,6 +34,34 @@ function noCreditsMessage(channel) {
   return store.isBuiltinChannel(channel) ? "该渠道不提供额度查询（官方无对外余额接口）" : "该渠道为 API Key 直连，无余额概念";
 }
 
+/** Async management results must never overwrite a replacement login or deleted account. */
+function accountGuard(acc) {
+  const initial = store.getAccount(acc.id);
+  const fingerprint = row => JSON.stringify([row?.channel, row?.uid, row?.token_enc, row?.refresh_enc, row?.meta, row?.token_at]);
+  const original = fingerprint(initial);
+  return (rotated) => {
+    const live = store.getAccount(acc.id);
+    if (!initial || !live || live.channel !== initial.channel || live.uid !== initial.uid || live.status === "disabled") {
+      throw Object.assign(new Error("账号已删除、停用或变更，请重试"), { code: "ACCOUNT_CHANGED" });
+    }
+    if (fingerprint(live) === original) return live;
+    // A concurrent waiter on the SAME rotation may already have persisted it.
+    const saved = store.accountSecrets(live), previous = store.accountSecrets(initial);
+    if (rotated?.ok && saved.token === rotated.token && saved.refreshToken === rotated.refreshToken
+      && JSON.stringify(saved.meta) === JSON.stringify(previous.meta)) return live;
+    throw Object.assign(new Error("账号登录态已变化，已忽略旧请求结果"), { code: "ACCOUNT_CHANGED" });
+  };
+}
+
+async function refreshSecrets(acc, secrets) {
+  const guard = accountGuard(acc);
+  guard();
+  const result = await adapters.refreshTokenLocked(acc.channel, acc, secrets).catch(() => ({ ok: false }));
+  guard(result);
+  if (result.ok && !result.noPersist) store.updateAccount(acc.id, { token: result.token, refreshToken: result.refreshToken, ...(result.meta && typeof result.meta === "object" ? { meta: result.meta } : {}) });
+  return result;
+}
+
 /** 临期预刷新（RefreshSkew 语义）：JWT 到期前窗口内先刷 token，返回可直接用于
  *  本次/下次请求的 secrets（刷新失败原样返回，绝不因刷新失败把调用方拖进错误分支）。
  *
@@ -48,27 +76,35 @@ async function ensureFreshSecrets(acc, secrets) {
   const adapter = adapters.get(acc && acc.channel);
   if (!adapter || !secrets || !secrets.token || !secrets.refreshToken) return secrets;
   const windowSec = Number(adapter.refreshWindowSec) > 0 ? Number(adapter.refreshWindowSec) : 86400;
+  // 优先用适配器自报的到期时刻（MiniMax 的 mmoat_ 不是 JWT、没有 exp，只看 JWT 会永远不触发刷新，
+  // 账号会在 12 小时后突然集体 401）。没有 tokenExpiresAt() 的渠道 100% 回落到 JWT 口径，行为不变。
+  const selfExp = typeof adapter.tokenExpiresAt === "function" ? Number(adapter.tokenExpiresAt(secrets)) || 0 : 0;
   const dec = util.jwtDecode(secrets.token);
-  if (!(dec.exp && dec.exp * 1000 < Date.now() + windowSec * 1000)) return secrets;
-  const rr = await adapters.refreshTokenLocked(acc.channel, acc, secrets).catch(() => ({ ok: false }));
+  const exp = selfExp || (dec.exp || 0) * 1000;
+  if (!(exp && exp < Date.now() + windowSec * 1000)) return secrets;
+  const rr = await refreshSecrets(acc, secrets);
   if (!rr.ok) return secrets;
-  if (!rr.noPersist) store.updateAccount(acc.id, { token: rr.token, refreshToken: rr.refreshToken });
-  return { ...secrets, token: rr.token, refreshToken: rr.refreshToken };
+  // meta 必须一起带出：MiniMax 的 expiresAtMs 是 tokenExpiresAt() 的唯一数据源，
+  // 丢掉它会让同一条调用链里后续的「是否临期」判断继续用旧值（刚刷完又被判过期）。
+  return { ...secrets, token: rr.token, refreshToken: rr.refreshToken, ...(rr.meta && typeof rr.meta === "object" ? { meta: rr.meta } : {}) };
 }
 
 /** 单账号额度刷新：成功回写余额缓存 + credits_history 日快照 */
 async function refreshAccount(id) {
-  const acc = store.getAccount(id);
+  let acc = store.getAccount(id);
   if (!acc) throw new Error("账号不存在");
   const adapter = adapters.get(acc.channel);
   if (!adapter) throw new Error(`未知渠道 ${acc.channel}`);
   if (!creditsCapable(acc.channel)) throw new Error(noCreditsMessage(acc.channel));
   let secrets = store.accountSecrets(acc);
   if (!secrets.token) throw new Error("该账号没有凭据");
-
-  let r = await adapter.queryCredits(acc, secrets).catch((e) => ({ error: String((e && e.message) || e) }));
+  acc = { ...acc, meta: secrets.meta || {} };
   // 临期预刷新（RefreshSkew 语义）：JWT 到期前窗口内先刷 token，避免下次对话首请求吃 401
   secrets = await ensureFreshSecrets(acc, secrets);
+  let guard = accountGuard(acc);
+  guard();
+  let r = await adapter.queryCredits(acc, secrets).catch((e) => ({ error: String((e && e.message) || e) }));
+  guard();
   if (r.unavailable) {
     // 积分服务对该账号不开放（实测 Trae pay/ug 域 code 1001，但同一 token 对话域正常）：
     // 不是凭证失效，账号保持可用，余额不动，只把原因带回去展示。
@@ -88,14 +124,15 @@ async function refreshAccount(id) {
   }
   if (r.authError) {
     // 401 → 先刷新凭证重试一次（single-flight，与 chat 链路共享互斥）
-    const rr = await adapters.refreshTokenLocked(acc.channel, acc, secrets).catch(() => ({ ok: false }));
+    const rr = await refreshSecrets(acc, secrets);
     if (rr.ok) {
-      if (!rr.noPersist) store.updateAccount(acc.id, { token: rr.token, refreshToken: rr.refreshToken });
       // 换新凭据时保留 meta（Cookie/deviceId 等会话元数据）：只重建 token/refreshToken 会把
       // 它们丢掉，与 ensureFreshSecrets / 签到链路的 `{...secrets, ...}` 口径分叉——
       // 凡 queryCredits 里读 secrets.meta 的渠道（如魔搭的 Cookie 族）都会在 401 重试那次静默降级
       secrets = { ...secrets, token: rr.token, refreshToken: rr.refreshToken };
+      guard = accountGuard(acc);
       r = await adapter.queryCredits(acc, secrets).catch((e) => ({ error: String((e && e.message) || e) }));
+      guard();
     }
     if (r.authError) {
       pool.coolAccount(acc.id, "relogin");
@@ -111,7 +148,19 @@ async function refreshAccount(id) {
   // 逐包明细：adapter 返回 packages 时落库，并以包集为单一事实源派生账号级 credits/expiresAt——
   // 剩余 = Σ未过期包剩余，最近到期 = min(剩余>0 且未过期 的包到期)。返回里没有 packages 的渠道
   // （上游接口就不拆包）走原口径，账号级聚合值不受影响。
-  let credits = r.credits;
+  // adapter 余额字段归一：契约是数字 `credits`，但历史适配器有两种偏差——
+  //   · Loomy 把 `credits` 用作「逐钱包明细数组」，真正的聚合余额在 `available`；
+  //   · CodeArts 只给 `available`，没有 `credits`。
+  // 直接 Number(array) 会得到 NaN → 落库 0，界面表现为「明明有积分却一直是零」（#180）。
+  // 先认数字 credits，再认 available；两者都读不出时保留账号现有余额，不把上一次的有效读数清成 0。
+  const numericCredits = (v) => {
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
+    return null;
+  };
+  let credits = numericCredits(r.credits);
+  if (credits == null) credits = numericCredits(r.available);
+  if (credits == null) credits = Number((store.getAccount(acc.id) || acc).credits) || 0;
   // adapter 明确返回的 expiresAt（含 0 = 无到期/长期有效）要信；只有字段缺省（undefined/null）
   // 才沿用库里旧值。0 被 || 当成缺省会把旧到期时间永久回填——AutoClaw 积分无到期、接口恒回 0，
   // 登录写入的 token 有效期（约 24h）因此清不掉，被 pickAccount 判「余额已到期」锁死（#152）
@@ -152,6 +201,20 @@ async function refreshAccount(id) {
     expiresAt: fromPackages ? expiresAt : hasExpiry ? expiresAt : cur.expires_at,
     ...(revive ? { status: "online", coolUntil: 0, coolReason: "" } : {}),
   });
+  // 订阅 plan 窗口（可选能力）：与余额同一轮采集，失败只保留上次快照、不影响余额落库。
+  // 不写 unknown：查询失败是「这轮没问到」，不是「上游说没有」——写 unknown 会把已知额度刷成未知。
+  if (typeof adapter.queryPlan === "function") {
+    try {
+      const p = await adapter.queryPlan(acc, secrets);
+      if (p && p.ok) {
+        // 窗口用尽但账户还有积分 → credit（官方在窗口满后自动转扣积分，见 docs 4.3）
+        const state = p.state === "exhausted" && (credits > 0 || credits === -1) ? "credit" : p.state;
+        store.setPlanSnapshot(acc.id, acc.channel, state, p.windows);
+      }
+    } catch {
+      /* 增强列：本轮取不到就沿用上次快照，绝不因 plan 失败影响余额刷新 */
+    }
+  }
   store.snapshotCredits(acc.channel, acc.id, credits, expiresAt || 0);
   return { id: acc.id, credits, expiresAt: expiresAt || 0 };
 }
@@ -262,4 +325,4 @@ function stopScheduler() {
   timer = null;
 }
 
-module.exports = { refreshAccount, refreshChannel, refreshAll, startScheduler, stopScheduler, isRefreshing: () => refreshing, ensureFreshSecrets };
+module.exports = { refreshAccount, refreshChannel, refreshAll, startScheduler, stopScheduler, isRefreshing: () => refreshing, ensureFreshSecrets, refreshSecrets };

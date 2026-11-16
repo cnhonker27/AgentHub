@@ -28,6 +28,7 @@ const watch = require("./watch.cjs");
 const proxy = require("./proxy/index.cjs");
 const memory = require("./memory/index.cjs");
 const pluginHost = require("./plugin-host.cjs");
+const pluginUpdater = require("./plugin-updater.cjs");
 const pluginBridge = require("./plugin-bridge.cjs");
 
 // 渲染层拿到的密码一律是掩码；保存/测试连接收到精确掩码时回填磁盘真值
@@ -315,6 +316,9 @@ function register(ctx) {
   // 不做 treeHash（get_overview 的全量哈希太重，侧栏每次切模块都算会把 UI 拖卡）
   ipcMain.handle("skills_side_stats", handle(() => {
     const c = C();
+    // 台账可能因历史 WebDAV 合并掉账：以磁盘为准补一次，侧栏「已挂载」计数才不会长期是 0
+    // （幂等、无差异不写盘；WebDAV 同步进行中内部会跳过）
+    syncer.reconcileMounts(c);
     const m = hub.loadManifest();
     const conflicts = syncer.loadConflicts().items.filter((x) => !x.resolved).length;
     const targets = adapter.resolveScanTargets(c);
@@ -435,7 +439,17 @@ function register(ctx) {
         manifest: entry ? {
           ...entry,
           sources: entry.sources || [],
-          mounts: entry.mounts || [],
+          // 挂载是否仍然有效要现场验（链接在被手动删/改指后台账还会留着旧记录）：
+          // copy 挂载的有效性是「真实目录还在」，链接类则要「仍指向中央真身」
+          mounts: (entry.mounts || []).map((mt) => {
+            let valid = false;
+            try {
+              valid = mt.type === "copy"
+                ? fs.existsSync(mt.path) && !mounter.isLink(mt.path)
+                : mounter.isLink(mt.path) && mounter.pointsTo(mt.path, dir) && fs.existsSync(mt.path);
+            } catch { valid = false; }
+            return { ...mt, valid };
+          }),
           mergeHistory: entry.mergeHistory || [],
         } : null,
         dir,
@@ -627,6 +641,10 @@ function register(ctx) {
       return out;
     } catch (err) { return { ok: false, message: String((err && err.message) || err) }; }
   });
+  ipcMain.handle("plugin_authorize", async (_e, args) => {
+    try { return await pluginHost.authorize(String(args?.id || ""), { permissions: args?.permissions, channels: args?.channels }); }
+    catch (err) { return { ok: false, message: String(err?.message || err) }; }
+  });
   ipcMain.handle("plugin_open", async (_e, args) => {
     try { return await pluginHost.open(String((args && args.id) || "")); }
     catch (err) { return { ok: false, message: String((err && err.message) || err) }; }
@@ -650,6 +668,22 @@ function register(ctx) {
   ipcMain.handle("plugin_sync_now", async (_e, args) => {
     try { return await pluginBridge.pushNow(String((args && args.id) || "")); }
     catch (err) { return { ok: false, message: String((err && err.message) || err) }; }
+  });
+  // 官方插件更新：检查、下载、校验、安装。开关住在 config.plugins，跟着 save_config 走。
+  ipcMain.handle("plugin_update_status", () => {
+    try { return { ok: true, status: pluginUpdater.getStatus() }; }
+    catch (err) { return { ok: false, message: String((err && err.message) || err) }; }
+  });
+  ipcMain.handle("plugin_update_check", async () => {
+    try { return { ok: true, status: await pluginUpdater.check({ manual: true }) }; }
+    catch (err) { return { ok: false, message: String((err && err.message) || err) }; }
+  });
+  ipcMain.handle("plugin_update_apply", async () => {
+    try {
+      const out = await pluginUpdater.apply();
+      if (out.results?.some(row => row.ok)) pluginBridge.schedule("force").catch(() => { /* 安装后首推失败由轮询补 */ });
+      return out;
+    } catch (err) { return { ok: false, message: String((err && err.message) || err) }; }
   });
 }
 
