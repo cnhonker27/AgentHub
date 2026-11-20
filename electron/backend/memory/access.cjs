@@ -10,8 +10,8 @@
  */
 /**
  * AgentHub · 记忆中枢（Memory Hub）
- * Copyright (c) 2026 沐晖 (HUIdada1)
- * https://github.com/HUIdada1/AgentHub
+ * Copyright (c) 2026 沐晖 (MUHUIX)
+ * https://github.com/MUHUIX/AgentHub
  * 本文件为开源项目 AgentHub 的组成部分，作者保留署名权；依据开源协议使用时禁止删除本声明。
  */
 
@@ -114,6 +114,41 @@ class AgentAccess {
     const failed = steps.find((s) => !s.ok);
     if (failed) return { ok: false, message: failed.message || "MCP 配置写入失败", steps };
     return { ok: true, command: cmd, steps, configPath: adapter.configPath, instructionPath: adapter.instruction ? adapter.instruction.path : "" };
+  }
+
+  /** 存量收敛：把旧版写入的「MCP 宿主＝主程序 exe」改成独立命名的宿主。
+   *  只动我们自己的受控块，且仅当块里 command 仍是主程序 exe 时才重写——
+   *  用户手改成别的命令不碰。应用升级后主程序换了文件，宿主链接会被重建，
+   *  但配置里指的还是旧名字，不收敛的话下次升级仍会被 NSIS 的映像名判定挡住。 */
+  convergeHost(cfgAgents) {
+    const changed = [];
+    try {
+      for (const adapter of agents.list(cfgAgents)) {
+        if (adapter.format !== "yml-cordis-patch") continue;
+        const desired = verify.connectionCommand({
+          appPath: this.appPath,
+          resourcesPath: this.resourcesPath,
+          agentId: adapter.id,
+        }).command;
+        if (!desired) continue;
+        const current = inject.cordisManagedCommand(adapter);
+        if (current) {
+          if (current === desired) continue;
+          // 只收敛「宿主就是主程序」这一种旧形态，其余差异留给用户
+          if (!/AgentHub\.exe$/i.test(current)) continue;
+          const r = this.injectOne(adapter.id, cfgAgents);
+          changed.push({ id: adapter.id, ok: !!r.ok, from: current, to: desired, message: r.message || "" });
+          continue;
+        }
+        // 受控块之前的旧版插入块：同样指为主程序，只改它的 command 一行
+        const legacy = inject.legacyCordisCommand(adapter);
+        if (!legacy || legacy === desired) continue;
+        if (!/AgentHub\.exe$/i.test(legacy)) continue;
+        const r = inject.rewriteLegacyCordisCommand(adapter, desired);
+        changed.push({ id: adapter.id, ok: !!r.ok, from: legacy, to: desired, message: r.message || r.action || "" });
+      }
+    } catch { /* 收敛失败不影响启动 */ }
+    return changed;
   }
 
   uninjectOne(id, cfgAgents) {
